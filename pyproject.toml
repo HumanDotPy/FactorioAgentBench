@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "factorio-learning-environment"
 version = "0.4.3"
-description = "Factorio Learning Environment"
+description = "Persistent adaptive Factorio agent benchmark built on FLE"
 authors = [
     {name = "Jack Hopkins", email = "noreply@github.com"},
     {name = "Mart Bakler", email = "noreply@github.com"},
@@ -147,8 +147,9 @@ markers = [
 ]
 
 [project.urls]
-homepage = "https://jackhopkins.github.io/factorio-learning-environment/"
-leaderboard = "https://jackhopkins.github.io/factorio-learning-environment/leaderboard/"
+repository = "https://github.com/HumanDotPy/FactorioAgentBench"
+upstream = "https://github.com/JackHopkins/factorio-learning-environment"
+visualization = "https://github.com/HumanDotPy/RolloutPlaneViz"
 
 [[tool.uv.index]]
 name = "pypi"

@@ -1,10 +1,10 @@
-<h1 align="center">Factorio Learning Environment</h1>
+<h1 align="center">FactorioAgentBench</h1>
 <p align="center">
-  <a href="https://jackhopkins.github.io/factorio-learning-environment/leaderboard">Leaderboard</a> | <a href="https://arxiv.org/abs/2503.09617">Paper</a> | <a href="https://jackhopkins.github.io/factorio-learning-environment/versions/0.3.0.html">Website</a> | <a href="https://jackhopkins.github.io/factorio-learning-environment/sphinx/build/html/">Documentation</a> | <a href="https://discord.gg/zKaV2skewa">Discord (#factorio-learning-env)</a>
+  <a href="https://github.com/HumanDotPy/FactorioAgentBench">Repository</a> | <a href="https://github.com/JackHopkins/factorio-learning-environment">Upstream FLE</a> | <a href="https://github.com/HumanDotPy/RolloutPlaneViz">RolloutPlane Viz</a>
 </p>
 
 <p align="center">
-An open source framework for developing and evaluating LLM agents in the game of <a href="https://factorio.com/">Factorio</a>.
+A persistent, adaptive benchmark for evaluating and training LLM agents in <a href="https://factorio.com/">Factorio</a>.
 </p>
 
 <p align="center">
@@ -12,6 +12,19 @@ An open source framework for developing and evaluating LLM agents in the game of
 <img src="https://github.com/JackHopkins/factorio-learning-environment/raw/main/docs/assets/videos/compressed_red_science.webp" width="485" height="364" controls/>
 </p>
 <p align="center"><em>Claude Opus 4.1 Plays Factorio</em></p>
+
+## Project lineage
+
+FactorioAgentBench is an independent research repository derived from the
+[Factorio Learning Environment](https://github.com/JackHopkins/factorio-learning-environment)
+(FLE). It preserves FLE's Git history, license, authorship, runtime, and Python
+namespace while developing a separate benchmark product: persistent agent
+sessions, adaptive customer contracts, capability progression, autonomous
+throughput audits, harness integrations, and evaluation observability.
+
+This repository is not an upstream FLE release. The existing
+`factorio-learning-environment` distribution name is retained temporarily for
+runtime compatibility and must not be used to publish over the upstream package.
 
 ## Quick Links
 
@@ -66,9 +79,9 @@ Agents interact with **FLE** by code synthesis through a **REPL** (Read-Eval-Pri
 2. **Action**: The agent generates a Python program to perform their desired action.
 3. **Feedback**: The environment executes the program, assigns variables, add classes/functions to the namespace, and provides an output stream.
 
-## WASLab extension stack
+## Benchmark stack
 
-This fork extends upstream FLE with a sealed, externally-scored benchmark and
+This project extends FLE with a sealed, externally-scored benchmark and
 training substrate. The REPL workflow above is unchanged; new work targets the
 `factorio-envd` lease service and its native verifier:
 
@@ -109,6 +122,8 @@ workbench for it. Both stay out of the rollout hot path.
 
 ## Contributing
 
-Join our team and contribute to one of the AI research community's most challenging problems - building open-ended / unsaturateable evals for post-AGI frontier models. If you want to contribute, please read [CONTRIBUTING.md](CONTRIBUTING.md) first.
+Contributions should target the standalone FactorioAgentBench roadmap. Changes
+intended for the general-purpose FLE runtime should be proposed to upstream FLE
+instead. Please read [CONTRIBUTING.md](CONTRIBUTING.md) first.
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/JackHopkins/factorio-learning-environment)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/HumanDotPy/FactorioAgentBench)
