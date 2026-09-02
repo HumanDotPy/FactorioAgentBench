@@ -39,22 +39,29 @@
       </section>
 
       <section class="post-list" aria-label="Posts">
-        <article class="post-row featured-post">
+        <div
+          id="human-feed"
+          class="syndicated-list"
+          data-feed="https://humandotpy.github.io/Blog/feed.json"
+          data-project="factorio-agent-bench"
+        >
+        <article class="post-row featured-post" data-syndicated-fallback>
           <div class="post-meta">
-            <span>Essay 01</span>
+            <span>From HumanDotPy</span>
             <time datetime="2026-09-02">September 2, 2026</time>
           </div>
           <div>
-            <p class="post-status">Working note</p>
-            <h2><a href="ideal-rl-environment/">What Is the Ideal RL Environment?</a></h2>
+            <p class="post-status">General essay</p>
+            <h2><a href="https://humandotpy.github.io/Blog/essays/2026-09-02-what-is-the-ideal-rl-environment/">What Is the Ideal RL Environment?</a></h2>
             <p>
               Verifiable rewards are not the same as binary rewards. The more useful
               distinction is whether a rollout, state, action, or trajectory can be
               evaluated externally against an objective criterion.
             </p>
-            <a class="text-link" href="ideal-rl-environment/">Read the essay</a>
+            <a class="text-link" href="https://humandotpy.github.io/Blog/essays/2026-09-02-what-is-the-ideal-rl-environment/">Read at HumanDotPy</a>
           </div>
         </article>
+        </div>
 
         <article class="post-row field-note">
           <div class="post-meta">
@@ -79,5 +86,6 @@
       <span>FactorioAgentBench · Research notes</span>
       <a href="https://github.com/HumanDotPy/FactorioAgentBench">Source and documentation</a>
     </footer>
+    <script src="syndication.js" defer></script>
   </body>
 </html>

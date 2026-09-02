@@ -58,6 +58,10 @@
   border-top: 1px solid #b8bdb3;
 }
 
+.syndicated-list {
+  display: contents;
+}
+
 .post-row {
   display: grid;
   grid-template-columns: 220px minmax(0, 720px);

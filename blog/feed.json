@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "title": "FactorioAgentBench writing",
+  "home_url": "https://humandotpy.github.io/FactorioAgentBench/blog/",
+  "items": [
+    {
+      "id": "field-note:iteration-01",
+      "kind": "Field note",
+      "title": "Production happened. The factory did not.",
+      "description": "The first persistent evaluation produced circuits without constructing the belts, assemblers, and connected topology required for sustainable end-to-end production.",
+      "date": "2026-08-31T00:00:00.000Z",
+      "url": "https://humandotpy.github.io/FactorioAgentBench/#iteration",
+      "projects": ["factorio-agent-bench"]
+    }
+  ]
+}
