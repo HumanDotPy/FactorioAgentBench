@@ -8,6 +8,9 @@ composition, and provider-specific programmatic tool-calling features.
 
 ## Direct MCP calls
 
+Operator-only [active-run profiling](runtime-profiling.md) can measure the
+HTTP, runtime, and MCP stages without changing the agent tool contract.
+
 The lease-bound MCP adapter exposes mutation, live-state, immutable-reference,
 durable-result, and optional session-memory tools. The two world-action tools are:
 

@@ -4,9 +4,15 @@ from typing import Tuple, Union
 from fle.env.entities import Position, Entity
 from fle.env.namespace import FactorioNamespace
 from fle.env.tools.controller import Controller
+from fle.commons.profiling import timed
 
 
 class Tool(Controller):
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if "__call__" in cls.__dict__:
+            cls.__call__ = timed("tool." + cls.__name__)(cls.__call__)
+
     def __init__(
         self,
         lua_script_manager: "FactorioLuaScriptManager",  # noqa

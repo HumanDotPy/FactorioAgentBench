@@ -22,6 +22,15 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from fle.commons.profiling import (
+    Trace,
+    activate,
+    accept_server_trace,
+    current_trace,
+    persist_trace,
+    span,
+    timed,
+)
 from fle.envd.knowledge import ApiReference, GameDataReference, load_game_data
 
 # Keep the adapter on the current MCP revision while accepting the revisions
@@ -85,6 +94,7 @@ def _execution_artifact_id(result: dict[str, Any]) -> str:
     return f"execution-{sequence}-{digest[:16]}"
 
 
+@timed("mcp.execution_artifact")
 def _persist_execution_artifact(result: dict[str, Any]) -> dict[str, Any]:
     serialized = json.dumps(result, sort_keys=True, separators=(",", ":"), default=str)
     digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
@@ -181,6 +191,22 @@ def _repetition_error(count: int) -> str:
 
 
 def _envd(method: str, path: str, payload: dict | None = None) -> dict:
+    # Fixed stage names: never retain arbitrary path arguments or query values.
+    endpoint = path.split("?", 1)[0].rsplit("/", 1)[-1]
+    if endpoint not in {
+        "execute",
+        "observe",
+        "checkpoints",
+        "camera",
+        "render",
+        "query",
+    }:
+        endpoint = "other"
+    with span("http." + endpoint):
+        return _envd_request(method, path, payload)
+
+
+def _envd_request(method: str, path: str, payload: dict | None = None) -> dict:
     url = os.environ["ENVD_URL"].rstrip("/") + path
     data = json.dumps(payload).encode() if payload is not None else None
     request = urllib.request.Request(
@@ -189,6 +215,9 @@ def _envd(method: str, path: str, payload: dict | None = None) -> dict:
         method=method,
         headers={"Content-Type": "application/json"},
     )
+    profile = current_trace()
+    if profile is not None:
+        request.add_header("X-Factorio-Call-Id", profile.trace_id)
     attempts = (
         2
         if method == "POST"
@@ -200,9 +229,11 @@ def _envd(method: str, path: str, payload: dict | None = None) -> dict:
     for attempt in range(attempts):
         try:
             with urllib.request.urlopen(request, timeout=600) as response:
+                accept_server_trace(getattr(response, "headers", None))
                 result = json.loads(response.read().decode("utf-8"))
             break
         except urllib.error.HTTPError as exc:
+            accept_server_trace(exc.headers)
             body = exc.read().decode("utf-8", errors="replace")
             detail = body
             try:
@@ -1809,6 +1840,7 @@ def _render_factory_call(arguments: dict[str, object]) -> dict[str, Any]:
     return payload
 
 
+@timed("mcp.camera")
 def _camera_call(settings: dict[str, Any] | None = None) -> dict[str, Any]:
     lease_id = os.environ.get("LEASE_ID", "")
     payload = _envd(
@@ -1857,6 +1889,29 @@ def _negotiate_protocol_version(requested: object) -> str:
 
 
 def _call_tool(
+    name: str,
+    arguments: dict,
+    *,
+    request_id: object | None = None,
+) -> tuple[str | dict[str, Any], bool]:
+    directory = os.environ.get("FACTORIO_TOOL_ARTIFACT_DIR", "").strip()
+    if not directory:
+        return _call_tool_impl(name, arguments, request_id=request_id)
+    # Collect a tiny local envelope before the server tells us whether this
+    # request was sampled. Disabled runs do no profiling I/O or extra HTTP.
+    operation = name if any(tool["name"] == name for tool in TOOLS) else "unknown"
+    profile = Trace("mcp." + operation)
+    try:
+        with activate(profile):
+            result = _call_tool_impl(name, arguments, request_id=request_id)
+            profile.failed = result[1]
+            return result
+    finally:
+        if profile.server_trace_ids:
+            persist_trace(Path(directory) / "profiling", profile)
+
+
+def _call_tool_impl(
     name: str,
     arguments: dict,
     *,
@@ -1927,9 +1982,7 @@ def _call_tool(
         if name.endswith("factorio_set_camera"):
             return _camera_call(arguments), False
         if name.endswith("factorio_set_realtime"):
-            payload: dict[str, object] = {
-                "enabled": bool(arguments.get("enabled"))
-            }
+            payload: dict[str, object] = {"enabled": bool(arguments.get("enabled"))}
             if arguments.get("speed") is not None:
                 payload["speed"] = arguments["speed"]
             return _bounded_json_text(

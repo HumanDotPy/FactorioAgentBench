@@ -13,6 +13,7 @@ from fle.env.entities import Direction
 from fle.env.lua_manager import LuaScriptManager
 from fle.env.namespace import FactorioNamespace
 from fle.env.utils.rcon import _lua2python
+from fle.commons.profiling import span
 
 COMMAND = "/silent-command"
 
@@ -175,13 +176,15 @@ class Controller:
         parameters = [lua.encode(arg) for arg in args]
         invocation = self.lua_script_manager.action_invocation(self.name, parameters)
         wrapped = self.lua_script_manager.action_command(self.name, parameters, COMMAND)
-        lua_response = self.connection.rcon_client.send_command(wrapped)
+        with span("rcon.action." + self.name):
+            lua_response = self.connection.rcon_client.send_command(wrapped)
 
         # Check for [processing] error from RCON layer
         if self._check_for_processing_error(lua_response):
             raise RconProcessingError("Game engine busy (processing), try again")
 
-        parsed, _ = _lua2python(invocation, lua_response, start=start)
+        with span("lua.decode"):
+            parsed, _ = _lua2python(invocation, lua_response, start=start)
 
         return parsed, lua_response
 

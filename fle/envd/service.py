@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from typing import Any
 
+from fle.commons.profiling import ProfileStore, profiled_lock, timed
 from fle.envd.backend import FactorioWorker
 from fle.envd.errors import (
     CapacityExhausted,
@@ -62,6 +63,7 @@ class _LeaseRecord:
     # Model-managed memory is lease-scoped so it survives MCP subprocess
     # restarts while remaining isolated from every other evaluation session.
     memory: SessionMemory = field(default_factory=SessionMemory)
+    profiling: ProfileStore = field(default_factory=ProfileStore)
 
 
 def _template_view(record: Any) -> dict[str, Any]:
@@ -114,6 +116,7 @@ class EnvironmentService:
         )
         features = dict(self.capabilities.features)
         features["checkpoints"] = checkpoint_capable
+        features["runtime_profiling"] = True
         self.capabilities = self.capabilities.model_copy(update={"features": features})
         if audit_workers:
             features = dict(self.capabilities.features)
@@ -307,9 +310,10 @@ class EnvironmentService:
             ],
         }
 
+    @timed("service.checkpoint")
     def checkpoint(self, lease_id: str, name: str | None = None) -> RuntimeCheckpoint:
         record = self._live_record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             raw_state = record.worker.export_game_state()
             if raw_state is None:
                 raise RuntimeError("Factorio worker could not export game state")
@@ -364,6 +368,16 @@ class EnvironmentService:
     def _renew(self, record: _LeaseRecord) -> None:
         record.lease.expires_at = self._now() + self._lease_ttl
 
+    def profiling(self, lease_id: str) -> ProfileStore:
+        """Operator diagnostics; excluded from observations and resume state."""
+        # Do not reap expired workers here: reaping can wait on a world lock.
+        with self._lock:
+            record = self._leases.get(lease_id)
+        if record is None:
+            raise LeaseNotFound(f"Unknown lease: {lease_id}")
+        return record.profiling
+
+    @timed("service.execute")
     def execute(
         self,
         lease_id: str,
@@ -376,7 +390,7 @@ class EnvironmentService:
             raise ValueError("code must not be empty")
         code_sha256 = sha256(code.encode("utf-8")).hexdigest()
         record = self._record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             if record.released:
                 raise LeaseNotFound(f"Released lease: {lease_id}")
             if request_id is not None:
@@ -530,6 +544,7 @@ class EnvironmentService:
             self._renew(record)
             return result
 
+    @timed("service.observe")
     def observe(
         self,
         lease_id: str,
@@ -538,7 +553,7 @@ class EnvironmentService:
         force_keyframe: bool = False,
     ) -> Observation:
         record = self._record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             if record.released:
                 raise LeaseNotFound(f"Released lease: {lease_id}")
             if cursor is None and not force_keyframe:
@@ -555,6 +570,7 @@ class EnvironmentService:
             self._renew(record)
             return observation
 
+    @timed("service.query_state")
     def query_state(
         self,
         lease_id: str,
@@ -571,7 +587,7 @@ class EnvironmentService:
         """Return bounded public state history from the leased worker."""
 
         record = self._live_record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             query = getattr(record.worker, "query_state", None)
             if query is None:
                 raise NotImplementedError(
@@ -595,7 +611,7 @@ class EnvironmentService:
         self, lease_id: str, *, product: str, quantity: int = 1, depth: int = 2
     ) -> dict[str, Any]:
         record = self._live_record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             result = record.worker.craft_plan(
                 lease_id, product=product, quantity=quantity, depth=depth
             )
@@ -614,21 +630,21 @@ class EnvironmentService:
         """Toggle autonomous simulation between agent interventions."""
 
         record = self._live_record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             result = record.worker.set_realtime(lease_id, enabled=enabled, speed=speed)
             self._renew(record)
             return result
 
     def list_templates(self, lease_id: str) -> dict[str, Any]:
         record = self._live_record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             summaries = record.worker.template_store.list_summaries()
             self._renew(record)
             return {"templates": summaries}
 
     def get_template(self, lease_id: str, name: str) -> dict[str, Any]:
         record = self._live_record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             stored = record.worker.template_store.get(name)
             self._renew(record)
             return _template_view(stored)
@@ -650,7 +666,7 @@ class EnvironmentService:
         """
 
         record = self._live_record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             normalized = validate_parameters(parameters)
             expanded = expand_template(code, normalized, None)
             validate_program(expanded, action_profile=record.lease.task.action_profile)
@@ -665,7 +681,7 @@ class EnvironmentService:
 
     def delete_template(self, lease_id: str, name: str) -> dict[str, Any]:
         record = self._live_record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             deleted = record.worker.template_store.delete(name)
             self._renew(record)
             return {"deleted": bool(deleted), "name": name}
@@ -681,7 +697,7 @@ class EnvironmentService:
         """Expand a stored template and execute it as one intervention."""
 
         record = self._live_record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             expanded, _tick = record.worker.run_template(lease_id, name, arguments)
             return self.execute(
                 lease_id,
@@ -690,6 +706,7 @@ class EnvironmentService:
                 template=name,
             )
 
+    @timed("service.camera")
     def camera(
         self,
         lease_id: str,
@@ -698,13 +715,14 @@ class EnvironmentService:
         include_image: bool = True,
     ) -> dict[str, Any]:
         record = self._live_record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             result = record.worker.camera(
                 lease_id, settings=settings, include_image=include_image
             )
             self._renew(record)
             return result
 
+    @timed("service.render_factory")
     def render_factory(
         self,
         lease_id: str,
@@ -717,7 +735,7 @@ class EnvironmentService:
         """Render one lease under the same lock as other live-state reads."""
 
         record = self._live_record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             result = record.worker.render_factory(
                 lease_id,
                 center_x=center_x,
@@ -739,7 +757,7 @@ class EnvironmentService:
 
         record = self._live_record(lease_id)
         method = "qualify-throughput" if authoritative else "check-throughput"
-        with record.lock:
+        with profiled_lock(record.lock):
             cached_hit, cached = self._replay(record, method, request_id)
             if cached_hit:
                 self._renew(record)
@@ -763,13 +781,13 @@ class EnvironmentService:
         cursor: str | int | None = None,
     ):
         record = self._live_record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             self._renew(record)
             return record.memory.list(prefix=prefix, limit=limit, cursor=cursor)
 
     def memory_read(self, lease_id: str, key: str):
         record = self._live_record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             self._renew(record)
             return record.memory.read(key)
 
@@ -782,7 +800,7 @@ class EnvironmentService:
         expected_revision: int | None = None,
     ):
         record = self._live_record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             result = record.memory.write(
                 key,
                 content,
@@ -799,7 +817,7 @@ class EnvironmentService:
         expected_revision: int | None = None,
     ):
         record = self._live_record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             result = record.memory.delete(
                 key,
                 expected_revision=expected_revision,
@@ -816,7 +834,7 @@ class EnvironmentService:
         cursor: str | int | None = None,
     ):
         record = self._live_record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             self._renew(record)
             return record.memory.search(query, limit=limit, cursor=cursor)
 
@@ -828,13 +846,13 @@ class EnvironmentService:
         cursor: str | int | None = None,
     ):
         record = self._live_record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             self._renew(record)
             return record.memory.trace(limit=limit, cursor=cursor)
 
     def finalize(self, lease_id: str) -> VerificationSnapshot:
         record = self._record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             if record.released:
                 raise LeaseNotFound(f"Released lease: {lease_id}")
             if record.snapshot is not None:
@@ -881,7 +899,7 @@ class EnvironmentService:
                     if cached_hit:
                         return cached
         record = self._live_record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             if record.snapshot is not None:
                 raise LeaseFinalized(f"Lease is already finalized: {lease_id}")
             state = record.worker.begin_contract_epoch(spec)
@@ -914,7 +932,7 @@ class EnvironmentService:
                     if cached_hit and not abandon:
                         return cached
         record = self._live_record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             # A retry can arrive while the first finalize is still running.
             # Recheck after acquiring the worker lock, not only before it.
             if request_id and not abandon:
@@ -946,12 +964,12 @@ class EnvironmentService:
     ):
         """Passive context snapshot for selection; privileged HTTP only."""
         record = self._live_record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             return record.worker.capture_contract_context(session_id, epoch_index)
 
     def get_contract_session_state(self, lease_id: str) -> ContractSessionState:
         record = self._record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             if record.released:
                 raise LeaseNotFound(f"Released lease: {lease_id}")
             state = record.worker.get_contract_session_state()
@@ -969,7 +987,7 @@ class EnvironmentService:
         request_id: str | None = None,
     ) -> ContractSessionSummary:
         record = self._live_record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             if record.session_summary is not None:
                 return record.session_summary
             summary = record.worker.finalize_contract_session()
@@ -981,7 +999,7 @@ class EnvironmentService:
             record = self._leases.pop(lease_id, None)
             if record is None:
                 return False
-        with record.lock:
+        with profiled_lock(record.lock):
             record.released = True
             try:
                 record.worker.release()

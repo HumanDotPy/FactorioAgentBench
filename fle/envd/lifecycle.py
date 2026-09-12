@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from fle.commons.profiling import timed
 from fle.envd.models import (
     DisruptionScheduleSpec,
     LifecycleDecision,
@@ -110,6 +111,7 @@ class CheckpointPool:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    @timed("checkpoint.persist")
     def save(
         self,
         lineage_id: str,
@@ -166,6 +168,7 @@ class CheckpointPool:
         payload = json.loads(path.read_text())
         return payload if isinstance(payload, dict) else None
 
+    @timed("checkpoint.prune")
     def prune(self, lineage_id: str, *, keep: int = 2) -> int:
         """Keep only the newest bounded checkpoint set for a lineage."""
 

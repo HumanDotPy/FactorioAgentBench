@@ -4,6 +4,7 @@ import enum
 import os
 import signal
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from contextvars import copy_context
 import threading
 import time
 from pathlib import Path
@@ -15,6 +16,7 @@ import uuid
 
 from dotenv import load_dotenv
 
+from fle.commons.profiling import timed
 from fle.env.lua_manager import LuaScriptManager
 from fle.env.namespace import FactorioNamespace
 from fle.env.utils.rcon import _lua2python
@@ -56,6 +58,7 @@ class GameControl:
         self.render_message_tool = render_message_tool
         self._reconnect = reconnect
 
+    @timed("rcon.control")
     def _send(self, command: str):
         """Send one control command, reconnecting once after a stale socket."""
 
@@ -455,7 +458,9 @@ class FactorioInstance:
         namespace = self.namespaces[agent_idx]
         namespace._cancel_requested = False
         # Submit the evaluation to the thread pool
-        future = self._executor.submit(namespace.eval_with_timeout, expr)
+        future = self._executor.submit(
+            copy_context().run, namespace.eval_with_timeout, expr
+        )
 
         try:
             # Wait for the result with timeout
@@ -482,6 +487,7 @@ class FactorioInstance:
             # Re-raise any other exceptions
             raise
 
+    @timed("runtime.evaluate")
     def eval(self, expr, agent_idx=0, timeout=60):
         "Evaluate several lines of input, returning the result of the last line with a timeout"
         ctime = time.time()

@@ -14,6 +14,7 @@ from typing import Any
 
 from fle.commons.constants import REWARD_OVERRIDE_KEY
 from fle.commons.models.achievements import ProductionFlows
+from fle.commons.profiling import timed
 from fle.commons.models.game_state import GameState
 from fle.commons.models.research_state import ResearchState, research_state_identity
 from fle.env import FactorioInstance
@@ -66,7 +67,6 @@ from fle.envd.models import (
     OpenContractView,
     PrivilegedTransitionPacket,
     ProgramTemplateSummary,
-    ProgramTemplateView,
     RealtimeState,
     RewardVector,
     StateQualitySnapshot,
@@ -776,6 +776,7 @@ class FLEWorker(FactorioWorker):
 
     # -- telemetry caching ---------------------------------------------------
 
+    @timed("state.hash")
     def _current_state_hash(self) -> str:
         """World hash, memoized across the paused window between actions."""
 
@@ -819,6 +820,7 @@ class FLEWorker(FactorioWorker):
             for objective in (spec.objectives if spec else [])
         )
 
+    @timed("state.telemetry")
     def _capture_frame(self, targets: list[str]) -> TelemetryFrame:
         """Telemetry for one capture cycle.
 
@@ -1080,6 +1082,7 @@ class FLEWorker(FactorioWorker):
         self._customer_events.extend(engine.sync(0, []))
         return engine
 
+    @timed("state.customer")
     def _sync_customer(self) -> list[VerifierEvent]:
         """Pull sink telemetry and advance the contract clock to now."""
 
@@ -1129,6 +1132,7 @@ class FLEWorker(FactorioWorker):
             contracts.append(self._active_order.student_view())
         return contracts
 
+    @timed("state.order")
     def _sync_active_order(self) -> list[VerifierEvent]:
         """Credit adaptive-order deliveries and advance its authoritative clock."""
 
@@ -1619,6 +1623,7 @@ class FLEWorker(FactorioWorker):
         self._disruption_events.extend(events)
         return verifier_events
 
+    @timed("state.perturbations")
     def _sync_perturbations(self) -> list[VerifierEvent]:
         """Fire due disruptions and update recovery tracking."""
 
@@ -1741,6 +1746,7 @@ class FLEWorker(FactorioWorker):
         self.template_store.record_run(name, tick)
         return expanded, tick
 
+    @timed("checkpoint.export_game_state")
     def export_game_state(self) -> str | None:
         """Serialize the live world for lifecycle checkpointing.
 
@@ -2309,6 +2315,7 @@ class FLEWorker(FactorioWorker):
                 self._episode_tick() + detector_seconds * 60
             )
 
+    @timed("backend.execute")
     def execute(
         self,
         lease_id: str,
@@ -2867,6 +2874,7 @@ class FLEWorker(FactorioWorker):
             },
         }
 
+    @timed("state.observation")
     def _model_state_snapshot(self, lease_id: str) -> dict[str, Any]:
         namespace = self.instance.first_namespace
         try:
@@ -3227,6 +3235,7 @@ class FLEWorker(FactorioWorker):
                 "error": str(exc)[:300],
             }
 
+    @timed("backend.camera")
     def camera(
         self,
         lease_id: str,

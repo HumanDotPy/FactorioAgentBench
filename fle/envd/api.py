@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import inspect
+import re
 from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from fle.commons.profiling import activate
 from fle.envd.errors import (
     CapacityExhausted,
     CommitmentMismatch,
@@ -45,6 +47,13 @@ class LeaseRequest(RequestModel):
 class ExecuteRequest(RequestModel):
     code: str
     request_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class ProfilingRequest(RequestModel):
+    enabled: bool
+    duration_seconds: int = Field(default=300, ge=1, le=3600)
+    sample_every: int = Field(default=1, ge=1, le=1000)
+    clear: bool = False
 
 
 class CameraRequest(RequestModel):
@@ -165,6 +174,48 @@ def create_app(service: EnvironmentService) -> FastAPI:
     )
 
     _register_error_handlers(app)
+
+    @app.middleware("http")
+    async def profile_request(request, call_next):
+        # No bodies, query parameters, programs, or verifier values are captured.
+        parts = request.url.path.split("/")
+        sample = None
+        if (
+            len(parts) >= 4
+            and parts[1:3] == ["v1", "leases"]
+            and (len(parts) < 5 or parts[4] != "profiling")
+        ):
+            try:
+                store = service.profiling(parts[3])
+            except LeaseNotFound:
+                pass
+            else:
+                correlation = request.headers.get("X-Factorio-Call-Id", "")
+                sample = store.begin(
+                    request.method,
+                    correlation if re.fullmatch(r"[0-9a-f]{32}", correlation) else None,
+                )
+        if sample is None:
+            return await call_next(request)
+        generation, trace = sample
+        try:
+            with activate(trace):
+                response = await call_next(request)
+                trace.failed = trace.failed or response.status_code >= 400
+                response.headers["X-Factorio-Trace-Id"] = trace.trace_id
+                return response
+        finally:
+            route = request.scope.get("route")
+            trace.operation = f"{request.method} {getattr(route, 'path', 'unmatched')}"
+            store.complete(generation, trace)
+
+    @app.get("/v1/leases/{lease_id}/profiling")
+    async def profiling_report(lease_id: str):
+        return service.profiling(lease_id).report()
+
+    @app.put("/v1/leases/{lease_id}/profiling")
+    async def configure_profiling(lease_id: str, request: ProfilingRequest):
+        return service.profiling(lease_id).configure(**request.model_dump())
 
     @app.get("/v1/health")
     def health():
