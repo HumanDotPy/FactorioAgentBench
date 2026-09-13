@@ -155,10 +155,24 @@ the palette separately:
 uv run python -m fle.cluster.observer_camera
 ```
 
-Use the arrows (or WASD while the palette has focus), choose a 4–64 tile pan
-step, and use Zoom +/−. **Agent** or Home recenters on the model's character.
-The palette stays above the Factorio window. `--instance N` selects another
-local server. Closing the palette leaves the evaluation and observer running.
+The observer defaults to **Follow agent**, keeping the character centered and
+preserving your zoom. **Free camera** holds the current viewpoint; panning with
+the arrows or WASD in the palette also switches to Free camera. **Follow agent**
+or Home recenters immediately and resumes tracking. The selected mode survives
+reconnects and saves. If the character is missing, Follow waits and reacquires
+it when available. Tracking runs in the Lua runtime, even with the palette closed.
+
+The compact, dark camera panel uses amber mode indicators and stays above the
+Factorio window. Drag its header to reposition it, choose a 4–64 tile pan step,
+and use Zoom +/− in either mode. Keyboard shortcuts apply while the panel has
+focus. `--instance N` selects another local server. Closing the panel leaves the
+evaluation and observer running; `fle watch` reopens it. Its status refreshes
+automatically without advancing simulation time.
+
+Existing servers must load the regenerated FLE runtime to gain the camera modes;
+reopening the panel alone does not update a running server's Lua code. Rebuild
+the runtime through the cluster launch workflow and reload the server at a safe
+stopping point, then reconnect the observer and reopen its panel.
 
 The controls reposition only the existing read-only spectator through RCON;
 they work during model thinking pauses without stepping simulation time or

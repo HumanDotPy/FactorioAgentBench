@@ -167,6 +167,30 @@ fle_mutation_actions = {{
     "use_artillery_remote", "use_item", "use_spidertron_remote"
 }}
 
+local function fle_update_observer_camera()
+    if storage.observer_camera_mode == 'free' then return false end
+    local player = game.get_player(fle_observer_name)
+    local agent = storage.agent_characters and storage.agent_characters[1]
+    if not player or not player.connected
+        or player.controller_type ~= defines.controllers.spectator
+        or not agent or not agent.valid then return false end
+    if player.surface ~= agent.surface or player.position.x ~= agent.position.x
+        or player.position.y ~= agent.position.y then
+        return player.teleport(agent.position, agent.surface)
+    end
+    return true
+end
+
+fle_on_event('fle-observer-camera', defines.events.on_tick, function()
+    fle_update_observer_camera()
+end)
+
+local function fle_observer_action_result(...)
+    -- Actions can reposition a character while simulation is paused.
+    fle_update_observer_camera()
+    return ...
+end
+
 local function fle_apply_observer_policy(player)
     if not player or player.name ~= fle_observer_name then return false end
     local group = game.permissions.get_group(fle_observer_group)
@@ -179,8 +203,7 @@ local function fle_apply_observer_policy(player)
     player.set_controller{{type=defines.controllers.spectator}}
     if old_character and old_character.valid then old_character.destroy() end
     group.add_player(player)
-    local agent = storage.agent_characters and storage.agent_characters[1]
-    if agent and agent.valid then player.teleport(agent.position, agent.surface) end
+    fle_update_observer_camera()
     player.print("FLE observer mode: read-only spectator.")
     return true
 end
@@ -201,7 +224,7 @@ remote.add_interface("{RUNTIME_INTERFACE}", {{
     dispatch = function(action_name, ...)
         local action = fle_actions[action_name]
         if not action then error("Unknown FLE action: " .. tostring(action_name)) end
-        return action(...)
+        return fle_observer_action_result(action(...))
     end
 }})
 fle_actions.__call_util = function(util_name, ...)
@@ -236,13 +259,17 @@ fle_actions.__semantic_event = function(since_tick, wanted)
     return {{}}
 end
 fle_actions.__follow_agent = function(player_name)
-    local player = game.get_player(player_name)
-    local agent = storage.agent_characters and storage.agent_characters[1]
-    if player and agent and agent.valid then
-        player.teleport(agent.position, agent.surface)
-        return true
+    if player_name ~= fle_observer_name then return false end
+    storage.observer_camera_mode = 'follow'
+    return fle_update_observer_camera()
+end
+fle_actions.__observer_camera_mode = function(mode)
+    if mode ~= nil then
+        if mode ~= 'follow' and mode ~= 'free' then error('Unknown camera mode') end
+        storage.observer_camera_mode = mode
     end
-    return false
+    local following = fle_update_observer_camera()
+    return {{mode=storage.observer_camera_mode or 'follow', following=following}}
 end
 fle_actions.__observer_status = function()
     local player = game.get_player(fle_observer_name)
