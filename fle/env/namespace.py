@@ -424,6 +424,9 @@ class FactorioNamespace:
         """
         if getattr(self, "_cancel_requested", False):
             raise TimeoutError("Evaluation cancelled after exceeding its time limit")
+        control = getattr(self, "_program_runtime", None)
+        if control is not None:
+            control.boundary()
 
         def process_annotation(annotation, eval_dict):
             """Process a type annotation node and return the evaluated type"""

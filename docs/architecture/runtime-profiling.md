@@ -1,5 +1,12 @@
 # Active-run profiling
 
+For [realtime programs](realtime-program-execution.md), the admission request
+measures validation and durable registration, not program execution. Job status
+records queue wait and execution wall seconds separately. Execution and checkpoint
+work occur after the acceptance response; do not compare admission latency to an
+old synchronous execution duration as if they measured the same work. Model and
+harness timing still require the runner's measurements.
+
 The local envd service supports operator-only, per-lease wall-clock profiling.
 Enable it while a run continues; no world reset, lease restart, explicit simulation
 advance, or agent tool call is required. The service and MCP process must already

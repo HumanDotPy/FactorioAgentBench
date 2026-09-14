@@ -221,7 +221,7 @@ def _envd_request(method: str, path: str, payload: dict | None = None) -> dict:
     attempts = (
         2
         if method == "POST"
-        and path.endswith("/execute")
+        and path.endswith(("/execute", "/programs", "/run"))
         and payload is not None
         and payload.get("request_id")
         else 1
@@ -1498,7 +1498,9 @@ TOOLS.extend(
 # evaluation identity use ``ALL_TOOLS`` so every callable knowledge/memory
 # surface is present in normal runs.
 REFERENCE_TOOLS = TOOLS[len(_BASE_TOOLS) :]
-ALL_TOOLS = list(TOOLS)
+from scripts import factorio_program_mcp
+
+ALL_TOOLS = list(TOOLS) + factorio_program_mcp.TOOLS
 TOOLS = _BASE_TOOLS
 MEMORY_TOOL_NAMES = {
     "factorio_memory_list",
@@ -1537,6 +1539,12 @@ def _tool_route(name: str) -> dict[str, Any]:
             "provider_ptc_eligible": False,
         }
     if any(name.endswith(candidate) for candidate in SERIAL_LIVE_READ_TOOL_NAMES):
+        if factorio_program_mcp.enabled():
+            return {
+                "route": "parallel_read",
+                "parallel_safe": True,
+                "provider_ptc_eligible": False,
+            }
         return {
             "route": "serial_live_read",
             "parallel_safe": False,
@@ -1551,9 +1559,7 @@ def _tool_route(name: str) -> dict[str, Any]:
 
 def tool_route_manifest(*, memory_enabled: bool | None = None) -> dict[str, Any]:
     enabled = _memory_enabled() if memory_enabled is None else memory_enabled
-    tools = [
-        tool for tool in ALL_TOOLS if enabled or tool["name"] not in MEMORY_TOOL_NAMES
-    ]
+    tools = tools_for_profile(memory_enabled=enabled)
     return {
         "schema_version": "factorio-tool-routes-v1",
         "provider_native_ptc_supported": False,
@@ -1572,7 +1578,15 @@ def tools_for_profile(*, memory_enabled: bool | None = None) -> list[dict]:
     )
     result = []
     for tool in selected:
+        if tool in factorio_program_mcp.TOOLS and not factorio_program_mcp.enabled():
+            continue
         decorated = dict(tool)
+        if factorio_program_mcp.enabled() and tool["name"] == "factorio_execute_program":
+            decorated["description"] = (
+                "Accept a bounded Python program for ordered background execution at 1x. "
+                "Returns a program_id immediately, not success. Plan independent work while it runs; "
+                "use factorio_get_program_status for results and factorio_await_events when waiting."
+            )
         decorated["_meta"] = {
             **dict(tool.get("_meta") or {}),
             "factorio/toolRoute": _tool_route(tool["name"]),
@@ -1928,6 +1942,19 @@ def _call_tool_impl(
                 "are available during the bounded handoff phase",
                 True,
             )
+        if factorio_program_mcp.enabled():
+            result = factorio_program_mcp.dispatch(
+                name,
+                arguments,
+                _next_execute_request_id(request_id)
+                if name.endswith("factorio_execute_program")
+                else request_id,
+                _envd,
+                _execution_receipt,
+                _signal_epoch_terminal,
+            )
+            if result is not None:
+                return _bounded_json_text(result), False
         reference_name = next(
             (
                 candidate
@@ -2026,7 +2053,10 @@ def _call_tool_impl(
                     "POST",
                     f"/v1/leases/{lease_id}/templates/"
                     f"{urllib.parse.quote(template_name)}/run",
-                    {"arguments": arguments.get("arguments", {})},
+                    {
+                        "arguments": arguments.get("arguments", {}),
+                        "request_id": _next_execute_request_id(request_id),
+                    },
                 )
             ), False
         if name.endswith("factorio_delete_program_template"):

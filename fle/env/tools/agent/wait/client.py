@@ -30,6 +30,9 @@ class Wait(Tool):
             raise RuntimeError(f"Could not start wait: {started}")
         try:
             while True:
+                control = getattr(self.game_state, "_program_runtime", None)
+                if control is not None:
+                    control.boundary()
                 if getattr(self.game_state, "_cancel_requested", False):
                     raise TimeoutError("Wait cancelled by program execution timeout")
                 result, _ = self.execute("poll", self.player_index)

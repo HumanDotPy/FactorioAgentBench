@@ -1,5 +1,10 @@
 # Freeplay evaluation modes
 
+OpenCode and Hermes runs default to continuous 1x program execution. Pass
+`--execution-mode turn_based` to run the paused comparison. The native harness
+retains turn-based execution. See [realtime execution](realtime-program-execution.md)
+for acceptance receipts, event waits, checkpoint recovery, and timing semantics.
+
 The evaluation launcher selects one of three objectives with `--mode`:
 
 | Mode | Objective | Result |

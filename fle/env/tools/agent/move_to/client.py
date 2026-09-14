@@ -122,6 +122,13 @@ class MoveTo(Tool):
         while status.get("active"):
             sleep(0.05)
             status, _ = self.execute(self.player_index, "__status__", NONE, NONE, 0)
+            control = getattr(self.game_state, "_program_runtime", None)
+            if control is not None and control.cancelled():
+                status, _ = self.execute(self.player_index, "__cancel__", NONE, NONE, 0)
+                self.game_state.player_location = Position(
+                    x=float(status["x"]), y=float(status["y"])
+                )
+                control.boundary()
             if not isinstance(status, dict):
                 raise Exception(f"Cannot read walking status: {status}")
             if self._game_tick() >= deadline:

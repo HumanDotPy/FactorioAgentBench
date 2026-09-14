@@ -2,6 +2,11 @@
 
 Status: implemented transport contract, 2026-08-26
 
+Realtime extension: see [continuous program execution](realtime-program-execution.md)
+for the provider-independent acceptance, status, cancellation, event and recovery
+contract used by OpenCode/Hermes realtime evaluations. The synchronous guarantees
+below apply to `execution_mode=turn_based` unless otherwise noted.
+
 This note defines what a modern model harness can rely on when it connects to
 Factorio envd. It deliberately separates direct MCP calls, programmatic action
 composition, and provider-specific programmatic tool-calling features.
@@ -66,7 +71,7 @@ explicit.
 ## Canonical semantic motor runtime
 
 `semantic-motor-v1` is the canonical action profile. Reasoning remains
-turn-based by default: the world pauses while the model thinks and advances on
+turn-based for tasks using `execution_mode=turn_based`: the world pauses while the model thinks and advances on
 native Factorio ticks while semantic options execute. `execution_game_speed`
 changes only the ratio of simulation time to observer wall time, so an observer
 may run at 1x or faster without changing action semantics, receipts, deadlines,
@@ -81,6 +86,12 @@ ticks, and the active mode is reported in every observation under `realtime`.
 Audit workers and lease release/finalize always return to the paused default.
 Evaluation configurations decide whether realtime mode is permitted, because
 "paused while thinking" versus "running while thinking" are different tasks.
+
+Tasks selecting `execution_mode=realtime` fix pacing at continuous 1x and use
+background program admission. Agents cannot toggle that task back to paused mode.
+The adaptive/progression runners select this mode by default for OpenCode and
+Hermes, with an explicit `--execution-mode turn_based` alternative. Existing
+construction primitives are unchanged.
 
 Reusable agent-authored programs are first-class through the program template
 library (`factorio_save_program_template`, `factorio_run_program_template`,

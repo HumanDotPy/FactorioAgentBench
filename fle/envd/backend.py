@@ -7,6 +7,7 @@ import math
 import secrets
 import time
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -409,6 +410,7 @@ class FLEWorker(FactorioWorker):
         self._execution_game_speed = float(
             getattr(instance, "get_speed", lambda: 10.0)()
         )
+        self._configured_execution_game_speed = self._execution_game_speed
         # Pacing: when realtime is enabled the world stays unpaused between
         # interventions at the execution speed.  Simulation accounting always
         # uses authoritative ticks, so this never changes scores or deadlines.
@@ -500,6 +502,9 @@ class FLEWorker(FactorioWorker):
 
             def record_tool(_tool, *_args, _name=tool_name, **_kwargs):
                 if self._capture_tool_calls and _name != "get_recent_rate":
+                    control = getattr(self, "program_runtime", None)
+                    if control is not None and _name != "score":
+                        control.boundary(_name)
                     self._executed_tools_current.append(_name)
 
             self.instance.pre_tool_hooks.setdefault(tool_name, []).append(record_tool)
@@ -511,6 +516,85 @@ class FLEWorker(FactorioWorker):
             self.instance.post_tool_hooks.setdefault(tool_name, []).append(
                 detect_throughput
             )
+
+    @contextmanager
+    def program_read_context(self):
+        """Read on the executor thread without attributing reads to the program."""
+        capture = self._capture_tool_calls
+        self._capture_tool_calls = False
+        self._state_hash_dirty = True
+        self._research_cache = None
+        try:
+            yield
+        finally:
+            self._capture_tool_calls = capture
+            self._state_hash_dirty = True
+            self._research_cache = None
+
+    def poll_program_events(self):
+        from fle.env.action_queue import _event_snapshot
+
+        cursors = getattr(self, "_program_event_ticks", {})
+        events = []
+        for kind in ("research_completed", "under_attack", "new_order"):
+            event = _event_snapshot(
+                self.instance.namespace, cursors.get(kind, 0), {kind}
+            )
+            if event:
+                cursors[kind] = int(event["tick"])
+                events.append(
+                    {
+                        "kind": kind,
+                        "tick": max(int(event["tick"]) - self._epoch_game_tick, 0),
+                    }
+                )
+        self._program_event_ticks = cursors
+        for event in self._sync_active_order():
+            if event.kind in {"contract_fulfilled", "contract_expired"}:
+                events.append(
+                    {"kind": event.kind, "tick": event.tick, "terminal": True}
+                )
+        runtime = getattr(self, "program_runtime", None)
+        if (
+            self._active_order
+            and self._active_order.status in {"fulfilled", "expired"}
+            and runtime
+            and not runtime.episode_terminal
+        ):
+            if not any(event.get("terminal") for event in events):
+                events.append(
+                    {
+                        "kind": "contract_" + self._active_order.status,
+                        "tick": self._episode_tick(),
+                        "terminal": True,
+                    }
+                )
+        # Progression completion and deadlines must advance even when no program
+        # is pending. Sample the existing verifier; only its public terminal
+        # reason is delivered, never hidden scoring or verifier state.
+        task = self.task_spec
+        if task and task.evaluation_mode and self.initial_telemetry:
+            from fle.envd.evaluation_modes import progression_progress
+
+            frame = self._capture_frame([o.target for o in task.objectives if o.target])
+            self._evaluation_progress = progression_progress(
+                task, self.initial_telemetry, frame
+            )
+            reason = self._evaluation_progress.get("terminal_reason")
+            runtime = getattr(self, "program_runtime", None)
+            if reason and runtime and not runtime.episode_terminal:
+                events.append({"kind": reason, "tick": frame.tick, "terminal": True})
+        return events
+
+    @contextmanager
+    def program_checkpoint_context(self):
+        # A checkpoint must describe one world instant across all RCON reads.
+        self.instance.pause()
+        try:
+            yield
+        finally:
+            if self._realtime_enabled:
+                self.instance.set_speed_and_unpause(1)
 
     @classmethod
     def connect(
@@ -550,6 +634,7 @@ class FLEWorker(FactorioWorker):
 
     def start_task(self, task: FactorioTaskSpec) -> str:
         supported = {
+            # Runtime state belongs to the new lease, never the pooled worker.
             "scenario": "open_world",
             "factorio_version": "2.0.77",
         }
@@ -557,6 +642,8 @@ class FLEWorker(FactorioWorker):
             "scenario": task.scenario,
             "factorio_version": task.factorio_version,
         }
+        self.program_runtime = None
+        self._program_event_ticks = {}
         unsupported = {
             key: {"requested": requested[key], "supported": expected}
             for key, expected in supported.items()
@@ -709,6 +796,12 @@ class FLEWorker(FactorioWorker):
         self._attach_template_store(task)
         self._realtime_enabled = False
         self._realtime_allowed = bool(getattr(task, "realtime_allowed", True))
+        if task.execution_mode == "realtime":
+            self._execution_game_speed = 1.0
+        else:
+            self._execution_game_speed = getattr(
+                self, "_configured_execution_game_speed", self._execution_game_speed
+            )
         self.instance.set_speed(getattr(self, "_execution_game_speed", 10.0))
         self.instance.pause()
         self.task = fle_task
@@ -1711,6 +1804,12 @@ class FLEWorker(FactorioWorker):
         """
 
         del lease_id
+        if (
+            getattr(self, "task_spec", None)
+            and self.task_spec.execution_mode == "realtime"
+        ):
+            if not enabled or speed not in (None, 1, 1.0):
+                raise ValueError("This episode requires continuous 1x pacing")
         if enabled and not getattr(self, "_realtime_allowed", True):
             raise ValueError(
                 "Realtime mode is disabled for this task; the world stays "
@@ -2338,9 +2437,16 @@ class FLEWorker(FactorioWorker):
         self.instance.set_speed_and_unpause(
             getattr(self, "_execution_game_speed", 10.0)
         )
+        control = getattr(self, "program_runtime", None)
         try:
-            _, duration, result = self.instance.eval(code, timeout=120)
+            if control is not None:
+                self.instance.namespace._program_runtime = control
+            _, duration, result = self.instance.eval(
+                code, timeout=600 if control else 120
+            )
         finally:
+            if control is not None:
+                self.instance.namespace._program_runtime = None
             self._capture_tool_calls = False
             # Model generation and network latency must not advance simulation
             # time.  Realtime mode is the explicit opt-out: the world keeps
@@ -2351,6 +2457,8 @@ class FLEWorker(FactorioWorker):
         action_ended_tick = self._episode_tick()
         self._executing_lease_id = None
         result_text = str(result)
+        if control is not None and control.blocked():
+            result_text += "\nError: " + control.blocked()
         error = "error" in result_text.lower() or "exception:" in result_text.lower()
         forbidden_actions = {
             str(action)
@@ -2878,7 +2986,11 @@ class FLEWorker(FactorioWorker):
     def _model_state_snapshot(self, lease_id: str) -> dict[str, Any]:
         namespace = self.instance.first_namespace
         try:
-            tick = int(self.instance.get_elapsed_ticks())
+            tick = (
+                self._episode_tick()
+                if getattr(self, "program_runtime", None)
+                else int(self.instance.get_elapsed_ticks())
+            )
         except Exception:
             tick = int(self._read_game_tick())
         try:

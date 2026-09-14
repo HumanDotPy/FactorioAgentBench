@@ -1,4 +1,5 @@
 import math
+from functools import wraps
 from typing import Tuple, Union
 
 from fle.env.entities import Position, Entity
@@ -11,7 +12,22 @@ class Tool(Controller):
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         if "__call__" in cls.__dict__:
-            cls.__call__ = timed("tool." + cls.__name__)(cls.__call__)
+            implementation = cls.__call__
+
+            @wraps(implementation)
+            def invoke(self, *args, **kwargs):
+                control = getattr(
+                    getattr(self, "game_state", None), "_program_runtime", None
+                )
+                action = getattr(self, "name", type(self).__name__)
+                if control is not None and action != "score":
+                    control.boundary()
+                result = implementation(self, *args, **kwargs)
+                if control is not None:
+                    control.action_result(action, result)
+                return result
+
+            cls.__call__ = timed("tool." + cls.__name__)(invoke)
 
     def __init__(
         self,

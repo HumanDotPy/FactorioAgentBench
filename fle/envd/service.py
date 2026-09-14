@@ -4,6 +4,7 @@ import re
 import threading
 import time
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -41,6 +42,7 @@ from fle.envd.models import (
 )
 from fle.envd.program_policy import ProgramPolicyViolation, validate_program
 from fle.envd.templates import expand_template, validate_parameters
+from fle.envd.program_runtime import ProgramRuntime
 
 
 @dataclass
@@ -64,6 +66,8 @@ class _LeaseRecord:
     # restarts while remaining isolated from every other evaluation session.
     memory: SessionMemory = field(default_factory=SessionMemory)
     profiling: ProfileStore = field(default_factory=ProfileStore)
+    programs: ProgramRuntime | None = None
+    programs_restore: dict[str, Any] | None = None
 
 
 def _template_view(record: Any) -> dict[str, Any]:
@@ -117,6 +121,7 @@ class EnvironmentService:
         features = dict(self.capabilities.features)
         features["checkpoints"] = checkpoint_capable
         features["runtime_profiling"] = True
+        features["async_programs"] = checkpoint_capable
         self.capabilities = self.capabilities.model_copy(update={"features": features})
         if audit_workers:
             features = dict(self.capabilities.features)
@@ -238,6 +243,40 @@ class EnvironmentService:
                 self._restore_service_state(record, service_state)
         with self._lock:
             self._leases[lease.lease_id] = record
+        if task.execution_mode == "realtime":
+            try:
+                if not self.capabilities.features.get("async_programs"):
+                    raise ValueError(
+                        "Realtime programs require a checkpoint-capable local worker"
+                    )
+                record.programs = ProgramRuntime(
+                    CheckpointPool().root,
+                    lambda code, key, template: self.execute(
+                        lease.lease_id,
+                        code,
+                        request_id=key,
+                        template=template,
+                        _scheduled=True,
+                    ),
+                    lambda: self.checkpoint(
+                        lease.lease_id, name=f"runner-active-{lease.lease_id}"
+                    ),
+                    getattr(worker, "program_read_context", nullcontext),
+                    state=record.programs_restore,
+                    execution_context=lambda: record.lock,
+                    poll_events=getattr(worker, "poll_program_events", None),
+                )
+                worker.program_runtime = record.programs
+                # Establish a durable world boundary before accepting work.
+                initial = self.checkpoint(
+                    lease.lease_id, name=f"runner-active-{lease.lease_id}"
+                )
+                record.programs.publish_checkpoint(initial)
+                worker.set_realtime(lease.lease_id, enabled=True, speed=1)
+                record.programs.start()
+            except Exception:
+                self.release(lease.lease_id)
+                raise
         return lease
 
     @staticmethod
@@ -249,6 +288,7 @@ class EnvironmentService:
         ]
         record.terminal_reason = state.get("terminal_reason")
         record.active_commitment_hash = state.get("active_commitment_hash")
+        record.programs_restore = state.get("programs")
         record.lease.tool_error_retries_used = int(
             state.get("tool_error_retries_used", 0)
         )
@@ -280,6 +320,7 @@ class EnvironmentService:
     def _service_resume_state(record: _LeaseRecord) -> dict[str, Any]:
         return {
             "schema_version": "envd-service-resume-v1",
+            "programs": record.programs.export() if record.programs else None,
             "events": [event.model_dump(mode="json") for event in record.events],
             "terminal_reason": record.terminal_reason,
             "active_commitment_hash": record.active_commitment_hash,
@@ -313,7 +354,12 @@ class EnvironmentService:
     @timed("service.checkpoint")
     def checkpoint(self, lease_id: str, name: str | None = None) -> RuntimeCheckpoint:
         record = self._live_record(lease_id)
-        with profiled_lock(record.lock):
+        context = (
+            getattr(record.worker, "program_checkpoint_context", nullcontext)
+            if record.programs
+            else nullcontext
+        )
+        with profiled_lock(record.lock), context():
             raw_state = record.worker.export_game_state()
             if raw_state is None:
                 raise RuntimeError("Factorio worker could not export game state")
@@ -350,6 +396,9 @@ class EnvironmentService:
                 checkpoint_id=checkpoint_id,
                 runtime_backend="local-fle",
                 metadata={
+                    "program_runtime_id": record.programs.runtime_id
+                    if record.programs
+                    else None,
                     "active_epoch_index": getattr(
                         session_state, "active_epoch_index", None
                     ),
@@ -377,6 +426,34 @@ class EnvironmentService:
             raise LeaseNotFound(f"Unknown lease: {lease_id}")
         return record.profiling
 
+    def programs(self, lease_id: str) -> ProgramRuntime:
+        # Admission/status never wait for another lease's expiry cleanup.
+        with self._lock:
+            record = self._leases.get(lease_id)
+        if record is None or record.released:
+            raise LeaseNotFound(f"Unknown lease: {lease_id}")
+        if record.programs is None:
+            raise ValueError("This lease uses turn-based execution")
+        self._renew(record)
+        return record.programs
+
+    @timed("service.program_admission")
+    def submit_program(
+        self, lease_id: str, code: str, request_id: str, *, template=None
+    ):
+        runtime = self.programs(lease_id)
+        record = self._leases[lease_id]
+        if (
+            record.snapshot or record.terminal_reason
+        ) and request_id not in runtime.requests:
+            raise LeaseFinalized("Episode has ended")
+        if not code.strip() or len(code) > 100_000:
+            raise ValueError("Program must contain between 1 and 100000 characters")
+        validate_program(code, action_profile=record.lease.task.action_profile)
+        return runtime.submit(
+            code, request_id, sha256(code.encode()).hexdigest(), template
+        )
+
     @timed("service.execute")
     def execute(
         self,
@@ -385,11 +462,14 @@ class EnvironmentService:
         *,
         request_id: str | None = None,
         template: str | None = None,
+        _scheduled: bool = False,
     ) -> ExecutionResult:
         if not code.strip():
             raise ValueError("code must not be empty")
         code_sha256 = sha256(code.encode("utf-8")).hexdigest()
         record = self._record(lease_id)
+        if record.programs and not _scheduled:
+            raise ValueError("Realtime episodes accept programs through /programs")
         with profiled_lock(record.lock):
             if record.released:
                 raise LeaseNotFound(f"Released lease: {lease_id}")
@@ -553,6 +633,18 @@ class EnvironmentService:
         force_keyframe: bool = False,
     ) -> Observation:
         record = self._record(lease_id)
+        if record.programs:
+            self._renew(record)
+            return record.programs.read(
+                lambda: record.worker.observe(
+                    lease_id,
+                    **(
+                        {"cursor": cursor, "force_keyframe": force_keyframe}
+                        if cursor is not None or force_keyframe
+                        else {}
+                    ),
+                )
+            )
         with profiled_lock(record.lock):
             if record.released:
                 raise LeaseNotFound(f"Released lease: {lease_id}")
@@ -587,6 +679,21 @@ class EnvironmentService:
         """Return bounded public state history from the leased worker."""
 
         record = self._live_record(lease_id)
+        if record.programs:
+            self._renew(record)
+            return record.programs.read(
+                lambda: record.worker.query_state(
+                    lease_id,
+                    kind=kind,
+                    item=item,
+                    window_seconds=window_seconds,
+                    since_revision=since_revision,
+                    entity_type=entity_type,
+                    area=area,
+                    changed_since=changed_since,
+                    limit=limit,
+                )
+            )
         with profiled_lock(record.lock):
             query = getattr(record.worker, "query_state", None)
             if query is None:
@@ -611,6 +718,12 @@ class EnvironmentService:
         self, lease_id: str, *, product: str, quantity: int = 1, depth: int = 2
     ) -> dict[str, Any]:
         record = self._live_record(lease_id)
+        if record.programs:
+            return record.programs.read(
+                lambda: record.worker.craft_plan(
+                    lease_id, product=product, quantity=quantity, depth=depth
+                )
+            )
         with profiled_lock(record.lock):
             result = record.worker.craft_plan(
                 lease_id, product=product, quantity=quantity, depth=depth
@@ -630,6 +743,10 @@ class EnvironmentService:
         """Toggle autonomous simulation between agent interventions."""
 
         record = self._live_record(lease_id)
+        if record.programs:
+            if not enabled or speed not in (None, 1, 1.0):
+                raise ValueError("This episode requires continuous 1x pacing")
+            return {"enabled": True, "speed": 1.0, "paused": False}
         with profiled_lock(record.lock):
             result = record.worker.set_realtime(lease_id, enabled=enabled, speed=speed)
             self._renew(record)
@@ -637,14 +754,14 @@ class EnvironmentService:
 
     def list_templates(self, lease_id: str) -> dict[str, Any]:
         record = self._live_record(lease_id)
-        with profiled_lock(record.lock):
+        with nullcontext() if record.programs else profiled_lock(record.lock):
             summaries = record.worker.template_store.list_summaries()
             self._renew(record)
             return {"templates": summaries}
 
     def get_template(self, lease_id: str, name: str) -> dict[str, Any]:
         record = self._live_record(lease_id)
-        with profiled_lock(record.lock):
+        with nullcontext() if record.programs else profiled_lock(record.lock):
             stored = record.worker.template_store.get(name)
             self._renew(record)
             return _template_view(stored)
@@ -666,7 +783,7 @@ class EnvironmentService:
         """
 
         record = self._live_record(lease_id)
-        with profiled_lock(record.lock):
+        with nullcontext() if record.programs else profiled_lock(record.lock):
             normalized = validate_parameters(parameters)
             expanded = expand_template(code, normalized, None)
             validate_program(expanded, action_profile=record.lease.task.action_profile)
@@ -681,7 +798,7 @@ class EnvironmentService:
 
     def delete_template(self, lease_id: str, name: str) -> dict[str, Any]:
         record = self._live_record(lease_id)
-        with profiled_lock(record.lock):
+        with nullcontext() if record.programs else profiled_lock(record.lock):
             deleted = record.worker.template_store.delete(name)
             self._renew(record)
             return {"deleted": bool(deleted), "name": name}
@@ -693,10 +810,20 @@ class EnvironmentService:
         *,
         arguments: dict[str, Any] | None = None,
         request_id: str | None = None,
-    ) -> ExecutionResult:
-        """Expand a stored template and execute it as one intervention."""
+    ) -> ExecutionResult | dict[str, Any]:
+        """Expand a stored template and execute or admit one intervention."""
 
         record = self._live_record(lease_id)
+        if record.programs:
+            stored = record.worker.template_store.get(name)
+            expanded = expand_template(stored.code, stored.parameters, arguments)
+            with record.programs.condition:
+                key = request_id or str(uuid.uuid4())
+                repeated = key in record.programs.requests
+                receipt = self.submit_program(lease_id, expanded, key, template=name)
+                if not repeated:
+                    record.worker.template_store.record_run(name, None)
+                return receipt
         with profiled_lock(record.lock):
             expanded, _tick = record.worker.run_template(lease_id, name, arguments)
             return self.execute(
@@ -715,6 +842,12 @@ class EnvironmentService:
         include_image: bool = True,
     ) -> dict[str, Any]:
         record = self._live_record(lease_id)
+        if record.programs:
+            return record.programs.read(
+                lambda: record.worker.camera(
+                    lease_id, settings=settings, include_image=include_image
+                )
+            )
         with profiled_lock(record.lock):
             result = record.worker.camera(
                 lease_id, settings=settings, include_image=include_image
@@ -735,6 +868,16 @@ class EnvironmentService:
         """Render one lease under the same lock as other live-state reads."""
 
         record = self._live_record(lease_id)
+        if record.programs:
+            return record.programs.read(
+                lambda: record.worker.render_factory(
+                    lease_id,
+                    center_x=center_x,
+                    center_y=center_y,
+                    radius=radius,
+                    include_status=include_status,
+                )
+            )
         with profiled_lock(record.lock):
             result = record.worker.render_factory(
                 lease_id,
@@ -781,13 +924,13 @@ class EnvironmentService:
         cursor: str | int | None = None,
     ):
         record = self._live_record(lease_id)
-        with profiled_lock(record.lock):
+        with nullcontext() if record.programs else profiled_lock(record.lock):
             self._renew(record)
             return record.memory.list(prefix=prefix, limit=limit, cursor=cursor)
 
     def memory_read(self, lease_id: str, key: str):
         record = self._live_record(lease_id)
-        with profiled_lock(record.lock):
+        with nullcontext() if record.programs else profiled_lock(record.lock):
             self._renew(record)
             return record.memory.read(key)
 
@@ -800,7 +943,7 @@ class EnvironmentService:
         expected_revision: int | None = None,
     ):
         record = self._live_record(lease_id)
-        with profiled_lock(record.lock):
+        with nullcontext() if record.programs else profiled_lock(record.lock):
             result = record.memory.write(
                 key,
                 content,
@@ -817,7 +960,7 @@ class EnvironmentService:
         expected_revision: int | None = None,
     ):
         record = self._live_record(lease_id)
-        with profiled_lock(record.lock):
+        with nullcontext() if record.programs else profiled_lock(record.lock):
             result = record.memory.delete(
                 key,
                 expected_revision=expected_revision,
@@ -834,7 +977,7 @@ class EnvironmentService:
         cursor: str | int | None = None,
     ):
         record = self._live_record(lease_id)
-        with profiled_lock(record.lock):
+        with nullcontext() if record.programs else profiled_lock(record.lock):
             self._renew(record)
             return record.memory.search(query, limit=limit, cursor=cursor)
 
@@ -846,12 +989,14 @@ class EnvironmentService:
         cursor: str | int | None = None,
     ):
         record = self._live_record(lease_id)
-        with profiled_lock(record.lock):
+        with nullcontext() if record.programs else profiled_lock(record.lock):
             self._renew(record)
             return record.memory.trace(limit=limit, cursor=cursor)
 
     def finalize(self, lease_id: str) -> VerificationSnapshot:
         record = self._record(lease_id)
+        if record.programs:
+            record.programs.close()
         with profiled_lock(record.lock):
             if record.released:
                 raise LeaseNotFound(f"Released lease: {lease_id}")
@@ -903,6 +1048,11 @@ class EnvironmentService:
             if record.snapshot is not None:
                 raise LeaseFinalized(f"Lease is already finalized: {lease_id}")
             state = record.worker.begin_contract_epoch(spec)
+            if record.programs:
+                record.programs.episode_terminal = False
+                record.programs.terminal_program_id = None
+                record.programs.terminal_event = None
+                record.worker.set_realtime(lease_id, enabled=True, speed=1)
             # A throughput audit terminates the current epoch, not the
             # persistent adaptive-session lease. Once the runner has finalized
             # that epoch and successfully opened the next one, mutations must
@@ -911,6 +1061,10 @@ class EnvironmentService:
             record.active_commitment_hash = spec.commitment_hash
             if request_id:
                 record.epoch_request_cache[("begin", request_id)] = state
+            if record.programs:
+                record.programs.publish_checkpoint(
+                    self.checkpoint(lease_id, name=f"runner-active-{lease_id}")
+                )
             return state
 
     def finalize_contract_epoch(
@@ -932,6 +1086,16 @@ class EnvironmentService:
                     if cached_hit and not abandon:
                         return cached
         record = self._live_record(lease_id)
+        if record.programs:
+            if (
+                record.active_commitment_hash is not None
+                and record.active_commitment_hash != commitment_hash
+            ):
+                raise CommitmentMismatch(
+                    "Finalization commitment does not match the committed "
+                    "epoch specification"
+                )
+            record.programs.stop_epoch()
         with profiled_lock(record.lock):
             # A retry can arrive while the first finalize is still running.
             # Recheck after acquiring the worker lock, not only before it.
@@ -996,16 +1160,21 @@ class EnvironmentService:
 
     def release(self, lease_id: str) -> bool:
         with self._lock:
-            record = self._leases.pop(lease_id, None)
+            record = self._leases.get(lease_id)
             if record is None:
                 return False
+        if record.programs:
+            record.programs.close()
         with profiled_lock(record.lock):
+            if record.released:
+                return False
             record.released = True
             try:
                 record.worker.release()
             finally:
                 with self._lock:
                     self._busy_workers.discard(record.worker.worker_id)
+                    self._leases.pop(lease_id, None)
         return True
 
     def close(self) -> None:

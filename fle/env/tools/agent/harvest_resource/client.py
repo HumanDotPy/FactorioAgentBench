@@ -84,6 +84,9 @@ class HarvestResource(Tool):
             last_progress_tick = self._native_tick()
             try:
                 while True:
+                    control = getattr(self.game_state, "_program_runtime", None)
+                    if control is not None:
+                        control.boundary()
                     queue = self.connection.rcon_client.send_command(
                         "/sc rcon.print("
                         + self._action_expression(

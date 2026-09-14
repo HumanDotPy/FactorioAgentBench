@@ -49,6 +49,11 @@ class ExecuteRequest(RequestModel):
     request_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
+class ProgramRequest(RequestModel):
+    code: str = Field(min_length=1, max_length=100_000)
+    request_id: str = Field(min_length=1, max_length=128)
+
+
 class ProfilingRequest(RequestModel):
     enabled: bool
     duration_seconds: int = Field(default=300, ge=1, le=3600)
@@ -119,6 +124,14 @@ class MemoryDeleteRequest(RequestModel):
 
 
 def _register_error_handlers(app: FastAPI) -> None:
+    @app.exception_handler(ValueError)
+    async def invalid_input(_, exc: ValueError):
+        return _error(422, str(exc))
+
+    @app.exception_handler(TimeoutError)
+    async def read_timeout(_, exc: TimeoutError):
+        return _error(503, str(exc))
+
     @app.exception_handler(CapacityExhausted)
     async def capacity_error(_, exc: CapacityExhausted):
         return _error(503, str(exc))
@@ -217,9 +230,50 @@ def create_app(service: EnvironmentService) -> FastAPI:
     async def configure_profiling(lease_id: str, request: ProfilingRequest):
         return service.profiling(lease_id).configure(**request.model_dump())
 
+    @app.post("/v1/leases/{lease_id}/programs", status_code=202)
+    def submit_program(lease_id: str, request: ProgramRequest):
+        return service.submit_program(lease_id, request.code, request.request_id)
+
+    @app.get("/v1/leases/{lease_id}/programs")
+    def program_status(
+        lease_id: str, program_id: str | None = None, result: bool = False
+    ):
+        try:
+            return service.programs(lease_id).status(program_id, include_result=result)
+        except KeyError:
+            raise HTTPException(404, "Unknown program") from None
+
+    @app.delete("/v1/leases/{lease_id}/programs/{program_id}")
+    def cancel_program(lease_id: str, program_id: str):
+        try:
+            return service.programs(lease_id).cancel(program_id)
+        except KeyError:
+            raise HTTPException(404, "Unknown program") from None
+
+    @app.get("/v1/leases/{lease_id}/program-events")
+    def program_events(
+        lease_id: str,
+        after: int = Query(0, ge=0),
+        timeout: float = Query(0, ge=0, le=30),
+    ):
+        return service.programs(lease_id).wait(after, timeout)
+
     @app.get("/v1/health")
     def health():
         return service.health()
+
+    @app.get("/v1/program-runtimes/{runtime_id}/checkpoint")
+    def latest_program_checkpoint(runtime_id: str):
+        import json
+        import uuid
+        from fle.envd.lifecycle import CheckpointPool
+
+        try:
+            canonical = str(uuid.UUID(runtime_id))
+            path = CheckpointPool().root / "programs" / canonical / "checkpoint.json"
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, FileNotFoundError):
+            raise HTTPException(404, "No committed program checkpoint") from None
 
     @app.post("/v1/leases", status_code=201)
     def lease(request: LeaseRequest):

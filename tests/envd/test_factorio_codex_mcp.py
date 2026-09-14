@@ -766,9 +766,7 @@ def test_mcp_realtime_and_template_dispatch_use_lease_endpoints(monkeypatch):
         "factorio_run_program_template",
         {"name": "refuel", "arguments": {"n": 2}},
     )
-    factorio_codex_mcp._call_tool(
-        "factorio_list_program_templates", {}
-    )
+    factorio_codex_mcp._call_tool("factorio_list_program_templates", {})
     factorio_codex_mcp._call_tool(
         "factorio_delete_program_template", {"name": "refuel"}
     )
@@ -791,7 +789,7 @@ def test_mcp_realtime_and_template_dispatch_use_lease_endpoints(monkeypatch):
         (
             "POST",
             "/v1/leases/lease-42/templates/refuel/run",
-            {"arguments": {"n": 2}},
+            {"arguments": {"n": 2}, "request_id": calls[2][2]["request_id"]},
         ),
         ("GET", "/v1/leases/lease-42/templates", None),
         ("DELETE", "/v1/leases/lease-42/templates/refuel", None),

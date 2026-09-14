@@ -367,6 +367,10 @@ class AgentEnvEnvironmentGateway:
         *,
         tool_error_retry_budget: int = 0,
     ) -> Lease:
+        if task.execution_mode == "realtime":
+            raise ValueError(
+                "Realtime program scheduling requires the local envd backend"
+            )
         await self.reap_expired()
         await self._reserve_capacity()
         sandbox_id: str | None = None

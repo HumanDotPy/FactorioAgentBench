@@ -121,6 +121,53 @@ class HTTPEnvironmentClient:
                     raise
         return ExecutionResult.model_validate(data)
 
+    async def submit_program(self, lease_id: str, code: str, *, request_id: str):
+        for attempt in range(2):
+            try:
+                return await self._request(
+                    "POST",
+                    f"/v1/leases/{lease_id}/programs",
+                    json={"code": code, "request_id": request_id},
+                )
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                if attempt:
+                    raise
+
+    async def latest_program_checkpoint(self, checkpoint: dict):
+        runtime_id = (checkpoint.get("metadata") or {}).get("program_runtime_id")
+        if not runtime_id:
+            return checkpoint
+        latest = await self._request(
+            "GET", f"/v1/program-runtimes/{runtime_id}/checkpoint"
+        )
+        return (
+            latest
+            if latest.get("created_at", "") > checkpoint.get("created_at", "")
+            else checkpoint
+        )
+
+    async def program_status(
+        self, lease_id: str, program_id: str | None = None, *, result=False
+    ):
+        params = {"result": str(result).lower()}
+        if program_id:
+            params["program_id"] = program_id
+        return await self._request(
+            "GET", f"/v1/leases/{lease_id}/programs", params=params
+        )
+
+    async def program_events(self, lease_id: str, *, after: int, timeout: float = 30):
+        return await self._request(
+            "GET",
+            f"/v1/leases/{lease_id}/program-events",
+            params={"after": after, "timeout": timeout},
+        )
+
+    async def cancel_program(self, lease_id: str, program_id: str):
+        return await self._request(
+            "DELETE", f"/v1/leases/{lease_id}/programs/{program_id}"
+        )
+
     async def observe(
         self,
         lease_id: str,

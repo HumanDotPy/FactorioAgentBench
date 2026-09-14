@@ -160,12 +160,15 @@ CUSTOMER_DEPOT_LOCATION = (
 )
 
 
-def freeplay_task_spec(checkpoint_id: str | None = None) -> FactorioTaskSpec:
+def freeplay_task_spec(
+    checkpoint_id: str | None = None, *, execution_mode="turn_based"
+) -> FactorioTaskSpec:
     """The single persistent lease task for one adaptive session."""
     from fle.envd.models import VerifierSpec
 
     return FactorioTaskSpec(
         task_id=FREEPLAY_TASK_ID,
+        execution_mode=execution_mode,
         goal=(
             "Establish each requested autonomous production rate. The factory "
             "persists between tasks; infrastructure you build remains available."
@@ -223,6 +226,7 @@ def _persist_run_checkpoint(
             "model": args.model,
             "provider": args.provider,
             "harness": getattr(args, "harness", "native"),
+            "execution_mode": evaluation_execution_mode(args),
             "started_at": started_at.isoformat(),
             "session_id": session_id,
             "epoch_index": epoch_index,
@@ -890,7 +894,7 @@ class HermesPersistentAgentSession:
         "across requisitions, so preserve "
         "and extend useful infrastructure. There is no fixed intervention or "
         "turn allowance; each requisition has a simulation-time deadline. Thinking "
-        "does not consume that deadline, but actions and waits do. Stop "
+        "consumes that deadline in realtime mode; inspect the episode pacing. Stop "
         "calling tools for this interaction after the current requisition is "
         "fulfilled, expired, or the tool result reports another terminal reason. "
         "That boundary does not end industrial development: the next interaction "
@@ -967,6 +971,7 @@ class HermesPersistentAgentSession:
 
     def inference_settings(self) -> dict[str, Any]:
         return {
+            "execution_mode": getattr(self, "execution_mode", "turn_based"),
             "model": self.model,
             "provider": "openrouter",
             "reasoning": self.reasoning,
@@ -984,6 +989,10 @@ class HermesPersistentAgentSession:
 
     async def start(self, system_prompt: str | None = None) -> None:
         self.system_prompt = system_prompt or self.SYSTEM_PROMPT
+        if getattr(self, "execution_mode", "turn_based") == "realtime":
+            from fle.envd.realtime_prompt import REALTIME_PROMPT
+
+            self.system_prompt += "\n\n" + REALTIME_PROMPT
 
     async def run_epoch(self, order_prompt: str) -> AgentEpochTelemetry:
         epoch_number = self.invocation_count + 1
@@ -1002,45 +1011,63 @@ class HermesPersistentAgentSession:
             reasoning=self.reasoning,
         )
         started = time.perf_counter()
-        invocation_task = asyncio.create_task(
-            asyncio.to_thread(
-                hermes_harness._run_hermes,
-                self.profile_home,
-                self.scratch,
-                usage_file,
-                prompt,
-                self.model,
-                args,
-                resume_latest=self.invocation_count > 0,
-                toolsets=hermes_harness.MCP_SERVER_NAME,
-                process_callback=self._set_active_process,
-            )
-        )
+        outputs = []
         terminal_observed = False
-        while not invocation_task.done():
-            await asyncio.sleep(0.25)
-            if self.terminal_file.exists():
-                terminal_observed = True
-                terminal_payload = self.terminal_file.read_text(
-                    encoding="utf-8", errors="replace"
+        while True:
+            args.timeout_seconds = max(
+                1, self.timeout_seconds - (time.perf_counter() - started)
+            )
+            invocation_task = asyncio.create_task(
+                asyncio.to_thread(
+                    hermes_harness._run_hermes,
+                    self.profile_home,
+                    self.scratch,
+                    usage_file,
+                    prompt,
+                    self.model,
+                    args,
+                    resume_latest=self.invocation_count > 0 or bool(outputs),
+                    toolsets=hermes_harness.MCP_SERVER_NAME,
+                    process_callback=self._set_active_process,
                 )
-                (
-                    self.artifacts_dir / f"epoch-{epoch_number:04d}.terminal.json"
-                ).write_text(terminal_payload, encoding="utf-8")
-                # Give the MCP response a moment to flush, then end this
-                # Hermes invocation. The persistent session remains resumable.
-                await asyncio.sleep(0.5)
-                if (
-                    self._active_process is not None
-                    and self._active_process.poll() is None
-                ):
-                    hermes_harness._terminate_process_tree(self._active_process)
+            )
+            while not invocation_task.done():
+                await asyncio.sleep(0.25)
+                await _sync_realtime_programs(self)
+                if self.terminal_file.exists():
+                    terminal_observed = True
+                    terminal_payload = self.terminal_file.read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+                    (
+                        self.artifacts_dir / f"epoch-{epoch_number:04d}.terminal.json"
+                    ).write_text(terminal_payload, encoding="utf-8")
+                    await asyncio.sleep(0.5)
+                    if (
+                        self._active_process is not None
+                        and self._active_process.poll() is None
+                    ):
+                        hermes_harness._terminate_process_tree(self._active_process)
+                    break
+            invocation = await invocation_task
+            outputs.append(invocation.output)
+            if (
+                getattr(self, "execution_mode", "turn_based") != "realtime"
+                or terminal_observed
+                or invocation.failure_category is not None
+                or time.perf_counter() - started >= self.timeout_seconds
+            ):
                 break
-        invocation = await invocation_task
+            status = await self.program_client.program_status(self.program_lease_id)
+            if status["active_program_id"] or status["queue_length"]:
+                await self.program_client.program_events(
+                    self.program_lease_id, after=status["event_cursor"], timeout=30
+                )
+            prompt = "Continue this same realtime episode. Inspect program results, plan independent work, and await events when dependent on new information."
         elapsed = time.perf_counter() - started
         self.invocation_count += 1
         (self.artifacts_dir / f"epoch-{epoch_number:04d}.hermes.log").write_text(
-            invocation.output,
+            "\n".join(outputs),
             encoding="utf-8",
         )
         trace_text = (
@@ -1320,6 +1347,9 @@ class OpenCodePersistentAgentSession:
                     ],
                     "cwd": str(REPO),
                     "environment": {
+                        "FACTORIO_EXECUTION_MODE": os.environ.get(
+                            "FACTORIO_EXECUTION_MODE", "turn_based"
+                        ),
                         "ENVD_URL": envd_url,
                         "LEASE_ID": lease_id,
                         "MCP_TRACE_FILE": str(self.trace_file),
@@ -1350,6 +1380,7 @@ class OpenCodePersistentAgentSession:
 
     def inference_settings(self) -> dict[str, Any]:
         return {
+            "execution_mode": getattr(self, "execution_mode", "turn_based"),
             "model": self.model,
             "provider": self.model.split("/", 1)[0]
             if "/" in self.model
@@ -1372,6 +1403,10 @@ class OpenCodePersistentAgentSession:
     async def start(self, system_prompt: str | None = None) -> None:
         self.system_prompt = system_prompt or self.SYSTEM_PROMPT
         path = self.scratch / "opencode.json"
+        if getattr(self, "execution_mode", "turn_based") == "realtime":
+            from fle.envd.realtime_prompt import REALTIME_PROMPT
+
+            self.system_prompt += "\n\n" + REALTIME_PROMPT
         config = json.loads(path.read_text(encoding="utf-8"))
         config["agent"]["factorio-eval"]["prompt"] = self.system_prompt
         _atomic_json(path, config)
@@ -1712,6 +1747,7 @@ class OpenCodePersistentAgentSession:
                 )
                 while not invocation_task.done():
                     await asyncio.sleep(0.25)
+                    await _sync_realtime_programs(self)
                     if terminal_payload is None:
                         terminal_payload = self._capture_terminal_signal(epoch_number)
                     if terminal_payload is not None:
@@ -1855,6 +1891,26 @@ class OpenCodePersistentAgentSession:
                     continuation_reasons.append("reason:stop_without_terminal")
                     stop_reason = "continuing_after_reason:stop_without_terminal"
                     current_prompt = self._premature_stop_prompt()
+                    if getattr(self, "execution_mode", "turn_based") == "realtime":
+                        status = await self.program_client.program_status(
+                            self.program_lease_id
+                        )
+                        if status["active_program_id"] or status["queue_length"]:
+                            await self.program_client.program_events(
+                                self.program_lease_id,
+                                after=status["event_cursor"],
+                                timeout=30,
+                            )
+                        status = await self.program_client.program_status(
+                            self.program_lease_id
+                        )
+                        status.pop("checkpoint", None)
+                        current_prompt = (
+                            "The realtime executor has continued since your last response. "
+                            "Inspect completed program receipts and do useful independent work; "
+                            "await events when new information is required. Runtime status: "
+                            + json.dumps(status)
+                        )
                     if len(logical_outputs) > 1:
                         attempt_outputs.append(
                             "\n--- provider retry ---\n".join(logical_outputs)
@@ -2150,10 +2206,77 @@ def stopping_rule_met(
     )
 
 
+async def _sync_realtime_programs(agent):
+    """Persist executor progress independently of model tool calls or provider EOF."""
+    if getattr(agent, "execution_mode", "turn_based") != "realtime":
+        return
+    now = time.monotonic()
+    if now - getattr(agent, "_program_sync_time", 0) < 1:
+        return
+    agent._program_sync_time = now
+    status = await agent.program_client.program_status(agent.program_lease_id)
+    if status.get("failure"):
+        raise RuntimeError(status["failure"])
+    checkpoint = status.get("checkpoint")
+    if checkpoint:
+        _atomic_json(
+            agent.artifacts_dir / "resume" / "world-checkpoint.json",
+            {"schema_version": "factorio-resume-pointer-v1", "checkpoint": checkpoint},
+        )
+    terminal_id = status.get("terminal_program_id")
+    terminal_event = status.get("terminal_event")
+    if terminal_event and not terminal_id:
+        observation = await agent.program_client.observe(agent.program_lease_id)
+        _atomic_json(
+            agent.terminal_file,
+            {
+                "reason": terminal_event["kind"],
+                "payload": observation.model_dump(mode="json"),
+            },
+        )
+    if terminal_id:
+        completed = await agent.program_client.program_status(
+            agent.program_lease_id, terminal_id, result=True
+        )
+        result = completed.get("result")
+        if result:
+            reason = (
+                result.get("terminal_reason")
+                or (terminal_event or {}).get("kind")
+                or next(
+                    (
+                        e["kind"]
+                        for e in result.get("events", [])
+                        if e.get("kind") in {"contract_fulfilled", "contract_expired"}
+                    ),
+                    None,
+                )
+            )
+            if reason:
+                _atomic_json(agent.terminal_file, {"reason": reason, "payload": result})
+
+
+def evaluation_execution_mode(args):
+    mode = getattr(args, "execution_mode", "auto")
+    if mode == "auto":
+        return (
+            "realtime"
+            if getattr(args, "harness", "native") in {"opencode", "hermes"}
+            else "turn_based"
+        )
+    if mode == "realtime" and getattr(args, "harness", "native") == "native":
+        raise ValueError(
+            "Realtime mode currently requires the OpenCode or Hermes MCP harness"
+        )
+    return mode
+
+
 def create_agent_session(
     args, client, lease, record_path, trajectory_dir, *, on_execution=None
 ):
     """Construct the same tool routes and harness for every evaluation mode."""
+    execution_mode = evaluation_execution_mode(args)
+    os.environ["FACTORIO_EXECUTION_MODE"] = execution_mode
     memory_enabled = getattr(args, "memory_profile", "disabled") == "stateful"
     memory_path = record_path.parent / f"{record_path.stem}.memory.json"
     resume_pointer_path = trajectory_dir / "resume" / "world-checkpoint.json"
@@ -2362,6 +2485,9 @@ def create_agent_session(
             memory_enabled=memory_enabled,
         )
 
+    agent.execution_mode = execution_mode
+    agent.program_client = client
+    agent.program_lease_id = lease.lease_id
     return agent
 
 
@@ -2414,6 +2540,12 @@ async def run_session(args: argparse.Namespace) -> AdaptiveSessionRecord:
     record_path = Path(args.output).resolve()
     resume_bundle = _load_run_checkpoint(getattr(args, "resume_from", None))
     if resume_bundle:
+        if resume_bundle.get(
+            "execution_mode", "turn_based"
+        ) != evaluation_execution_mode(args):
+            raise ValueError(
+                "Resume execution mode differs from the saved evaluation; select its original --execution-mode"
+            )
         for key, expected in (
             ("model", args.model),
             ("provider", args.provider),
@@ -2494,6 +2626,10 @@ async def run_session(args: argparse.Namespace) -> AdaptiveSessionRecord:
                     pointer_checkpoint
                 ) > _checkpoint_created_at(selected_checkpoint):
                     selected_checkpoint = pointer_checkpoint
+            if (selected_checkpoint.get("metadata") or {}).get("program_runtime_id"):
+                selected_checkpoint = await client.latest_program_checkpoint(
+                    selected_checkpoint
+                )
             resume_checkpoint = str(selected_checkpoint["checkpoint_id"])
         lease = None
         if resume_bundle:
@@ -2505,7 +2641,11 @@ async def run_session(args: argparse.Namespace) -> AdaptiveSessionRecord:
                 except Exception:
                     lease = None
         if lease is None:
-            lease = await client.lease(freeplay_task_spec(resume_checkpoint))
+            lease = await client.lease(
+                freeplay_task_spec(
+                    resume_checkpoint, execution_mode=evaluation_execution_mode(args)
+                )
+            )
 
         agent = create_agent_session(args, client, lease, record_path, trajectory_dir)
 
@@ -3482,6 +3622,12 @@ def default_adaptive_run_id(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--execution-mode",
+        choices=("auto", "turn_based", "realtime"),
+        default="auto",
+        help="auto selects continuous 1x for OpenCode/Hermes; native remains turn-based",
+    )
     parser.add_argument(
         "--mode",
         choices=("requisitions", "technology", "rocket_launch"),

@@ -434,6 +434,7 @@ class FactorioTaskSpec(WireModel):
     factorio_version: str = "2.0.77"
     checkpoint_id: str = "scenario:open_world"
     action_profile: str = "semantic-motor-v1"
+    execution_mode: Literal["turn_based", "realtime"] = "turn_based"
     realtime_allowed: bool = Field(
         default=True,
         description=(
@@ -456,6 +457,8 @@ class FactorioTaskSpec(WireModel):
 
     @model_validator(mode="after")
     def validate_objectives(self) -> "FactorioTaskSpec":
+        if self.execution_mode == "realtime" and not self.realtime_allowed:
+            raise ValueError("Realtime execution requires realtime_allowed")
         if self.evaluation_mode:
             if self.adaptive_contract_session or self.customer is not None:
                 raise ValueError("Progression modes cannot also be customer sessions")

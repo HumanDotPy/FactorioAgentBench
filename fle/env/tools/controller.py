@@ -189,6 +189,9 @@ class Controller:
         return parsed, lua_response
 
     def execute(self, *args) -> Tuple[Dict, Any]:
+        control = getattr(self.game_state, "_program_runtime", None)
+        if control is not None:
+            control.pump()
         for attempt in range(MAX_PROCESSING_RETRIES):
             try:
                 parsed, lua_response = self._execute_once(*args)

@@ -483,6 +483,9 @@ def _write_hermes_profile(
 
     profile_home.mkdir(parents=True, exist_ok=True)
     mcp_env = {
+        "FACTORIO_EXECUTION_MODE": os.environ.get(
+            "FACTORIO_EXECUTION_MODE", "turn_based"
+        ),
         "ENVD_URL": envd_url,
         "LEASE_ID": lease_id,
         "MCP_TRACE_FILE": str(trace_file),

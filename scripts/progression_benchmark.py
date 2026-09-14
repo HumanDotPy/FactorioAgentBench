@@ -82,6 +82,9 @@ async def run_progression_session(args) -> ProgressionSessionRecord:
     task = progression_task_spec(
         args.mode, seed=args.seed, max_ticks=args.max_session_ticks
     )
+    from scripts.adaptive_contract_benchmark import evaluation_execution_mode
+
+    task = task.model_copy(update={"execution_mode": evaluation_execution_mode(args)})
     validate_game_data(args.recipe_dump, task)
     api_reference_hash = ApiReference().reference_hash
     game_data, _ = load_game_data(args.recipe_dump)
@@ -167,6 +170,8 @@ async def run_progression_session(args) -> ProgressionSessionRecord:
                 candidate = pointer.get("checkpoint") or {}
                 if candidate.get("created_at", "") > chosen.get("created_at", ""):
                     chosen = candidate
+            if (chosen.get("metadata") or {}).get("program_runtime_id"):
+                chosen = await client.latest_program_checkpoint(chosen)
             task = task.model_copy(update={"checkpoint_id": chosen["checkpoint_id"]})
         lease = None
         if resume:
