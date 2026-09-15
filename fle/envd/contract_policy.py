@@ -272,6 +272,8 @@ class EvidenceDrivenCustomerPolicy:
         # Remembering the consumed epoch prevents a failed target from
         # capturing every subsequent order when no other evidence changes.
         self._recovery_consumed_epochs: dict[str, int] = {}
+        self._band_context: ContractContextSnapshot | None = None
+        self._band_value = 0
 
     # ------------------------------------------------------------------
     # Evidence ingestion
@@ -1095,16 +1097,17 @@ class EvidenceDrivenCustomerPolicy:
     ) -> list[ContractCandidate]:
         """Build a mixed service vector that grows with proven capability."""
 
+        current_band = self._current_band(context)
         alternatives = [
             candidate
             for candidate in candidates
             if candidate.item_name != primary.item_name
             and candidate.mixture_class != "stress"
             and candidate.features is not None
-            and int(candidate.features.stage_band) <= self._current_band(context) + 1
+            and int(candidate.features.stage_band) <= current_band + 1
             and (
                 candidate.mixture_class != "frontier"
-                or self._frontier_step_allowed(candidate, self._current_band(context))
+                or self._frontier_step_allowed(candidate, current_band)
             )
         ]
         if not alternatives:
@@ -1292,8 +1295,9 @@ class EvidenceDrivenCustomerPolicy:
         except (TypeError, ValueError):
             return features.stage_band <= current_band + FRONTIER_MAX_BAND_STEP
 
-    @staticmethod
-    def _current_band(context: ContractContextSnapshot) -> int:
+    def _current_band(self, context: ContractContextSnapshot) -> int:
+        if context is self._band_context:
+            return self._band_value
         explicit = getattr(context, "factory_band", None)
         explicit_band: int | None = None
         if explicit is not None:
@@ -1309,9 +1313,12 @@ class EvidenceDrivenCustomerPolicy:
             # carry its default zero even when the snapshot already proves
             # electricity/automation.  Never let that stale lower value make
             # ordinary same-band anchors look unavailable.
-            return max(classified_band, explicit_band or 0)
+            value = max(classified_band, explicit_band or 0)
         except Exception:
-            return explicit_band or 0
+            value = explicit_band or 0
+        self._band_context = context
+        self._band_value = value
+        return value
 
     @staticmethod
     def _context_production_rate(

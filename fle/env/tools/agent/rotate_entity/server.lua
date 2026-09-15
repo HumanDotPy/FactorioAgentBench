@@ -175,5 +175,6 @@ storage.actions.rotate_entity = function(player_index, x, y, direction, entity)
     end
 
     local serialized = storage.utils.serialize_entity(closest_entity)
-    return serialized
+    return storage.utils.attach_connection_report(serialized, closest_entity,
+        storage.agent_characters[player_index])
 end

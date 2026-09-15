@@ -1,6 +1,5 @@
 import pytest
-from time import sleep
-from fle.env.entities import Position, ResourcePatch, Direction
+from fle.env.entities import Position, Direction
 from fle.env.game_types import Prototype, RecipeName, Resource
 
 
@@ -104,7 +103,7 @@ def test_entity_interactions(game):
     game.insert_item(Prototype.Coal, boiler, 50)
 
     # Wait for production
-    sleep(30)
+    game.sleep(30)
 
     # Check if iron gear wheels were produced
     output_inventory = game.inspect_inventory(output_chest)

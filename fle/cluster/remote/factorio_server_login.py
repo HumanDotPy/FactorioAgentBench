@@ -25,10 +25,42 @@ CONNECT_BUTTON = (850, 480)
 ESC_MENU_QUIT_BUTTON = (720, 520)
 
 
+def _factorio_running() -> bool:
+    return (
+        subprocess.run(["pgrep", "-x", "Factorio"], capture_output=True).returncode == 0
+    )
+
+
+def _factorio_frontmost() -> bool:
+    completed = subprocess.run(
+        [
+            "osascript",
+            "-e",
+            'tell application "System Events" to name of first process '
+            "whose frontmost is true",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return completed.returncode == 0 and completed.stdout.strip() == "Factorio"
+
+
+def _wait_for(predicate, timeout: float, interval: float = 0.25) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if predicate():
+                return True
+        except Exception:
+            pass
+        time.sleep(interval)
+    return False
+
+
 def launch_factorio():
     # Adjust the path to your Factorio executable
     process = subprocess.Popen(["open", "-a", "Factorio"])
-    time.sleep(10)  # Wait for the game to launch
+    _wait_for(_factorio_running, 30)
     return process
 
 
@@ -38,7 +70,7 @@ def focus_factorio():
     tell application "Factorio" to activate
     """
     subprocess.run(["osascript", "-e", applescript])
-    time.sleep(1)  # Wait a moment for the window to come into focus
+    _wait_for(_factorio_frontmost, 5)
 
 
 def connect_to_server(ip_address):
@@ -59,11 +91,12 @@ def connect_to_server(ip_address):
     pyautogui.write(f"{ip_address}:34197")
     # Click connect
     pyautogui.click(CONNECT_BUTTON)
-    time.sleep(5)  # Wait for connection attempt
+    # Wait for the connection attempt to finish or fail early.
+    _wait_for(lambda: not _factorio_running(), 5)
     # Quit the game
     pyautogui.press("esc")
     pyautogui.click(ESC_MENU_QUIT_BUTTON)
-    time.sleep(3)  # Wait for the game to close
+    _wait_for(lambda: not _factorio_running(), 10)
 
 
 def is_initialised(ip_address, port):

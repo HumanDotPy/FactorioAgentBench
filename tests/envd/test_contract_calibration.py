@@ -89,8 +89,7 @@ def _synthetic_records(
 # ---------------------------------------------------------------------------
 
 
-def test_grouped_split_never_splits_a_group():
-    records = _synthetic_records(seed=3)
+def test_grouped_split_never_splits_a_group(records):
     train, test = grouped_split(records, holdout_fraction=0.25)
     assert train and test
     train_groups = {(r.factory_seed, r.participant_id) for r in train}
@@ -98,9 +97,9 @@ def test_grouped_split_never_splits_a_group():
     assert not (train_groups & test_groups), "group leaked across the split"
 
 
-def test_fit_requires_minimum_records():
+def test_fit_requires_minimum_records(records):
     with pytest.raises(ValueError):
-        fit_contextual_model(_synthetic_records()[:4])
+        fit_contextual_model(records[:4])
 
 
 # ---------------------------------------------------------------------------
@@ -109,8 +108,12 @@ def test_fit_requires_minimum_records():
 
 
 @pytest.fixture(scope="module")
-def fitted():
-    records = _synthetic_records()
+def records():
+    return _synthetic_records()
+
+
+@pytest.fixture(scope="module")
+def fitted(records):
     train, _test = grouped_split(records, holdout_fraction=0.2)
     outcome = fit_contextual_model(train)
     return outcome
@@ -159,12 +162,12 @@ def test_controlled_monotonicity_gates_pass(fitted):
 # ---------------------------------------------------------------------------
 
 
-def test_manifest_contains_frozen_policy(fitted):
+def test_manifest_contains_frozen_policy(fitted, records):
     manifest = build_manifest(
         fit=fitted,
         benchmark_version="bv-test",
         game_versions=("2.0.73",),
-        training_records=_synthetic_records(),
+        training_records=records,
         implementation_commit="deadbeef",
     )
     assert isinstance(manifest, CalibrationManifest)

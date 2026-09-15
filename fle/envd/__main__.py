@@ -14,6 +14,12 @@ def main() -> None:
     parser.add_argument("--factorio-address", default="localhost")
     parser.add_argument("--rcon-ports", default="27000")
     parser.add_argument(
+        "--reference-capacity",
+        type=int,
+        default=None,
+        help="Maximum lazy creative Docker worlds (default: worker count; 0 disables)",
+    )
+    parser.add_argument(
         "--execution-game-speed",
         type=float,
         default=float(os.getenv("FLE_EXECUTION_GAME_SPEED", "10")),
@@ -134,6 +140,7 @@ def main() -> None:
         lease_ttl_seconds=args.lease_ttl,
         audit_tcp_ports=audit_ports,
         execution_game_speed=args.execution_game_speed,
+        reference_capacity=args.reference_capacity,
     )
     uvicorn.run(create_app(service), host=args.host, port=args.port, workers=1)
 

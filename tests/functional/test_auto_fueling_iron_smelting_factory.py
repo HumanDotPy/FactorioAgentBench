@@ -1,5 +1,4 @@
 import pytest
-from time import sleep
 
 from fle.env.entities import Position
 from fle.env import DirectionInternal as Direction
@@ -18,7 +17,6 @@ def game(instance):
     }
     instance.reset()
     yield instance.namespace
-    instance.reset()
 
 
 def test_auto_fueling_iron_smelting_factory(game):
@@ -103,7 +101,7 @@ def test_auto_fueling_iron_smelting_factory(game):
     game.insert_item(Prototype.Coal, coal_drill, quantity=10)
 
     # Wait for some time to let the system produce iron plates
-    sleep(15)  # Wait for 15 seconds
+    game.sleep(15)
 
     # Check the iron chest to see if iron plates have been produced
     chest_inventory = game.inspect_inventory(iron_chest)

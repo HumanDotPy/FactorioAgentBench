@@ -16,8 +16,14 @@ local on_tick = function(event)
   if storage.story == nil then
     storage.story = story_init(player(1))
   end
-  story_update(storage.story, event)
-  game.print("tick")
+  local story = storage.story
+  if story_branches then
+    local branches = story_branches[story.story_index]
+    if not branches or story.story_position > #branches then
+      return
+    end
+  end
+  story_update(story, event)
   --Other things on tick can go here.
 end
 

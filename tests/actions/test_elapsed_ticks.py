@@ -18,7 +18,6 @@ def game(instance):
     }
     instance.reset()
     yield instance.namespace
-    instance.reset()
 
 
 @pytest.mark.parametrize(

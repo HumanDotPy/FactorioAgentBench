@@ -1,5 +1,5 @@
 from fle.env.entities import Entity
-from fle.env.game_types import Prototype
+from fle.env.game_types import prototype_by_name
 from fle.env.tools import Tool
 from fle.env.tools.agent.get_entity.client import GetEntity
 
@@ -19,7 +19,7 @@ class ResolveEntity(Tool):
         if not isinstance(response, dict):
             raise Exception(f"Entity handle {unit_number} is stale: {response}")
         name = str(response["name"]).strip('"')
-        prototype = next((value for value in Prototype if value.value[0] == name), None)
+        prototype = prototype_by_name.get(name)
         if prototype is None:
             raise Exception(f"No Prototype member for resolved entity {name}")
         from fle.env.entities import Position

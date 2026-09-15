@@ -25,18 +25,15 @@ from fle.envd.models import (
 def _rate_map(snapshot: ContractContextSnapshot) -> dict[str, float]:
     """Use the longest available passive window for commissioning evidence."""
     products = set(snapshot.production_rates_60s) | set(snapshot.production_rates_300s)
-    return {
-        product: max(
+    rates: dict[str, float] = {}
+    for product in sorted(products):
+        rate = max(
             float(snapshot.production_rates_60s.get(product, 0.0)),
             float(snapshot.production_rates_300s.get(product, 0.0)),
         )
-        for product in sorted(products)
-        if max(
-            float(snapshot.production_rates_60s.get(product, 0.0)),
-            float(snapshot.production_rates_300s.get(product, 0.0)),
-        )
-        > 0
-    }
+        if rate > 0:
+            rates[product] = rate
+    return rates
 
 
 def commissioning_certificate(

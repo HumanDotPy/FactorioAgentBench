@@ -40,7 +40,6 @@ def game(instance):
     }
     instance.reset()
     yield instance.namespace
-    instance.reset()
 
 
 def test_no_fuel_status_when_burner_empty(game):

@@ -106,6 +106,26 @@ local function find_offshore_pump_position(player, center_pos)
     return nil
 end
 
+local function character_only_blocker(diagnostic, player)
+    local blocked = diagnostic and diagnostic.blocked_by
+    if not blocked or blocked.prototype ~= "character" then
+        return false
+    end
+    if player and player.unit_number and blocked.entity_id
+        and blocked.entity_id ~= player.unit_number then
+        return false
+    end
+    if #(diagnostic.colliding_tiles or {}) > 0 then
+        return false
+    end
+    for _, other in ipairs(diagnostic.overlapping_entities or {}) do
+        if other.prototype ~= "character" then
+            return false
+        end
+    end
+    return true
+end
+
 storage.actions.place_entity = function(player_index, entity, direction, x, y, exact)
     -- Ensure we have a valid character, recreating if necessary
     local player = storage.utils.ensure_valid_character(player_index)
@@ -179,7 +199,8 @@ storage.actions.place_entity = function(player_index, entity, direction, x, y, e
             direction=entity_direction,force=player.force,raise_built=true}
         if not built then error("Assisted placement rejected by engine") end
         player.remove_item{name=entity,count=1}
-        return storage.utils.serialize_entity(built)
+        local serialized = storage.utils.serialize_entity(built)
+        return storage.utils.attach_connection_report(serialized, built, player)
     end
 
     -- Main execution flow
@@ -188,20 +209,56 @@ storage.actions.place_entity = function(player_index, entity, direction, x, y, e
     validate_inventory()
     if exact then
         local prototype = prototypes.entity[entity]
-        if not storage.utils.can_place_entity(player, entity, position, entity_direction) then
-            local diagnostic = storage.utils.spatial_diagnostics(player.surface, position,
+        local function placement_diagnostics()
+            return storage.utils.spatial_diagnostics(player.surface, position,
                 prototype.collision_box, entity_direction,
                 prototype.collision_mask, nil, prototype)
-            return {error=true, reason="placement_rejected", prototype=entity,
-                position=position, direction=entity_direction, diagnostics=diagnostic}
         end
-        local built = player.surface.create_entity{name=entity, position=position,
-            direction=entity_direction, force=player.force, raise_built=true}
+        local character_moved = false
+        if not storage.utils.can_place_entity(player, entity, position, entity_direction) then
+            local diagnostic = placement_diagnostics()
+            if character_only_blocker(diagnostic, player) then
+                local stepped = storage.utils.escape_character_to_free_tile(
+                    player, diagnostic.footprint, position, nil)
+                if stepped then
+                    if storage.utils.can_place_entity(player, entity, position, entity_direction) then
+                        character_moved = true
+                    else
+                        diagnostic = placement_diagnostics()
+                    end
+                end
+            end
+            if not character_moved then
+                return {error=true, reason="placement_rejected", prototype=entity,
+                    position=position, direction=entity_direction, diagnostics=diagnostic}
+            end
+        end
+        local built
+        for _, ghost in ipairs(player.surface.find_entities_filtered{
+            type="entity-ghost", ghost_name=entity, position=position, force=player.force}) do
+            if ghost.position.x == position.x and ghost.position.y == position.y
+                and ghost.direction == entity_direction and ghost.quality.name == "normal" then
+                -- Manual construction over a matching blueprint ghost preserves
+                -- recipes, circuits, schedules and item-request proxies natively.
+                local _, revived = ghost.revive{raise_revive=true}
+                built = revived
+                break
+            end
+        end
+        if not built then
+            built = player.surface.create_entity{name=entity, position=position,
+                direction=entity_direction, force=player.force, raise_built=true}
+        end
         if not built then
             return {error=true,reason="creation_rejected",prototype=entity,position=position}
         end
         player.remove_item{name=entity,count=1}
-        return storage.utils.serialize_entity(built)
+        local serialized = storage.utils.serialize_entity(built)
+        if character_moved then
+            serialized.recovered = "character_moved"
+            serialized.character_position = {x=player.position.x, y=player.position.y}
+        end
+        return storage.utils.attach_connection_report(serialized, built, player)
     end
 
     -- Placement itself is a single player action. Travel time is paid by the

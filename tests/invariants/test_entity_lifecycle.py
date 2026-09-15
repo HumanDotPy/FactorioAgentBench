@@ -38,7 +38,6 @@ def game(instance):
     }
     instance.reset()
     yield instance.namespace
-    instance.reset()
 
 
 def test_entity_has_valid_position_after_placement(game):

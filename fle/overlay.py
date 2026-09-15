@@ -29,6 +29,36 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+EMOJI_FALLBACKS = {
+    "iron-ore": "🪨",
+    "copper-ore": "🟤",
+    "coal": "⚫",
+    "stone": "🗿",
+    "wood": "🪵",
+    "iron-plate": "🔩",
+    "copper-plate": "🟠",
+    "steel-plate": "⚙️",
+    "electronic-circuit": "💾",
+    "advanced-circuit": "🔌",
+    "processing-unit": "🖥️",
+    "transport-belt": "📦",
+    "inserter": "🦾",
+    "assembling-machine": "🏭",
+    "electric-mining-drill": "⛏️",
+    "furnace": "🔥",
+    "lab": "🧪",
+    "science-pack": "🧬",
+    "pipe": "🚰",
+    "gear-wheel": "⚙️",
+    "automation-science-pack": "🔴",
+    "logistic-science-pack": "🟢",
+    "military-science-pack": "⚫",
+    "chemical-science-pack": "🔵",
+    "production-science-pack": "🟣",
+    "utility-science-pack": "🟡",
+    "coin": "🪙",
+}
+
 
 class IconManager:
     """Manages loading and caching of Factorio sprite icons."""
@@ -42,37 +72,43 @@ class IconManager:
         self.sprites_path = sprites_path
         self.icon_cache = {}
         self.base64_cache = {}
+        self._icon_path_cache = {}
         self._load_available_icons()
 
     def _load_available_icons(self):
         """Scan the sprites directory and cache available icons."""
+        self._icon_path_cache.clear()
         if not self.sprites_path.exists():
-            logger.warning(f"Sprites directory not found: {self.sprites_path}")
+            logger.warning("Sprites directory not found: %s", self.sprites_path)
             return
 
         for icon_file in self.sprites_path.glob("icon_*.png"):
             # Extract item name from filename (e.g., "icon-transport_belt.png" -> "transport-belt")
             item_name = icon_file.stem.replace("icon_", "").replace("_", "-")
             self.icon_cache[item_name] = icon_file
-            logger.debug(f"Cached icon for {item_name}: {icon_file}")
+            logger.debug("Cached icon for %s: %s", item_name, icon_file)
 
     def get_icon_path(self, item_name: str) -> Optional[Path]:
         """Get the file path for an item's icon."""
-        # Try exact match first
-        if item_name in self.icon_cache:
-            return self.icon_cache[item_name]
+        if item_name in self._icon_path_cache:
+            return self._icon_path_cache[item_name]
+
+        icon_path = self.icon_cache.get(item_name)
 
         # Try with underscores instead of hyphens
-        alt_name = item_name.replace("-", "_")
-        if alt_name in self.icon_cache:
-            return self.icon_cache[alt_name]
+        if icon_path is None:
+            alt_name = item_name.replace("-", "_")
+            icon_path = self.icon_cache.get(alt_name)
 
         # Try to find partial matches
-        for cached_name, path in self.icon_cache.items():
-            if cached_name in item_name or item_name in cached_name:
-                return path
+        if icon_path is None:
+            for cached_name, path in self.icon_cache.items():
+                if cached_name in item_name or item_name in cached_name:
+                    icon_path = path
+                    break
 
-        return None
+        self._icon_path_cache[item_name] = icon_path
+        return icon_path
 
     def get_icon_base64(self, item_name: str) -> Optional[str]:
         """Get base64 encoded icon for an item."""
@@ -90,7 +126,7 @@ class IconManager:
                 self.base64_cache[item_name] = f"data:image/png;base64,{base64_data}"
                 return self.base64_cache[item_name]
         except Exception as e:
-            logger.error(f"Error loading icon for {item_name}: {e}")
+            logger.error("Error loading icon for %s: %s", item_name, e)
             return None
 
     def get_icon_url(self, item_name: str) -> str:
@@ -104,37 +140,7 @@ class IconManager:
 
     def get_emoji_fallback(self, item_name: str) -> str:
         """Get emoji fallback for items without sprites."""
-        icon_map = {
-            "iron-ore": "🪨",
-            "copper-ore": "🟤",
-            "coal": "⚫",
-            "stone": "🗿",
-            "wood": "🪵",
-            "iron-plate": "🔩",
-            "copper-plate": "🟠",
-            "steel-plate": "⚙️",
-            "electronic-circuit": "💾",
-            "advanced-circuit": "🔌",
-            "processing-unit": "🖥️",
-            "transport-belt": "📦",
-            "inserter": "🦾",
-            "assembling-machine": "🏭",
-            "electric-mining-drill": "⛏️",
-            "furnace": "🔥",
-            "lab": "🧪",
-            "science-pack": "🧬",
-            "pipe": "🚰",
-            "gear-wheel": "⚙️",
-            "automation-science-pack": "🔴",
-            "logistic-science-pack": "🟢",
-            "military-science-pack": "⚫",
-            "chemical-science-pack": "🔵",
-            "production-science-pack": "🟣",
-            "utility-science-pack": "🟡",
-            "coin": "🪙",  # Add coin fallback
-        }
-
-        for key, icon in icon_map.items():
+        for key, icon in EMOJI_FALLBACKS.items():
             if key in item_name.lower():
                 return icon
 
@@ -450,14 +456,8 @@ class FactorioControlPanel:
         # Add timestamp
         self.production_history["timestamps"].append(time.time())
 
-        # Track production outputs
+        # Track production outputs and calculate total economic value
         outputs = production_flows.get("output", {})
-        for item, amount in outputs.items():
-            if item not in self.production_history["data"]:
-                self.production_history["data"][item] = deque(maxlen=50)
-            self.production_history["data"][item].append(amount)
-
-        # Calculate total economic value for this tick
         total_value = 0
         for item, amount in outputs.items():
             if item not in self.production_history["data"]:
@@ -659,7 +659,7 @@ class FactorioControlPanel:
                     self.update_production_chart(update["production_flows"])
 
                 logger.debug(
-                    f"Processed state_update at {update.get('timestamp', 'unknown')}"
+                    "Processed state_update at %s", update.get("timestamp", "unknown")
                 )
 
             elif update["type"] == "init":
@@ -928,7 +928,7 @@ class FactorioControlPanel:
         while self.is_running:
             try:
                 poll_count += 1
-                logger.debug(f"Polling iteration {poll_count} at {time.time()}")
+                logger.debug("Polling iteration %s at %s", poll_count, time.time())
 
                 # Get the current game state from the Factorio instance
                 if hasattr(self, "gym_env") and self.gym_env:
@@ -949,15 +949,15 @@ class FactorioControlPanel:
 
                     # Put update in queue for UI processing
                     # self.update_queue.put(update)
-                    logger.debug(f"Polling update {poll_count} sent to queue")
+                    logger.debug("Polling update %s sent to queue", poll_count)
 
                 await asyncio.sleep(3.0)  # Poll every second
 
             except Exception as e:
-                logger.error(f"Error in polling loop (iteration {poll_count}): {e}")
+                logger.error("Error in polling loop (iteration %s): %s", poll_count, e)
                 await asyncio.sleep(3.0)  # Continue polling even on error
 
-        logger.info(f"Stopping polling after {poll_count} iterations")
+        logger.info("Stopping polling after %s iterations", poll_count)
 
     async def _update_camera_viewport(self):
         """Update camera viewport to follow agent character."""

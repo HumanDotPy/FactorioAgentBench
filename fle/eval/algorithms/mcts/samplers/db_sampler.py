@@ -59,13 +59,14 @@ class DBSampler(ABC):
                 mean_value = sum(values) / len(values)
 
                 # Calculate and update advantage for each child
-                for child in children_data:
-                    advantage = child["value"] - mean_value
-                    cur.execute(
-                        """
-                        UPDATE programs 
-                        SET advantage = %s 
-                        WHERE id = %s
-                        """,
-                        (advantage, child["id"]),
-                    )
+                cur.executemany(
+                    """
+                    UPDATE programs 
+                    SET advantage = %s 
+                    WHERE id = %s
+                    """,
+                    [
+                        (child["value"] - mean_value, child["id"])
+                        for child in children_data
+                    ],
+                )

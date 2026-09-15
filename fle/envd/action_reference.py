@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 
-ACTION_PROFILE_REFERENCE_ID = "semantic-motor-v1/reference-v3"
+ACTION_PROFILE_REFERENCE_ID = "semantic-motor-v1/reference-v6"
 
 ACTION_PROFILE_REFERENCE = """\
 Operate and expand a persistent factory, emphasizing autonomous production,
@@ -35,29 +35,85 @@ Core inspection and interaction:
 - get_entities(entities=set(), position=None, radius=1000) -> list[Entity]
 - nearest(Prototype.X or Resource.X) -> Position
 - get_entity(Prototype.X, position) -> Entity; resolve_entity(entity.id) -> Entity
-- get_entity_ports(entity) -> {inputs, outputs}
+- get_entity_ports(entity) -> {inputs, outputs, ports}
+    Runtime fluid ports read from the entity's fluidboxes: each port has
+    {x, y, fluidbox_index, flow_direction, connection_type, direction?}.
+    inputs/outputs contain ports the game types as input/output; bidirectional
+    ports appear only under `ports`. Port coordinates are fluidbox connection
+    points and usually sit inside the machine body. Every port also reports
+    connection state: `connected` is true when a live neighbour joins it,
+    false when open (absent if the runtime cannot resolve it); connected
+    ports carry `peers` [{entity_id, name, position}]; open ports carry
+    `attach_tiles`, the tile(s) where a pipe makes the connection, best first
+    (empty when the tile is blocked). Place the pipe at an attach tile, never
+    at the port coordinate itself.
+- get_power_network(position, window_seconds=5, include_members=False)
+    Electric network state at a point (a pole click): network_id, production_w
+    and by_producer, consumption_w and by_consumer, storage (accumulator
+    charge statistic), generator/consumer counts, windowed statistics. Raw
+    state only - no satisfaction or recommendations.
+- get_fluid_network(position, include_members=False, max_entities=512)
+    Fluid segment state at a point (a pipe inspection): segment_id, fluid,
+    amount, capacity, fill_ratio, and pipe/tank/pump/machine counts. Raw state
+    only - no flow rates or starvation counts.
 - get_tile_map(center, radius=16) -> {rows, entities, legend}
     Compact ASCII tile map (north up) with a structured entity list. Use it
     before building and immediately after a placement stops short.
-- trace_belt(position, max_tiles=64) -> {start, tiles, blocker}
-    Follow a belt downstream: per-tile direction, active flag and lane
-    contents, then the first blocker (end_of_line, blocked_by_entity with the
-    blocking entity, or max_tiles_reached). Use it when items stop flowing.
+- trace_belt(position, max_tiles=64, upstream=False) -> {start, tiles, blocker}
+    Follow a belt downstream (default) or upstream: per-tile direction, active
+    flag and lane contents, then the first blocker. Downstream reasons:
+    end_of_line, blocked_by_entity with the blocking entity, max_tiles_reached.
+    Upstream reasons: start_of_line, fed_by_entity with the source entity,
+    max_tiles_reached. Use it when items stop flowing or when finding a line's
+    origin.
 - move_to(target, stop_distance=0, mode='walk', waypoints=None,
     interrupt_on=None, timeout_ticks=36000) -> Position
     Open coordinates are exact; occupied coordinates resolve to the nearest
-    walkable point in interaction range. stop_distance stops earlier.
+    walkable point in interaction range. stop_distance stops earlier. If a walk
+    stalls with no progress, the controller attempts a bounded local escape
+    onto a validated free orthogonal tile: on success it returns that reached
+    Position, otherwise it raises naming both the blocked position and the
+    requested destination.
 - harvest_resource(position, quantity=1) -> int
-- insert_item(item, target, quantity=5) -> Entity
+- mine_entity(target) -> {name, position, items, removed}
+    Clear one neutral obstacle near target (an Entity or Position): mine a
+    tree, dead trunk or rock into your inventory (counted as manual
+    production), or destroy a productless neutral stump or corpse. Only one
+    entity within 1.5 tiles is affected and force-owned entities are refused.
+    Use this instead of deconstruct_area to clear a single tree, rock or stump.
+- insert_item(item, target, quantity=5, replace=False) -> Entity
+    `replace=True` swaps a burner machine's fuel when its single fuel slot
+    holds a different item: the old stack is moved back to your inventory and
+    the receipt reports it under `replaced_fuel`. Without it the call fails
+    and names the blocking item and both remedies.
 - extract_item(item, source, quantity=5) -> int
 - transfer_item(item, source, target, quantity=5) -> dict
 - pickup_entity(entity), rotate_entity(entity, direction)
+- deconstruct_area(top_left, bottom_right, prototype=None, include_neutral=True,
+    max_entities=512) -> {status, area, removed, requested, items_returned,
+    skipped, truncated, inventory_full, tick}
+    Bulk-deconstruct an axis-aligned rectangle (a planner drag) and return the
+    items to your inventory. Player entities keep their inventory and belt-lane
+    contents; neutral trees/rocks yield their mineable products when
+    include_neutral is set. Resources, ghosts, corpses, cliffs, dropped items
+    and characters are never removed. Protected entities are skipped. Stops
+    with status='inventory_full' before removing what would not fit. The
+    rectangle is at most 64x64 tiles.
 - set_entity_recipe(entity, RecipeName.X)
 
 Construction is exact and non-atomic. Earlier successful placements remain
 when a later placement fails. Failures expose `blocked_by` (nearest blocking
 entity with name/position) when an entity is the cause:
 - place_entity(Prototype.X, direction=Direction.UP, position=Position(x,y), exact=True)
+    Receipts for fluid machines include the live port report under `fluid` and
+    add `warnings` for every open machine port, each naming the attach tile to
+    use; pipes stay quiet because an open pipe end is normal while building.
+    When the ONLY blocker is your own character, the controller steps the
+    character to a nearby free tile away from the requested footprint, retries
+    the exact placement once, and adds `recovered='character_moved'` plus
+    `character_position` to the receipt. Position, prototype, and direction are
+    never changed; any other blocker still fails with its `blocked_by`
+    diagnostics.
 - place_path(prototype, points, routing='polyline', on_collision='stop',
     on_insufficient_materials='stop') -> structured partial/completed receipt
     Segments are axis-aligned; specify every corner. The controller infers
@@ -67,9 +123,32 @@ entity with name/position) when an entity is the cause:
     prototype, offset, and optional direction
 - place_between(prototype, source, target, position) infers orientation only;
     you still choose the placement tile
-- place_power_line(points, pole, spacing=7) places poles along your corridor
+- place_power_line(points, pole, spacing=7) -> structured partial/completed receipt
+    Poles are exact and evenly spaced along the polyline; there is no routing.
+    Interpolated points that already hold an electric pole are reported under
+    `existing` and count as satisfied, so re-issuing the same points resumes a
+    partial line. The first genuinely blocked point stops the line and returns
+    `blocker` (position/name/blocked_by), the untouched suffix under
+    `remaining`, and `stop_reason` (collision or materials_exhausted).
 - place_offshore_pump(preferred_position, direction=...) provides the one
     explicit shoreline-snapping exception
+
+Fluid and power connectivity follows the engine. Directly adjacent buildings
+join through their fluidboxes when their connection points meet: an offshore
+pump feeds a boiler, a boiler feeds steam engines, and a pipe placed against a
+machine or another pipe snaps into the network - no wires-and-magic step.
+Machine ports report `connected` plus `attach_tiles` (see get_entity_ports),
+and placement/rotation receipts carry the same report under `fluid` with
+explicit warnings for open machine ports, so connect by placing one pipe at a
+reported attach tile and re-reading the port to confirm. Power poles connect
+machines whose supply areas overlap; read coverage with get_power_network.
+
+World facts the engine will not forgive: belts never insert into chests or
+machines (an inserter is always required); a resource tile holds exactly one
+resource, so patches cannot overlap and a patch's bounding box includes
+non-ore gaps; deconstruct_area with include_neutral removes trees, rocks and
+stumps and returns their products, which is the intended way to clear a
+corridor, while mine_entity does the same for a single obstacle.
 
 `connect_entities`, `nearest_buildable`, move_to laying/leading, and generic
 non-exact placement belong to `planner-assisted-v1` and are rejected here.
@@ -139,17 +218,26 @@ Native asynchronous work and event-oriented waits:
     inserters, braking, character capabilities and ammo.
     Paginated reads report total/offset/truncated; pages are fresh live reads.
 
-Blueprint library (reusable factory fragments):
-- blueprint('save', name, x, y, radius=32) captures force-owned entities in
-    the radius and stores the exchange string under name
-- blueprint('place', name_or_string, x, y) places a saved design by name or an
-    inline exchange string; materials are billed against your inventory
-- blueprint('list') -> {'blueprints': [{'name', 'entity_count', 'times_placed'}]}
-- blueprint('get', name) -> {'name', 'content'}  # full exchange string
-Prefer placing saved blueprints by name over re-emitting exchange strings.
-Safer to build small, complete fragments (drill + furnace + inserters) than
-whole bases: placement bills every entity; ghosts that fail to revive are
-refunded and cleared, but a large failed placement wastes planning effort.
+Blueprint library (native construction plans):
+- blueprint('save', name, x, y, radius=32) captures entities, tiles and settings.
+- blueprint('place', name_or_string, x, y, direction=0, build_mode='normal',
+    book_path=None) creates native ghosts; it never grants or consumes materials.
+    Robots construct using network materials, or build matching ghosts manually.
+    build_mode accepts normal, forced or superforced; direction is 0/4/8/12.
+- blueprint('ghosts', x, y, radius=32, offset=0) inspects pending construction.
+- blueprint('list') lists saved names and usage counts.
+- blueprint('get', name) returns the full exchange string.
+- blueprint('inspect', name) returns editable native JSON.
+- blueprint('import'|'edit', name, content) saves an engine-validated exchange
+    string or native JSON document, including books and planners.
+- blueprint('apply', planner_name, x, y, radius=32, cancel=False) marks/cancels
+    native upgrade/deconstruction orders. blueprint('delete', name) removes a design.
+- factorio_reference_world is a direct MCP tool: create a separate creative
+    Factorio process; execute native Lua; run exact ticks; capture a tested
+    design into this library; destroy when done. Reference inventory, research,
+    ticks and production never transfer into the benchmark factory.
+Prefer library names over re-emitting exchange strings. Inspect created_ghosts
+and ghost positions; placement alone is not a working factory.
 
 Program library and pacing (harness tools, not in-program calls):
 - factorio_save_program_template / factorio_run_program_template store and

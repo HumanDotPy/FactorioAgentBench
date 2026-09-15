@@ -248,6 +248,7 @@ def _persist_run_checkpoint(
                 "workspace": str(getattr(agent, "scratch", "")),
             },
         },
+        compact=True,
     )
 
 
@@ -478,6 +479,8 @@ class OpenAICompatibleAgentSession:
         self._game_data_reference: GameDataReference | None = None
         self.compaction_count = 0
         self.max_context_chars = 600_000
+        self._messages_chars = 0
+        self._camera_dirty = True
 
     def inference_settings(self) -> dict[str, Any]:
         return {
@@ -503,8 +506,14 @@ class OpenAICompatibleAgentSession:
     def bind_memory_executor(self, executor: Any) -> None:
         self._memory_executor = executor
 
+    def _append_message(self, message: dict[str, Any]) -> None:
+        self.messages.append(message)
+        self._messages_chars = getattr(self, "_messages_chars", 0) + (
+            len(json.dumps(message, separators=(",", ":"), default=str)) + 1
+        )
+
     async def start(self, system_prompt: str | None = None) -> None:
-        self.messages.append(
+        self._append_message(
             {"role": "system", "content": system_prompt or self.SYSTEM_PROMPT}
         )
 
@@ -696,7 +705,7 @@ class OpenAICompatibleAgentSession:
     async def run_epoch(self, order_prompt: str) -> AgentEpochTelemetry:
         started = time.perf_counter()
         telemetry = AgentEpochTelemetry()
-        self.messages.append({"role": "user", "content": order_prompt})
+        self._append_message({"role": "user", "content": order_prompt})
         tools = self.TOOL_MANIFEST
         try:
             turn = 0
@@ -704,12 +713,15 @@ class OpenAICompatibleAgentSession:
                 turn += 1
                 self._compact_messages_if_needed()
                 messages = list(self.messages)
-                if self._state_executor is not None:
+                if self._state_executor is not None and getattr(
+                    self, "_camera_dirty", True
+                ):
                     camera_started = time.perf_counter()
                     try:
                         camera = dict(
                             await self._state_executor("factorio_get_camera", {})
                         )
+                        self._camera_dirty = False
                         encoded = camera.pop("image_base64", None)
                         if camera.get("enabled") is not False or camera.get(
                             "objective"
@@ -750,7 +762,7 @@ class OpenAICompatibleAgentSession:
                 )
                 choice = response.choices[0]
                 message = choice.message
-                self.messages.append(
+                self._append_message(
                     {
                         "role": "assistant",
                         "content": message.content or "",
@@ -779,9 +791,16 @@ class OpenAICompatibleAgentSession:
                             call.id,
                             terminal_reason,
                         )
-                        self.messages.append(tool_message)
+                        self._append_message(tool_message)
                         continue
 
+                    if call.function.name in {
+                        "submit_program",
+                        "factorio_execute_program",
+                        "factorio_set_camera",
+                        "factorio_check_throughput",
+                    }:
+                        self._camera_dirty = True
                     tool_started = time.perf_counter()
                     try:
                         try:
@@ -823,7 +842,7 @@ class OpenAICompatibleAgentSession:
                         "tool_call_id": call.id,
                         "content": output,
                     }
-                    self.messages.append(tool_message)
+                    self._append_message(tool_message)
                     terminal_reason = terminal_reason or terminal
                 if finished_epoch or terminal_reason is not None:
                     break
@@ -840,11 +859,15 @@ class OpenAICompatibleAgentSession:
         return telemetry
 
     def _compact_messages_if_needed(self) -> None:
-        encoded = json.dumps(self.messages, separators=(",", ":"), default=str)
+        max_context_chars = getattr(self, "max_context_chars", 600_000)
         if (
-            len(encoded) <= getattr(self, "max_context_chars", 600_000)
+            getattr(self, "_messages_chars", 0) <= max_context_chars
             or len(self.messages) <= 50
         ):
+            return
+        encoded = json.dumps(self.messages, separators=(",", ":"), default=str)
+        self._messages_chars = len(encoded)
+        if len(encoded) <= max_context_chars:
             return
         start = max(len(self.messages) - 48, 1)
         while start > 1 and self.messages[start].get("role") == "tool":
@@ -871,6 +894,9 @@ class OpenAICompatibleAgentSession:
             ),
         }
         self.messages = [self.messages[0], marker, *self.messages[start:]]
+        self._messages_chars = len(
+            json.dumps(self.messages, separators=(",", ":"), default=str)
+        )
 
     async def close(self) -> None:
         await self._client.close()
@@ -1070,12 +1096,7 @@ class HermesPersistentAgentSession:
             "\n".join(outputs),
             encoding="utf-8",
         )
-        trace_text = (
-            self.trace_file.read_text(encoding="utf-8", errors="replace")
-            if self.trace_file.exists()
-            else ""
-        )
-        trace_call_count = trace_text.count("tools/call")
+        trace_call_count = _incremental_trace_calls(self)
         epoch_tool_calls = max(trace_call_count - self._trace_call_count, 0)
         self._trace_call_count = trace_call_count
         return AgentEpochTelemetry(
@@ -1121,9 +1142,32 @@ def _parse_opencode_jsonl(output: str) -> tuple[list[dict[str, Any]], int]:
     return events, malformed
 
 
-def _opencode_tool_seconds(output: str) -> float:
+def _incremental_trace_calls(agent: Any) -> int:
+    """Count ``tools/call`` occurrences while scanning only new trace bytes."""
+
+    path = agent.trace_file
+    seen = getattr(agent, "_trace_calls_seen", 0)
+    offset = getattr(agent, "_trace_bytes_read", 0)
+    if not path.exists():
+        return seen
+    with path.open("rb") as stream:
+        stream.seek(offset)
+        chunk = stream.read()
+    newline = chunk.rfind(b"\n")
+    if newline == -1:
+        return seen
+    stable = chunk[: newline + 1]
+    agent._trace_bytes_read = offset + newline + 1
+    agent._trace_calls_seen = seen + stable.count(b"tools/call")
+    return agent._trace_calls_seen
+
+
+def _opencode_tool_seconds(
+    output: str, events: list[dict[str, Any]] | None = None
+) -> float:
     """Union completed tool intervals so repeated/overlapping events count once."""
-    events, _ = _parse_opencode_jsonl(output)
+    if events is None:
+        events, _ = _parse_opencode_jsonl(output)
     intervals = []
     for event in events:
         if event.get("type") != "tool_use":
@@ -1164,8 +1208,11 @@ def _event_field(event: dict[str, Any], field: str) -> Any:
     return None
 
 
-def _parse_opencode_session_ids(output: str) -> list[str]:
-    events, _ = _parse_opencode_jsonl(output)
+def _parse_opencode_session_ids(
+    output: str, events: list[dict[str, Any]] | None = None
+) -> list[str]:
+    if events is None:
+        events, _ = _parse_opencode_jsonl(output)
     session_ids: list[str] = []
     for event in events:
         for field in ("sessionID", "sessionId", "session_id"):
@@ -1176,10 +1223,13 @@ def _parse_opencode_session_ids(output: str) -> list[str]:
     return session_ids
 
 
-def _parse_opencode_step_finish_reasons(output: str) -> list[str]:
+def _parse_opencode_step_finish_reasons(
+    output: str, events: list[dict[str, Any]] | None = None
+) -> list[str]:
     """Return normalized provider reasons from ``step_finish`` events."""
 
-    events, _ = _parse_opencode_jsonl(output)
+    if events is None:
+        events, _ = _parse_opencode_jsonl(output)
     reasons: list[str] = []
     for event in events:
         event_type = str(event.get("type", "")).lower()
@@ -1194,10 +1244,13 @@ def _parse_opencode_step_finish_reasons(output: str) -> list[str]:
     return reasons
 
 
-def _parse_opencode_provider_error(output: str) -> dict[str, Any] | None:
+def _parse_opencode_provider_error(
+    output: str, events: list[dict[str, Any]] | None = None
+) -> dict[str, Any] | None:
     """Return the last structured provider error from an OpenCode stream."""
 
-    events, _ = _parse_opencode_jsonl(output)
+    if events is None:
+        events, _ = _parse_opencode_jsonl(output)
     for event in reversed(events):
         if str(event.get("type", "")).lower() != "error":
             continue
@@ -1363,7 +1416,7 @@ class OpenCodePersistentAgentSession:
                         "FACTORIO_RESUME_POINTER_FILE": str(
                             self.artifacts_dir / "resume" / "world-checkpoint.json"
                         ),
-                        "FACTORIO_CHECKPOINT_EVERY": "1",
+                        "FACTORIO_CHECKPOINT_EVERY": "5",
                         "FACTORIO_GAME_DATA_FILE": self.game_data_path,
                         "MEMORY_PATH": self.memory_path,
                         "MEMORY_ENABLED": "1" if self.memory_enabled else "0",
@@ -1643,7 +1696,8 @@ class OpenCodePersistentAgentSession:
 
         stdout = str(getattr(invocation, "stdout", "") or "")
         stderr = str(getattr(invocation, "stderr", "") or "")
-        session_ids = _parse_opencode_session_ids(stdout)
+        stdout_events, _ = _parse_opencode_jsonl(stdout)
+        session_ids = _parse_opencode_session_ids(stdout, events=stdout_events)
         same_session = not session_ids or all(
             session_id == self.session_id for session_id in session_ids
         )
@@ -1659,7 +1713,9 @@ class OpenCodePersistentAgentSession:
                 "returncode": getattr(invocation, "returncode", None),
                 "timed_out": bool(getattr(invocation, "timed_out", False)),
                 "session_ids": session_ids,
-                "step_finish_reasons": _parse_opencode_step_finish_reasons(stdout),
+                "step_finish_reasons": _parse_opencode_step_finish_reasons(
+                    stdout, events=stdout_events
+                ),
             }
         )
         text = stdout
@@ -1769,7 +1825,8 @@ class OpenCodePersistentAgentSession:
                     attempt_text += "\n--- stderr ---\n" + stderr
                 logical_outputs.append(attempt_text)
 
-                session_ids = _parse_opencode_session_ids(stdout)
+                stdout_events, _ = _parse_opencode_jsonl(stdout)
+                session_ids = _parse_opencode_session_ids(stdout, events=stdout_events)
                 session_error: str | None = None
                 if session_ids:
                     if self.session_id is None:
@@ -1778,20 +1835,19 @@ class OpenCodePersistentAgentSession:
                         session_id != self.session_id for session_id in session_ids
                     ):
                         session_error = "opencode_session_changed"
-                reasons = _parse_opencode_step_finish_reasons(stdout)
+                reasons = _parse_opencode_step_finish_reasons(
+                    stdout, events=stdout_events
+                )
                 provider_step_finish_reasons.extend(reasons)
-                provider_error = _parse_opencode_provider_error(stdout)
+                provider_error = _parse_opencode_provider_error(
+                    stdout, events=stdout_events
+                )
                 if terminal_payload is None:
                     # The process can exit before the polling loop gets a
                     # chance to observe a signal written at the same instant.
                     terminal_payload = self._capture_terminal_signal(epoch_number)
 
-                trace_text = (
-                    self.trace_file.read_text(encoding="utf-8", errors="replace")
-                    if self.trace_file.exists()
-                    else ""
-                )
-                calls_started = trace_text.count("tools/call") > self._trace_call_count
+                calls_started = _incremental_trace_calls(self) > self._trace_call_count
                 normalized_output = (stdout + "\n" + stderr).replace(" ", "")
                 retry_limit_reached = (
                     self.api_max_retries is not None
@@ -1989,12 +2045,7 @@ class OpenCodePersistentAgentSession:
         (self.artifacts_dir / f"epoch-{epoch_number:04d}.opencode.jsonl").write_text(
             combined_output, encoding="utf-8"
         )
-        trace_text = (
-            self.trace_file.read_text(encoding="utf-8", errors="replace")
-            if self.trace_file.exists()
-            else ""
-        )
-        trace_call_count = trace_text.count("tools/call")
+        trace_call_count = _incremental_trace_calls(self)
         epoch_tool_calls = max(trace_call_count - self._trace_call_count, 0)
         self._trace_call_count = trace_call_count
         self._write_epoch_audit(
@@ -2499,7 +2550,8 @@ async def run_session(args: argparse.Namespace) -> AdaptiveSessionRecord:
     from fle.envd.benchmark_results import summarize_adaptive_session
 
     started_at = datetime.now(timezone.utc)
-    recipes, technologies = _load_recipe_dump(args.recipe_dump)
+    recipe_payload = _recipe_dump_payload(args.recipe_dump)
+    recipes, technologies = _load_recipe_dump(args.recipe_dump, payload=recipe_payload)
     # Reference construction scans the complete API corpus.  It is evaluator
     # setup, not model wall-clock time, so compute identity inputs before the
     # session failsafe starts.
@@ -2508,7 +2560,7 @@ async def run_session(args: argparse.Namespace) -> AdaptiveSessionRecord:
     # metadata when present.  The candidate catalog still consumes the
     # validated recipe/technology projections below, while MCP lookups use the
     # same source file unchanged.
-    game_data_reference, _ = load_game_data(args.recipe_dump)
+    game_data_reference = _game_data_reference_from_payload(recipe_payload)
     game_data_reference_hash = game_data_reference.reference_hash
     session_wall_start = time.perf_counter()
 
@@ -3332,7 +3384,9 @@ def _persist(
         ),
     )
     _atomic_json(
-        record_path.with_suffix(".partial.json"), snapshot.model_dump(mode="json")
+        record_path.with_suffix(".partial.json"),
+        snapshot.model_dump(mode="json"),
+        compact=True,
     )
 
 
@@ -3422,8 +3476,9 @@ def _persist_selection_audit(
         "committed_spec": spec.model_dump(mode="json"),
     }
     epoch_path = trajectory_dir / f"epoch-{spec.epoch_index:04d}.selection.json"
-    _atomic_json(epoch_path, payload)
-    _atomic_json(trajectory_dir.parent / "active-order.json", payload)
+    text = json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n"
+    _atomic_text(epoch_path, text)
+    _atomic_text(trajectory_dir.parent / "active-order.json", text)
 
 
 def _persist_active_outcome(
@@ -3468,6 +3523,7 @@ def _atomic_json(
     path: Path,
     payload: Any,
     *,
+    compact: bool = False,
     max_replace_attempts: int = ATOMIC_JSON_MAX_REPLACE_ATTEMPTS,
     backoff_seconds: float = ATOMIC_JSON_REPLACE_BACKOFF_SECONDS,
     max_backoff_seconds: float = ATOMIC_JSON_REPLACE_BACKOFF_MAX_SECONDS,
@@ -3479,6 +3535,27 @@ def _atomic_json(
     retries address transient sharing violations without an unbounded loop.
     """
 
+    if compact:
+        text = json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n"
+    else:
+        text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    _atomic_text(
+        path,
+        text,
+        max_replace_attempts=max_replace_attempts,
+        backoff_seconds=backoff_seconds,
+        max_backoff_seconds=max_backoff_seconds,
+    )
+
+
+def _atomic_text(
+    path: Path,
+    text: str,
+    *,
+    max_replace_attempts: int = ATOMIC_JSON_MAX_REPLACE_ATTEMPTS,
+    backoff_seconds: float = ATOMIC_JSON_REPLACE_BACKOFF_SECONDS,
+    max_backoff_seconds: float = ATOMIC_JSON_REPLACE_BACKOFF_MAX_SECONDS,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     attempts = max(int(max_replace_attempts), 1)
     delay = max(float(backoff_seconds), 0.0)
@@ -3489,7 +3566,7 @@ def _atomic_json(
     temporary = Path(temporary_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
-            stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
         for attempt in range(attempts):
@@ -3511,20 +3588,24 @@ def _atomic_json(
             pass
 
 
+_git_commit_cache: str | None = None
+
+
 def _git_commit() -> str:
     import subprocess
 
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=str(REPO), text=True
-        ).strip()
-    except Exception:
-        return "unknown"
+    global _git_commit_cache
+    if _git_commit_cache is None:
+        try:
+            _git_commit_cache = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=str(REPO), text=True
+            ).strip()
+        except Exception:
+            _git_commit_cache = "unknown"
+    return _git_commit_cache
 
 
-def _load_recipe_dump(
-    path: str | None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _recipe_dump_payload(path: str | None) -> Any:
     if not path:
         raise ValueError(
             "An authoritative non-empty recipe dump is required; "
@@ -3534,9 +3615,30 @@ def _load_recipe_dump(
     if not recipe_path.exists():
         raise ValueError(f"Recipe dump does not exist: {recipe_path}")
     try:
-        data = json.loads(recipe_path.read_text(encoding="utf-8"))
+        return json.loads(recipe_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"Could not read recipe dump {recipe_path}: {exc}") from exc
+
+
+def _game_data_reference_from_payload(payload: Any) -> GameDataReference:
+    if isinstance(payload, list):
+        payload = {
+            "factorio_version": "unknown",
+            "recipes": payload,
+            "technologies": [],
+        }
+    return GameDataReference(payload, source="run-export")
+
+
+def _load_recipe_dump(
+    path: str | None,
+    *,
+    payload: Any = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if payload is None:
+        payload = _recipe_dump_payload(path)
+    recipe_path = Path(path) if path else None
+    data = payload
     if isinstance(data, list):
         recipes = data
         technologies: list[dict[str, Any]] = []

@@ -113,6 +113,24 @@ def instance(pytestconfig, worker_id):
             instance.cleanup()
 
 
+def _fixture_owns_state(fixture_def) -> bool:
+    code = getattr(getattr(fixture_def, "func", None), "__code__", None)
+    return code is not None and "reset" in code.co_names
+
+
+def _test_owns_state(request) -> bool:
+    if "configure_game" in getattr(request, "fixturenames", []):
+        return True
+    manager = request._fixturemanager
+    for name in request.fixturenames:
+        if name == "_reset_between_tests":
+            continue
+        for fixture_def in manager.getfixturedefs(name, request.node) or ():
+            if _fixture_owns_state(fixture_def):
+                return True
+    return False
+
+
 # # Reset state between tests without recreating the instance
 @pytest.fixture(autouse=True)
 def _reset_between_tests(request):
@@ -125,9 +143,7 @@ def _reset_between_tests(request):
 
     instance = request.getfixturevalue("instance")
 
-    # If this test explicitly uses `configure_game`, let that fixture perform
-    # the reset to avoid double resets and allow per-test options.
-    if "configure_game" in getattr(request, "fixturenames", []):
+    if _test_owns_state(request):
         yield
         return
     # Restore the default inventory in case a previous test changed it
@@ -199,6 +215,15 @@ def configure_game(instance):
         return instance.namespace
 
     return _configure_game
+
+
+@pytest.fixture(scope="session")
+def lua_env_sources():
+    env_root = Path(__file__).parent.parent / "fle" / "env"
+    sources = []
+    for path in sorted(env_root.rglob("*.lua")):
+        sources.append((path, path.read_text(encoding="utf-8").splitlines()))
+    return sources
 
 
 def pytest_collection_modifyitems(items):

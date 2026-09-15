@@ -13,6 +13,7 @@ class RendererManager:
     def __init__(self):
         """Initialize renderer manager."""
         self._renderer_cache: Dict[str, Any] = {}
+        self._size_cache: Dict[Any, Tuple[float, float]] = {}
 
     @profile_method(include_args=True)
     def get_renderer(self, entity_name: str) -> Optional[Any]:
@@ -59,15 +60,31 @@ class RendererManager:
             Tuple of (width, height) in tiles
         """
         if isinstance(entity, dict):
-            renderer = self.get_renderer(entity["name"])
+            name = entity["name"]
+            direction = entity.get("direction", 0)
         else:
-            renderer = self.get_renderer(entity.name)
+            name = entity.name
+            direction = getattr(entity, "direction", 0)
 
+        try:
+            key: Any = (name, direction)
+            hash(key)
+        except TypeError:
+            key = (name, id(direction))
+
+        cached = self._size_cache.get(key)
+        if cached is not None:
+            return cached
+
+        renderer = self.get_renderer(name)
         if renderer and hasattr(renderer, "get_size"):
-            _entity = entity.model_dump()
-            return renderer.get_size(_entity)
+            _entity = entity if isinstance(entity, dict) else entity.model_dump()
+            size = renderer.get_size(_entity)
+        else:
+            size = (1.0, 1.0)
 
-        return (1.0, 1.0)
+        self._size_cache[key] = size
+        return size
 
 
 # Global renderer manager instance

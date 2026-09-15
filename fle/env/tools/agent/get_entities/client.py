@@ -1,8 +1,7 @@
-from time import sleep
 from typing import List, Set, Union
 
 from fle.env.entities import Position, Entity, EntityGroup
-from fle.env.game_types import Prototype
+from fle.env.game_types import Prototype, prototype_by_name
 from fle.env.tools.agent.connect_entities.groupable_entities import (
     agglomerate_groupable_entities,
 )
@@ -82,9 +81,6 @@ class GetEntities(Tool):
                 else "[]"
             )
 
-            # We need to add a small 50ms sleep to ensure that the entities have updated after previous actions
-            sleep(0.1)
-
             if position is None:
                 response, time_elapsed = self.execute(
                     self.player_index, radius, entity_names
@@ -109,11 +105,9 @@ class GetEntities(Tool):
 
                 entity_data = self.clean_response(raw_entity_data)
                 # Find the matching Prototype
-                matching_prototype = None
-                for prototype in Prototype:
-                    if prototype.value[0] == entity_data["name"].replace("_", "-"):
-                        matching_prototype = prototype
-                        break
+                matching_prototype = prototype_by_name.get(
+                    entity_data["name"].replace("_", "-")
+                )
 
                 if matching_prototype is None:
                     if "name" in entity_data and entity_data["name"] != "entity-ghost":
@@ -191,42 +185,12 @@ class GetEntities(Tool):
             )
 
             if should_group:
-                # get all pipes into a list
-                pipes = [
-                    entity
-                    for entity in entities_list
-                    if hasattr(entity, "prototype")
-                    and entity.prototype in (Prototype.Pipe, Prototype.UndergroundPipe)
-                ]
-                group = agglomerate_groupable_entities(pipes)
-                [entities_list.remove(pipe) for pipe in pipes]
-                entities_list.extend(group)
-
-                poles = [
-                    entity
-                    for entity in entities_list
-                    if hasattr(entity, "prototype")
-                    and entity.prototype
-                    in (
-                        Prototype.SmallElectricPole,
-                        Prototype.BigElectricPole,
-                        Prototype.MediumElectricPole,
-                    )
-                ]
-                group = agglomerate_groupable_entities(poles)
-                [entities_list.remove(pole) for pole in poles]
-                entities_list.extend(group)
-
-                walls = [
-                    entity
-                    for entity in entities_list
-                    if hasattr(entity, "prototype")
-                    and entity.prototype == Prototype.StoneWall
-                ]
-                group = agglomerate_groupable_entities(walls)
-                [entities_list.remove(wall) for wall in walls]
-                entities_list.extend(group)
-
+                pipe_types = (Prototype.Pipe, Prototype.UndergroundPipe)
+                pole_group_types = (
+                    Prototype.SmallElectricPole,
+                    Prototype.BigElectricPole,
+                    Prototype.MediumElectricPole,
+                )
                 belt_types = (
                     Prototype.TransportBelt,
                     Prototype.FastTransportBelt,
@@ -235,14 +199,29 @@ class GetEntities(Tool):
                     Prototype.FastUndergroundBelt,
                     Prototype.ExpressUndergroundBelt,
                 )
-                belts = [
-                    entity
-                    for entity in entities_list
-                    if hasattr(entity, "prototype") and entity.prototype in belt_types
-                ]
-                group = agglomerate_groupable_entities(belts)
-                [entities_list.remove(belt) for belt in belts]
-                entities_list.extend(group)
+                pipes = []
+                poles = []
+                walls = []
+                belts = []
+                others = []
+                for entity in entities_list:
+                    prototype = getattr(entity, "prototype", None)
+                    if prototype in pipe_types:
+                        pipes.append(entity)
+                    elif prototype in pole_group_types:
+                        poles.append(entity)
+                    elif prototype == Prototype.StoneWall:
+                        walls.append(entity)
+                    elif prototype in belt_types:
+                        belts.append(entity)
+                    else:
+                        others.append(entity)
+
+                entities_list = others
+                entities_list.extend(agglomerate_groupable_entities(pipes))
+                entities_list.extend(agglomerate_groupable_entities(poles))
+                entities_list.extend(agglomerate_groupable_entities(walls))
+                entities_list.extend(agglomerate_groupable_entities(belts))
 
             # Final filtering after grouping is complete
             if entities:

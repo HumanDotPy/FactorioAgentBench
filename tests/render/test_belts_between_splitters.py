@@ -16,7 +16,6 @@ def game(instance):
     }
     instance.reset()
     yield instance.namespace
-    instance.reset()
 
 
 @pytest.fixture()

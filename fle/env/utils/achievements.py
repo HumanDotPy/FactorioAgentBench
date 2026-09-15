@@ -1,5 +1,4 @@
 from typing import Dict, List, Tuple, Any
-from copy import deepcopy
 
 from fle.commons.models.achievements import ProductionFlows
 
@@ -13,11 +12,9 @@ def calculate_achievements(
         print("Warning: Invalid production flows")
         return achievements
 
-    post = deepcopy(post)
-
     # Calculate static items directly
     new_flows = pre.get_new_flows(post)
-    static_items = deepcopy(new_flows.harvested)
+    static_items = dict(new_flows.harvested)
 
     # Add crafted outputs to static items
     for craft in new_flows.crafted:

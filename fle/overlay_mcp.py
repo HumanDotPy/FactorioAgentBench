@@ -126,14 +126,14 @@ class FactorioControlPanel:
                 ["tmux", "send-keys", "-t", "claude-code", "C-m"], check=True
             )
 
-            logger.info(f"Sent '{message}' to claude-code session")
+            logger.info("Sent '%s' to claude-code session", message)
             return True
 
         except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to send to tmux: {e}")
+            logger.error("Failed to send to tmux: %s", e)
             return False
         except Exception as e:
-            logger.error(f"Unexpected error sending to tmux: {e}")
+            logger.error("Unexpected error sending to tmux: %s", e)
             return False
 
     def determine_warning_level(self, warning_text: str) -> str:
@@ -162,7 +162,8 @@ class FactorioControlPanel:
             if warning_hash in self.warning_notification_times:
                 del self.warning_notification_times[warning_hash]
                 logger.debug(
-                    f"Warning {warning_hash} is no longer active, removed from tracking"
+                    "Warning %s is no longer active, removed from tracking",
+                    warning_hash,
                 )
 
         # Update the current active set
@@ -195,7 +196,7 @@ class FactorioControlPanel:
         # Check if this warning is already in displayed warnings
         if not any(w["hash"] == warning_hash for w in self.displayed_warnings):
             self.displayed_warnings.append(warning_data)
-            logger.info(f"Added new warning to display: {warning_text[:50]}...")
+            logger.info("Added new warning to display: %s...", warning_text[:50])
 
         # Check if we should notify Claude
         should_notify = False
@@ -203,7 +204,7 @@ class FactorioControlPanel:
         if warning_hash not in self.warning_notification_times:
             # Never notified about this warning before
             should_notify = True
-            logger.info(f"New warning detected: {warning_text[:50]}...")
+            logger.info("New warning detected: %s...", warning_text[:50])
         else:
             # Check if enough time has passed since last notification
             time_since_last_notification = (
@@ -212,7 +213,9 @@ class FactorioControlPanel:
             if time_since_last_notification >= self.warning_renotification_interval:
                 should_notify = True
                 logger.info(
-                    f"Re-notifying warning after {time_since_last_notification:.0f}s: {warning_text[:50]}..."
+                    "Re-notifying warning after %.0fs: %s...",
+                    time_since_last_notification,
+                    warning_text[:50],
                 )
 
         if should_notify:
@@ -231,7 +234,7 @@ class FactorioControlPanel:
         # Format the warning message for Claude
         formatted_message = f"[{timestamp}] {source} Warning: {warning_text}"
 
-        logger.info(f"Submitting warning to Claude: {formatted_message}")
+        logger.info("Submitting warning to Claude: %s", formatted_message)
 
         # Send to Claude Code session
         success = self.send_to_claude_code(formatted_message)
@@ -364,7 +367,8 @@ class FactorioControlPanel:
                     for warning in self.displayed_warnings:
                         if warning["hash"] == warning_hash:
                             logger.info(
-                                f"Re-notifying active warning: {warning['text'][:50]}..."
+                                "Re-notifying active warning: %s...",
+                                warning["text"][:50],
                             )
                             self.submit_warning_to_claude(warning)
                             self.warning_notification_times[warning_hash] = current_time
@@ -578,7 +582,7 @@ class FactorioControlPanel:
                         metrics_data = update["metrics"]
                     self.analyze_production_flows(metrics_data)
                 except (json.JSONDecodeError, Exception) as e:
-                    logger.error(f"Error analyzing metrics: {e}")
+                    logger.error("Error analyzing metrics: %s", e)
 
             if update["type"] == "state_update":
                 # Update inventory
@@ -812,7 +816,8 @@ class FactorioControlPanel:
 
         self.update_warnings_display()
         logger.info(
-            f"Auto-cleaned display, {len(self.current_active_warnings)} warnings remain active"
+            "Auto-cleaned display, %s warnings remain active",
+            len(self.current_active_warnings),
         )
 
     def start_monitoring(self):
@@ -835,7 +840,7 @@ class FactorioControlPanel:
             self.mcp_bridge.start()
             logger.info("MCP bridge started successfully")
         except Exception as e:
-            logger.error(f"Failed to start MCP bridge: {e}")
+            logger.error("Failed to start MCP bridge: %s", e)
             if self.status_label:
                 self.status_label.set_text(f"❌ Failed: {str(e)[:30]}")
             self.is_monitoring = False
@@ -860,7 +865,7 @@ class FactorioControlPanel:
             try:
                 self.mcp_bridge.stop()
             except Exception as e:
-                logger.error(f"Error stopping MCP bridge: {e}")
+                logger.error("Error stopping MCP bridge: %s", e)
             self.mcp_bridge = None
 
         if self.status_label:

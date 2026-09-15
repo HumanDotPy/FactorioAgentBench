@@ -290,6 +290,8 @@ local function harvest_resource_slow(player, player_index, surface, position, co
        local expected_yield = add_entities_to_queue(queue, exact_entities, count)
        local product = exact_entities[1].prototype.mineable_properties.products[1]
        queue.product_name = product and product.name or exact_entities[1].name
+       storage.harvest_last_products = storage.harvest_last_products or {}
+       storage.harvest_last_products[player_index] = queue.product_name
        queue.start_count = player.get_item_count(queue.product_name)
        begin_mining(queue, player)
        return expected_yield
@@ -306,6 +308,8 @@ local function harvest_resource_slow(player, player_index, surface, position, co
    local expected_yield = add_entities_to_queue(queue, radius_entities, count)
    local product = radius_entities[1].prototype.mineable_properties.products[1]
    queue.product_name = product and product.name or radius_entities[1].name
+   storage.harvest_last_products = storage.harvest_last_products or {}
+   storage.harvest_last_products[player_index] = queue.product_name
    queue.start_count = player.get_item_count(queue.product_name)
    -- game.print("expected "..expected_yield)
    begin_mining(queue, player)
@@ -577,6 +581,25 @@ storage.actions.get_harvest_queue_length = function(player_index)
         return #queue.entities + (queue.current_mining and 1 or 0)
     end
     return 0
+end
+
+storage.actions.get_harvest_status = function(player_index)
+    local player = storage.agent_characters[player_index]
+    if not player then
+        error("Player not found")
+    end
+    local queue = storage.harvest_queues and storage.harvest_queues[player_index]
+    local queue_length = 0
+    if queue then
+        queue_length = #queue.entities + (queue.current_mining and 1 or 0)
+    end
+    local product_name = queue and queue.product_name
+        or (storage.harvest_last_products and storage.harvest_last_products[player_index])
+    local count = 0
+    if product_name then
+        count = player.get_item_count(product_name)
+    end
+    return game.tick .. "," .. queue_length .. "," .. count
 end
 
 storage.actions.get_resource_name_at_position = function(player_index, x, y)

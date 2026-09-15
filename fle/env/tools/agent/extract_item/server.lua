@@ -1,46 +1,45 @@
+-- Factorio 2.0.77 inventory names whose contents can be extracted. The list is
+-- built once at load. Build it through `add` so a renamed/removed define cannot
+-- become a nil hole and dedupe ids so each inventory is read once per entity.
+local ITEM_INVENTORY_TYPES = {}
+local item_inventory_type_seen = {}
+local function add_inventory_type(inventory)
+    if inventory ~= nil and not item_inventory_type_seen[inventory] then
+        item_inventory_type_seen[inventory] = true
+        ITEM_INVENTORY_TYPES[#ITEM_INVENTORY_TYPES + 1] = inventory
+    end
+end
+add_inventory_type(defines.inventory.chest)
+add_inventory_type(defines.inventory.furnace_source)
+add_inventory_type(defines.inventory.furnace_result)
+add_inventory_type(defines.inventory.assembling_machine_input)
+add_inventory_type(defines.inventory.assembling_machine_output)
+add_inventory_type(defines.inventory.fuel)
+add_inventory_type(defines.inventory.burnt_result)
+add_inventory_type(defines.inventory.lab_input)
+add_inventory_type(defines.inventory.item_main)  -- cargo wagons and item entities
+add_inventory_type(defines.inventory.robot_cargo)
+add_inventory_type(defines.inventory.robot_repair)
+add_inventory_type(defines.inventory.car_trunk)
+add_inventory_type(defines.inventory.roboport_material)
+add_inventory_type(defines.inventory.roboport_robot)
+add_inventory_type(defines.inventory.artillery_turret_ammo)
+add_inventory_type(defines.inventory.turret_ammo)
+add_inventory_type(defines.inventory.beacon_modules)
+add_inventory_type(defines.inventory.character_main)
+add_inventory_type(defines.inventory.character_guns)
+add_inventory_type(defines.inventory.character_ammo)
+add_inventory_type(defines.inventory.character_armor)
+add_inventory_type(defines.inventory.character_vehicle)
+add_inventory_type(defines.inventory.character_trash)
+
 -- Helper function to check all possible inventories of an entity
 local function get_entity_item_count(entity, item_name)
-    local inventory_types = {
-        defines.inventory.chest,
-        defines.inventory.furnace_source,
-        defines.inventory.furnace_result,
-        defines.inventory.assembling_machine_input,
-        defines.inventory.assembling_machine_output,
-        defines.inventory.fuel,
-        defines.inventory.burnt_result,
-        defines.inventory.reactor_source,
-        defines.inventory.reactor_result,
-        defines.inventory.lab_input,
-        defines.inventory.lab_source,
-        defines.inventory.mining_drill_input,
-        defines.inventory.item_main,  -- For cargo wagons
-        defines.inventory.robot_cargo,
-        defines.inventory.robot_repair,
-        defines.inventory.car_trunk,
-        defines.inventory.car_fuel,
-        defines.inventory.roboport_material,
-        defines.inventory.roboport_robot,
-        defines.inventory.storage_tank,
-        defines.inventory.artillery_turret_ammo,
-        defines.inventory.turret_ammo,
-        defines.inventory.beacon_modules,
-        defines.inventory.character_main,
-        defines.inventory.character_guns,
-        defines.inventory.character_ammo,
-        defines.inventory.character_armor,
-        defines.inventory.character_vehicle,
-        defines.inventory.character_trash
-    }
-
     local total_count = 0
-    local seen_inventory_types = {}
-    for _, inv_type in ipairs(inventory_types) do
-        if not seen_inventory_types[inv_type] then
-            seen_inventory_types[inv_type] = true
-            local inventory = entity.get_inventory(inv_type)
-            if inventory then
-                total_count = total_count + inventory.get_item_count(item_name)
-            end
+    for _, inv_type in ipairs(ITEM_INVENTORY_TYPES) do
+        local inventory = entity.get_inventory(inv_type)
+        if inventory then
+            total_count = total_count + inventory.get_item_count(item_name)
         end
     end
     return total_count
@@ -48,56 +47,20 @@ end
 
 -- Helper function to remove items from any valid inventory
 local function remove_items_from_entity(entity, stack)
-    local inventory_types = {
-        defines.inventory.chest,
-        defines.inventory.furnace_source,
-        defines.inventory.furnace_result,
-        defines.inventory.assembling_machine_input,
-        defines.inventory.assembling_machine_output,
-        defines.inventory.fuel,
-        defines.inventory.burnt_result,
-        defines.inventory.reactor_source,
-        defines.inventory.reactor_result,
-        defines.inventory.lab_input,
-        defines.inventory.lab_source,
-        defines.inventory.mining_drill_input,
-        defines.inventory.item_main,
-        defines.inventory.robot_cargo,
-        defines.inventory.robot_repair,
-        defines.inventory.car_trunk,
-        defines.inventory.car_fuel,
-        defines.inventory.roboport_material,
-        defines.inventory.roboport_robot,
-        defines.inventory.storage_tank,
-        defines.inventory.artillery_turret_ammo,
-        defines.inventory.turret_ammo,
-        defines.inventory.beacon_modules,
-        defines.inventory.character_main,
-        defines.inventory.character_guns,
-        defines.inventory.character_ammo,
-        defines.inventory.character_armor,
-        defines.inventory.character_vehicle,
-        defines.inventory.character_trash
-    }
-
     local items_remaining = stack.count
     local total_removed = 0
-    local seen_inventory_types = {}
 
-    for _, inv_type in ipairs(inventory_types) do
+    for _, inv_type in ipairs(ITEM_INVENTORY_TYPES) do
         if items_remaining <= 0 then
             break
         end
 
-        if not seen_inventory_types[inv_type] then
-            seen_inventory_types[inv_type] = true
-            local inventory = entity.get_inventory(inv_type)
-            if inventory then
-                local current_stack = {name = stack.name, count = items_remaining}
-                local removed = inventory.remove(current_stack)
-                total_removed = total_removed + removed
-                items_remaining = items_remaining - removed
-            end
+        local inventory = entity.get_inventory(inv_type)
+        if inventory then
+            local current_stack = {name = stack.name, count = items_remaining}
+            local removed = inventory.remove(current_stack)
+            total_removed = total_removed + removed
+            items_remaining = items_remaining - removed
         end
     end
 

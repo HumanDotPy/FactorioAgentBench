@@ -47,6 +47,19 @@ RatingResult = Literal["win", "draw", "loss"]
 class WireModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    _derived_cache_keys = ()
+
+    def model_copy(
+        self,
+        *,
+        update: dict[str, Any] | None = None,
+        deep: bool = False,
+    ) -> "WireModel":
+        copied = super().model_copy(update=update, deep=deep)
+        for key in self._derived_cache_keys:
+            copied.__dict__.pop(key, None)
+        return copied
+
 
 TaskFamily = Literal[
     "throughput",
@@ -290,6 +303,8 @@ class CustomerContractSpec(WireModel):
     success_ratio: float = Field(default=1.0, gt=0.0, le=1.0)
     receipt_key_env: str = "FLE_CUSTOMER_RECEIPT_KEY"
 
+    _derived_cache_keys = ("_commitment_cache",)
+
     @model_validator(mode="after")
     def validate_order_ids(self) -> "CustomerContractSpec":
         order_ids = [order.order_id for order in self.orders]
@@ -300,17 +315,22 @@ class CustomerContractSpec(WireModel):
     @computed_field
     @property
     def commitment(self) -> str:
-        payload = json.dumps(
-            [
-                order.model_dump(mode="json")
-                for order in sorted(
-                    self.orders, key=lambda order: (order.issue_tick, order.order_id)
-                )
-            ],
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        return hashlib.sha256(payload.encode()).hexdigest()
+        cached = self.__dict__.get("_commitment_cache")
+        if cached is None:
+            payload = json.dumps(
+                [
+                    order.model_dump(mode="json")
+                    for order in sorted(
+                        self.orders,
+                        key=lambda order: (order.issue_tick, order.order_id),
+                    )
+                ],
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            cached = hashlib.sha256(payload.encode()).hexdigest()
+            self.__dict__["_commitment_cache"] = cached
+        return cached
 
 
 class PerturbationSpec(WireModel):
@@ -358,6 +378,8 @@ class DisruptionScheduleSpec(WireModel):
     recovery_rate_threshold: float = Field(default=0.85, gt=0.0, le=1.0)
     recovery_min_ticks: int = Field(default=600, ge=0)
 
+    _derived_cache_keys = ("_commitment_cache",)
+
     @model_validator(mode="after")
     def validate_perturbation_ids(self) -> "DisruptionScheduleSpec":
         ids = [p.perturbation_id for p in self.perturbations]
@@ -368,15 +390,19 @@ class DisruptionScheduleSpec(WireModel):
     @computed_field
     @property
     def commitment(self) -> str:
-        payload = json.dumps(
-            [
-                p.model_dump(mode="json")
-                for p in sorted(self.perturbations, key=lambda p: p.trigger_tick)
-            ],
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        return hashlib.sha256(payload.encode()).hexdigest()
+        cached = self.__dict__.get("_commitment_cache")
+        if cached is None:
+            payload = json.dumps(
+                [
+                    p.model_dump(mode="json")
+                    for p in sorted(self.perturbations, key=lambda p: p.trigger_tick)
+                ],
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            cached = hashlib.sha256(payload.encode()).hexdigest()
+            self.__dict__["_commitment_cache"] = cached
+        return cached
 
 
 class FactorioTaskSpec(WireModel):
@@ -455,6 +481,8 @@ class FactorioTaskSpec(WireModel):
     )
     holdout_seconds: int = Field(default=60, ge=0)
 
+    _derived_cache_keys = ("_fingerprint_cache",)
+
     @model_validator(mode="after")
     def validate_objectives(self) -> "FactorioTaskSpec":
         if self.execution_mode == "realtime" and not self.realtime_allowed:
@@ -507,8 +535,12 @@ class FactorioTaskSpec(WireModel):
     @computed_field
     @property
     def fingerprint(self) -> str:
-        payload = self.model_dump_json(exclude={"fingerprint"})
-        return hashlib.sha256(payload.encode()).hexdigest()
+        cached = self.__dict__.get("_fingerprint_cache")
+        if cached is None:
+            payload = self.model_dump_json(exclude={"fingerprint"})
+            cached = hashlib.sha256(payload.encode()).hexdigest()
+            self.__dict__["_fingerprint_cache"] = cached
+        return cached
 
 
 class LifecycleDecision(WireModel):

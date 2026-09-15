@@ -263,8 +263,9 @@ class FactorioInstance:
         self.all_technologies_researched = all_technologies_researched
         self.initialise(fast, all_technologies_researched, clear_entities)
         self.initial_score = 0
+        self._system_prompt_cache = {}
         try:
-            self.first_namespace.score()
+            self.initial_score, _ = self.first_namespace.score()
             # print("Initial score:", self.initial_score)
         except Exception:
             # print(e)
@@ -278,8 +279,8 @@ class FactorioInstance:
             for ns in self.namespaces:
                 ns._freeze_protected_names()
             self.initialise(fast, all_technologies_researched, clear_entities)
+            self.initial_score, _ = self.first_namespace.score()
 
-        self.initial_score, _ = self.first_namespace.score()
         # Register the cleanup method to be called on exit (only once per process)
         if not FactorioInstance._cleanup_registered:
             atexit.register(self.cleanup)
@@ -404,11 +405,20 @@ class FactorioInstance:
         These are converted to their signatures - leaving out the implementations.
         :return:
         """
-        execution_path = Path(os.path.dirname(os.path.realpath(__file__)))
-        generator = SystemPromptGenerator(str(execution_path))
-        return generator.generate_for_agent(
-            agent_idx=agent_idx, num_agents=self.num_agents
-        )
+        key = (agent_idx, self.num_agents)
+        cache = getattr(self, "_system_prompt_cache", None)
+        if cache is None:
+            cache = {}
+            self._system_prompt_cache = cache
+        cached = cache.get(key)
+        if cached is None:
+            execution_path = Path(os.path.dirname(os.path.realpath(__file__)))
+            generator = SystemPromptGenerator(str(execution_path))
+            cached = generator.generate_for_agent(
+                agent_idx=agent_idx, num_agents=self.num_agents
+            )
+            cache[key] = cached
+        return cached
 
     @staticmethod
     def connect_to_server(address, tcp_port):

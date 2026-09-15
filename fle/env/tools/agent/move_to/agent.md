@@ -16,6 +16,8 @@ onto a planned building footprint before placing it.
 
 Failed path searches report the requested goal, radius, and bounded collision
 context at the start and goal. Water tiles and overlapping entities are local
-evidence; the path may also be obstructed farther away. Failures do not move the
-character or return unverified reachable alternatives. Choose another destination
+evidence; the path may also be obstructed farther away. A stalled walk first
+attempts a bounded local escape to a validated free adjacent tile; when that
+succeeds the call returns the reached Position. When no free step exists it
+fails without returning unverified alternatives. Choose another destination
 or an explicit `stop_distance` after inspecting the failure.

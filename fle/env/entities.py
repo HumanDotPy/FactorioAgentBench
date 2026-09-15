@@ -154,10 +154,7 @@ class EntityStatus(Enum):
 
     @classmethod
     def from_string(cls, status_string):
-        for status in cls:
-            if status.value == status_string:
-                return status
-        return None
+        return cls._value2member_map_.get(status_string)
 
     @classmethod
     def from_int(cls, status_int):
@@ -303,7 +300,7 @@ class Position(BaseModel):
         return values
 
     def __hash__(self):
-        return hash(f"{self.x},{self.y}")
+        return hash((self.x, self.y))
 
     def __add__(self, other) -> "Position":
         return Position(x=self.x + other.x, y=self.y + other.y)

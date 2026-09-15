@@ -82,7 +82,7 @@ jobs:
 
       - name: Run Python tests (4 workers)
         run: |
-          uv run pytest -n 4 --dist=load -v -s --tb=short tests/actions/
+          uv run pytest -n 4 --dist=load -v -s --tb=short -m "factorio_live or no_factorio" tests/actions/
         env:
           FACTORIO_HOST: localhost
           PYTHONUNBUFFERED: 1

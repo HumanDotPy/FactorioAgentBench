@@ -135,9 +135,11 @@ class RecursiveReportFormatter(ConversationFormatter):
             return messages
 
         # Remove oldest messages until we're under the limit
-        while working_messages and current_length > self.max_chars:
-            removed_message = working_messages.pop(0)
-            current_length -= len(removed_message.content)
+        removed_count = 0
+        while removed_count < len(working_messages) and current_length > self.max_chars:
+            current_length -= len(working_messages[removed_count].content)
+            removed_count += 1
+        working_messages = working_messages[removed_count:]
 
         # Reassemble messages with system message if present
         final_messages = working_messages

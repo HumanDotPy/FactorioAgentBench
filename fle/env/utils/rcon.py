@@ -142,9 +142,13 @@ def _check_output_for_errors(command, response, output):
 
 
 def _lua2python(command, response, *parameters, trace=False, start=0):
-    stdout = io.StringIO()
+    if trace:
+        stdout = io.StringIO()
+        redirect = contextlib.redirect_stdout(stdout)
+    else:
+        redirect = contextlib.nullcontext()
 
-    with contextlib.redirect_stdout(stdout):
+    with redirect:
         if not response:
             return None, (timer() - start)
 

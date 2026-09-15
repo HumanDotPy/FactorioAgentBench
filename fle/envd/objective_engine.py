@@ -296,11 +296,13 @@ def _unsupported_objective(
 
 
 def _matching_entities(frame: TelemetryFrame, target: str) -> list[dict[str, Any]]:
-    return [
-        entity
-        for entity in frame.entity_details
-        if str(entity.get("name", "")) == target
-    ]
+    index = getattr(frame, "_entity_name_index", None)
+    if index is None:
+        index = {}
+        for entity in frame.entity_details:
+            index.setdefault(str(entity.get("name", "")), []).append(entity)
+        frame._entity_name_index = index
+    return list(index.get(target, ()))
 
 
 def _recipe_name(value: Any) -> str | None:
@@ -766,7 +768,10 @@ def _weighted_progress(results: list[ObjectiveEvaluation]) -> float:
         return 0.0
     return min(
         max(
-            sum(result.normalized_score * max(result.weight, 0.0) for result in supported)
+            sum(
+                result.normalized_score * max(result.weight, 0.0)
+                for result in supported
+            )
             / total_weight,
             0.0,
         ),
@@ -1034,10 +1039,14 @@ def compare_state_quality(
         explanation = "A hard invariant was newly violated."
     elif improvements and not regressions:
         verdict = "dominates"
-        explanation = "At least one comparable quality dimension improved and none regressed."
+        explanation = (
+            "At least one comparable quality dimension improved and none regressed."
+        )
     elif regressions and not improvements:
         verdict = "regresses"
-        explanation = "At least one comparable quality dimension regressed and none improved."
+        explanation = (
+            "At least one comparable quality dimension regressed and none improved."
+        )
     else:
         verdict = "incomparable"
         explanation = (
@@ -1072,11 +1081,7 @@ def compare_state_quality(
         regressions=sorted(set(regressions)),
         preserved_invariants=sorted(
             current_research
-            | {
-                name
-                for name in previous_violations
-                if name in current_violations
-            }
+            | {name for name in previous_violations if name in current_violations}
         ),
         new_invariant_violations=sorted(set(new_violations)),
         resolved_invariant_violations=resolved_violations,
@@ -1105,9 +1110,7 @@ def measure_autonomous_holdout(
             projected_to_declared_window = (
                 observed * declared_window / seconds if seconds else observed
             )
-            measurements[objective.objective_id] = [
-                projected_to_declared_window
-            ]
+            measurements[objective.objective_id] = [projected_to_declared_window]
     return after, measurements, max(after.tick - before.tick, 0)
 
 
@@ -1165,9 +1168,7 @@ def _success(
     extra_required_ids: set[str] | None = None,
 ) -> bool:
     required_ids = {
-        objective.objective_id
-        for objective in task.objectives
-        if objective.required
+        objective.objective_id for objective in task.objectives if objective.required
     }
     required_ids.update(extra_required_ids or set())
     required = [result for result in objectives if result.objective_id in required_ids]
@@ -1277,8 +1278,7 @@ def verify_native(
                     "unattributed_deliveries": customer_result.unattributed,
                     "receipt_mac": customer_result.receipt_mac,
                     "order_results": [
-                        result.as_payload()
-                        for result in customer_result.order_results
+                        result.as_payload() for result in customer_result.order_results
                     ],
                 },
             )
@@ -1308,7 +1308,9 @@ def verify_native(
         task,
         objectives,
         constraints,
-        extra_required_ids={"customer:contracts"} if customer_result is not None else None,
+        extra_required_ids={"customer:contracts"}
+        if customer_result is not None
+        else None,
     )
     constraints_pass = all(
         result.supported and result.satisfied for result in constraints
@@ -1579,9 +1581,11 @@ def verify_native(
         required_results = [
             result for result in customer_result.order_results if result.required
         ]
-        required_total = sum(
-            order.required for order in task.customer.orders
-        ) if task.customer is not None else len(required_results)
+        required_total = (
+            sum(order.required for order in task.customer.orders)
+            if task.customer is not None
+            else len(required_results)
+        )
         fulfilled_count = sum(
             result.ratio + 1e-9 >= 1.0 and result.status != "expired"
             for result in required_results
@@ -1623,7 +1627,11 @@ def verify_native(
         ),
         metrics={
             **customer_metrics,
-            **({"evaluation_progress": evaluation_progress} if evaluation_progress else {}),
+            **(
+                {"evaluation_progress": evaluation_progress}
+                if evaluation_progress
+                else {}
+            ),
             "objective_evaluations": [
                 result.model_dump(mode="json") for result in objectives
             ],

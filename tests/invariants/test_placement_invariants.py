@@ -40,7 +40,6 @@ def game(instance):
     }
     instance.reset()
     yield instance.namespace
-    instance.reset()
 
 
 def test_cannot_place_overlapping_entities(game):

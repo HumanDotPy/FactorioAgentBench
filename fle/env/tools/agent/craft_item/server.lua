@@ -1,3 +1,8 @@
+storage.actions.get_crafting_status = function(player_index, item_name)
+    local player = storage.utils.ensure_valid_character(player_index)
+    return game.tick .. "," .. player.get_item_count(item_name)
+end
+
 storage.actions.craft_item = function(player_index, entity, count)
     -- Ensure we have a valid character, recreating if necessary
     local player = storage.utils.ensure_valid_character(player_index)

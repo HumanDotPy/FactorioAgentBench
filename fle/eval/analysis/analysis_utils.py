@@ -37,6 +37,24 @@ def group_results_by_task(
     if task_column not in df.columns:
         raise ValueError(f"DataFrame must contain '{task_column}' column")
 
+    descriptions = df[task_column]
+    if descriptions.map(lambda value: isinstance(value, str)).all():
+        task_names = descriptions.copy()
+        has_type = task_names.str.contains("type:", regex=False)
+        if has_type.any():
+            extracted = (
+                task_names[has_type]
+                .str.split("type:", n=1)
+                .str[1]
+                .str.split("\n", n=1)
+                .str[0]
+                .str.strip()
+            )
+            task_names = task_names.mask(has_type, extracted)
+        return {
+            task_name: group for task_name, group in df.groupby(task_names, sort=False)
+        }
+
     # Extract task names from version description
     task_groups = {}
     for _, row in df.iterrows():

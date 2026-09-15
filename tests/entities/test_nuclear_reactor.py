@@ -20,8 +20,8 @@ def game(instance):
         "inserter": 5,
         "iron-chest": 5,
     }
-    instance.set_speed(10)
     instance.reset(all_technologies_researched=True)
+    instance.set_speed(100)
     yield instance.namespace
 
 

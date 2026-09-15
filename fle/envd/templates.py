@@ -247,6 +247,7 @@ class ProgramTemplateStore:
         self.scope = scope
         self.max_per_scope = max(1, max_per_scope)
         self._lock = threading.Lock()
+        self._local = threading.local()
         if scope is None:
             self._db_path = None
             self._memory: dict[str, TemplateRecord] = {}
@@ -258,8 +259,11 @@ class ProgramTemplateStore:
                 conn.executescript(_SCHEMA)
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._db_path, timeout=5.0)
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(self._db_path, timeout=5.0)
+            conn.execute("PRAGMA journal_mode=WAL")
+            self._local.conn = conn
         return conn
 
     @property
@@ -280,11 +284,13 @@ class ProgramTemplateStore:
         normalized = validate_parameters(parameters)
         with self._lock:
             existing = self._get(name)
-            if existing is None and self.count() >= self.max_per_scope:
-                raise TemplateQuotaExceeded(
-                    f"Scope {self.scope!r} holds {self.count()} templates "
-                    f"(limit {self.max_per_scope}); delete or reuse a name"
-                )
+            if existing is None:
+                count = self.count()
+                if count >= self.max_per_scope:
+                    raise TemplateQuotaExceeded(
+                        f"Scope {self.scope!r} holds {count} templates "
+                        f"(limit {self.max_per_scope}); delete or reuse a name"
+                    )
             version = (existing.version + 1) if existing is not None else 1
             record = TemplateRecord(
                 name=name,

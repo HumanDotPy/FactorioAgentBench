@@ -24,14 +24,14 @@ from fle.envd.models import (
 def _recipe_records(catalog: ProductCatalog) -> dict[str, Any]:
     raw = getattr(catalog._source, "_raw_recipes", None)
     if isinstance(raw, dict):
-        return {str(key): value for key, value in raw.items()}
+        return raw
     return {}
 
 
 def _technology_records(catalog: ProductCatalog) -> dict[str, Any]:
     raw = getattr(catalog._source, "_raw_technologies", None)
     if isinstance(raw, dict):
-        return {str(key): value for key, value in raw.items()}
+        return raw
     return {}
 
 
@@ -83,7 +83,10 @@ def _status_for_product(
 ) -> CapabilityNodeStatus:
     if product_id in delivered_products:
         return "delivered"
-    if snapshot.production_rates_300s.get(product_id, 0.0) > EPSILON_RATE or snapshot.production_rates_60s.get(product_id, 0.0) > EPSILON_RATE:
+    if (
+        snapshot.production_rates_300s.get(product_id, 0.0) > EPSILON_RATE
+        or snapshot.production_rates_60s.get(product_id, 0.0) > EPSILON_RATE
+    ):
         return "producing"
     if product_id in snapshot.unlocked_recipe_ids:
         return "unlocked"
@@ -113,13 +116,23 @@ def build_capability_graph(
         products.update(_recipe_chain(target_product, catalog))
     delivered = set(delivered_products)
     nodes: list[CapabilityNodeEvidence] = []
-    techs = set(snapshot.technology_ids) | set(_technology_records(catalog))
+    technology_records = _technology_records(catalog)
+    techs = set(snapshot.technology_ids) | set(technology_records)
     for technology_id in sorted(techs):
-        record = _technology_records(catalog).get(technology_id, {})
-        prerequisites = tuple(f"technology:{item}" for item in record.get("prerequisites", ()) or ()) if isinstance(record, dict) else ()
-        status: CapabilityNodeStatus = "unlocked" if technology_id in snapshot.technology_ids else "locked"
+        record = technology_records.get(technology_id, {})
+        prerequisites = (
+            tuple(
+                f"technology:{item}" for item in record.get("prerequisites", ()) or ()
+            )
+            if isinstance(record, dict)
+            else ()
+        )
+        status: CapabilityNodeStatus = (
+            "unlocked" if technology_id in snapshot.technology_ids else "locked"
+        )
         if status == "locked" and all(
-            item.removeprefix("technology:") in snapshot.technology_ids for item in prerequisites
+            item.removeprefix("technology:") in snapshot.technology_ids
+            for item in prerequisites
         ):
             status = "reachable"
         nodes.append(
@@ -128,8 +141,12 @@ def build_capability_graph(
                 kind="technology",
                 status=status,
                 prerequisites=prerequisites,
-                first_evidence_tick=snapshot.captured_tick if status == "unlocked" else None,
-                latest_evidence_tick=snapshot.captured_tick if status == "unlocked" else None,
+                first_evidence_tick=snapshot.captured_tick
+                if status == "unlocked"
+                else None,
+                latest_evidence_tick=snapshot.captured_tick
+                if status == "unlocked"
+                else None,
                 evidence={"canonical_id": technology_id},
             )
         )
@@ -145,8 +162,12 @@ def build_capability_graph(
                 kind="product",
                 status=status,
                 prerequisites=_product_prerequisites(product_id, catalog),
-                first_evidence_tick=snapshot.captured_tick if status in {"producing", "delivered"} else None,
-                latest_evidence_tick=snapshot.captured_tick if status in {"producing", "delivered"} else None,
+                first_evidence_tick=snapshot.captured_tick
+                if status in {"producing", "delivered"}
+                else None,
+                latest_evidence_tick=snapshot.captured_tick
+                if status in {"producing", "delivered"}
+                else None,
                 production_rate_per_minute=round(rate, 4),
                 evidence={"canonical_id": product_id},
             )
@@ -247,36 +268,76 @@ def compare_capability_snapshots(
     after_tech = set(after.technology_ids)
     before_recipes = set(before.unlocked_recipe_ids)
     after_recipes = set(after.unlocked_recipe_ids)
-    before_machines = {name for name, count in before.placed_entity_counts.items() if count > 0}
-    after_machines = {name for name, count in after.placed_entity_counts.items() if count > 0}
+    before_machines = {
+        name for name, count in before.placed_entity_counts.items() if count > 0
+    }
+    after_machines = {
+        name for name, count in after.placed_entity_counts.items() if count > 0
+    }
     produced_before = {
-        item for item, rate in {**before.production_rates_300s, **before.production_rates_60s}.items() if rate > EPSILON_RATE
+        item
+        for item, rate in {
+            **before.production_rates_300s,
+            **before.production_rates_60s,
+        }.items()
+        if rate > EPSILON_RATE
     }
     produced_after = {
-        item for item, rate in {**after.production_rates_300s, **after.production_rates_60s}.items() if rate > EPSILON_RATE
+        item
+        for item, rate in {
+            **after.production_rates_300s,
+            **after.production_rates_60s,
+        }.items()
+        if rate > EPSILON_RATE
     }
     rate_deltas = {
         item: round(
-            max(after.production_rates_300s.get(item, 0.0), after.production_rates_60s.get(item, 0.0))
-            - max(before.production_rates_300s.get(item, 0.0), before.production_rates_60s.get(item, 0.0)),
+            max(
+                after.production_rates_300s.get(item, 0.0),
+                after.production_rates_60s.get(item, 0.0),
+            )
+            - max(
+                before.production_rates_300s.get(item, 0.0),
+                before.production_rates_60s.get(item, 0.0),
+            ),
             4,
         )
-        for item in set(before.production_rates_300s) | set(after.production_rates_300s) | set(before.production_rates_60s) | set(after.production_rates_60s)
-        if max(after.production_rates_300s.get(item, 0.0), after.production_rates_60s.get(item, 0.0))
-        - max(before.production_rates_300s.get(item, 0.0), before.production_rates_60s.get(item, 0.0)) > EPSILON_RATE
+        for item in set(before.production_rates_300s)
+        | set(after.production_rates_300s)
+        | set(before.production_rates_60s)
+        | set(after.production_rates_60s)
+        if max(
+            after.production_rates_300s.get(item, 0.0),
+            after.production_rates_60s.get(item, 0.0),
+        )
+        - max(
+            before.production_rates_300s.get(item, 0.0),
+            before.production_rates_60s.get(item, 0.0),
+        )
+        > EPSILON_RATE
     }
     path = _dependency_path(target_product, catalog)
-    before_graph = build_capability_graph(before, catalog, target_product=target_product)
+    before_graph = build_capability_graph(
+        before, catalog, target_product=target_product
+    )
     after_graph = build_capability_graph(after, catalog, target_product=target_product)
     before_status = {node.node_id: node.status for node in before_graph.nodes}
     after_status = {node.node_id: node.status for node in after_graph.nodes}
-    path_before = tuple(node for node in path if before_status.get(node) in {"unlocked", "constructed", "producing", "delivered"})
-    path_after = tuple(node for node in path if after_status.get(node) in {"unlocked", "constructed", "producing", "delivered"})
+    path_before = tuple(
+        node
+        for node in path
+        if before_status.get(node)
+        in {"unlocked", "constructed", "producing", "delivered"}
+    )
+    path_after = tuple(
+        node
+        for node in path
+        if after_status.get(node)
+        in {"unlocked", "constructed", "producing", "delivered"}
+    )
     newly_producing = tuple(sorted(produced_after - produced_before))
     path_products = {
-        node.removeprefix("product:")
-        for node in path
-        if node.startswith("product:")
+        node.removeprefix("product:") for node in path if node.startswith("product:")
     }
     path_technologies = {
         node.removeprefix("technology:")

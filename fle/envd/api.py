@@ -27,6 +27,7 @@ from fle.envd.models import (
     FactorioTaskSpec,
 )
 from fle.envd.program_policy import ProgramPolicyViolation
+from fle.envd.blueprints import BlueprintError
 from fle.envd.service import EnvironmentService
 from fle.envd.templates import (
     TemplateError,
@@ -47,6 +48,12 @@ class LeaseRequest(RequestModel):
 class ExecuteRequest(RequestModel):
     code: str
     request_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class ReferenceWorldRequest(RequestModel):
+    action: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    request_id: str = Field(min_length=1, max_length=128)
 
 
 class ProgramRequest(RequestModel):
@@ -124,6 +131,10 @@ class MemoryDeleteRequest(RequestModel):
 
 
 def _register_error_handlers(app: FastAPI) -> None:
+    @app.exception_handler(BlueprintError)
+    async def blueprint_error(_, exc: BlueprintError):
+        return _error(422, str(exc))
+
     @app.exception_handler(ValueError)
     async def invalid_input(_, exc: ValueError):
         return _error(422, str(exc))
@@ -402,6 +413,12 @@ def create_app(service: EnvironmentService) -> FastAPI:
         ).model_dump(mode="json")
 
     # -- pacing toggle and program templates --------------------------------
+
+    @app.post("/v1/leases/{lease_id}/reference-world")
+    def reference_world(lease_id: str, request: ReferenceWorldRequest):
+        return service.reference_world(
+            lease_id, request.action, request.arguments, request.request_id
+        )
 
     @app.post("/v1/leases/{lease_id}/realtime")
     def set_realtime(lease_id: str, request: RealtimeRequest):
@@ -761,8 +778,11 @@ def build_live_service(
     lease_ttl_seconds: int = 900,
     audit_tcp_ports: list[int] | None = None,
     execution_game_speed: float = 10,
+    reference_capacity: int | None = None,
 ) -> EnvironmentService:
     from fle.envd.backend import FLEWorker
+    from fle.envd.reference_world import ReferenceWorldPool
+    from fle.cluster.run_envs import resolve_state_dir
 
     workers = [
         FLEWorker.connect(f"factorio-{index}", port, address, execution_game_speed)
@@ -778,4 +798,10 @@ def build_live_service(
         workers,
         lease_ttl_seconds=lease_ttl_seconds,
         audit_workers=audit_workers,
+        reference_worlds=ReferenceWorldPool(
+            resolve_state_dir() / "reference-worlds",
+            len(tcp_ports) if reference_capacity is None else reference_capacity,
+        )
+        if reference_capacity != 0 and address in {"localhost", "127.0.0.1"}
+        else None,
     )

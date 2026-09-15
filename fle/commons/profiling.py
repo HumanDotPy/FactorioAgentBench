@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar
-from copy import deepcopy
 from functools import wraps
 import math
 import json
@@ -89,16 +88,13 @@ def persist_trace(directory: Path, trace: Trace, max_bytes: int = 5_000_000) -> 
         encoded = (
             json.dumps({"schema_version": "factorio-profile-v1", **trace.snapshot()})
             + "\n"
-        )
+        ).encode()
         with _file_lock:
             directory.mkdir(parents=True, exist_ok=True)
             path = directory / f"mcp-{os.getpid()}.jsonl"
-            if (
-                path.exists()
-                and path.stat().st_size + len(encoded.encode()) > max_bytes
-            ):
+            if path.exists() and path.stat().st_size + len(encoded) > max_bytes:
                 os.replace(path, path.with_suffix(".previous.jsonl"))
-            with path.open("a", encoding="utf-8") as stream:
+            with path.open("ab") as stream:
                 stream.write(encoded)
     except OSError:
         # Diagnostics cannot invalidate a successfully committed world mutation.
@@ -224,7 +220,16 @@ class ProfileStore:
             }
         # Completed snapshots are immutable internally; copy outside the lock
         # so an operator's large report cannot stall completion or toggling.
-        traces = deepcopy(traces)
+        traces = [
+            {
+                **trace,
+                "stages": {
+                    name: dict(values) for name, values in trace["stages"].items()
+                },
+                "server_trace_ids": list(trace["server_trace_ids"]),
+            }
+            for trace in traces
+        ]
         operations: dict[str, list[float]] = {}
         stages: dict[str, dict] = {}
         for trace in traces:

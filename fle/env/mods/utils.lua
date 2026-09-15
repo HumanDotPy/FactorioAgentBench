@@ -126,8 +126,11 @@ end
 storage.crafting_queue = {}
 
 script.on_event(defines.events.on_tick, function(event)
+  local queue = storage.crafting_queue
+  if not queue or #queue == 0 then return end
   -- Iterate over the crafting queue and update the remaining ticks
-  for i, task in ipairs(storage.crafting_queue) do
+  for i = #queue, 1, -1 do
+    local task = queue[i]
     task.remaining_ticks = task.remaining_ticks - 1
 
     -- If the crafting is finished, consume the ingredients, insert the crafted entity, and remove the task from the queue
@@ -136,7 +139,7 @@ script.on_event(defines.events.on_tick, function(event)
         task.player.remove_item({name = ingredient.name, count = ingredient.amount * task.count})
       end
       task.player.insert({name = task.entity_name, count = task.count})
-      table.remove(storage.crafting_queue, i)
+      table.remove(queue, i)
     end
   end
 end)
@@ -277,7 +280,9 @@ storage.utils.begin_native_crafting = function(player_index, recipe_name, count)
 end
 
 script.on_nth_tick(1, function()
-    for player_index in pairs(storage.native_crafting or {}) do
+    local pending = storage.native_crafting
+    if not pending or not next(pending) then return end
+    for player_index in pairs(pending) do
         storage.utils.sync_native_crafting(player_index)
     end
 end)
@@ -407,4 +412,314 @@ storage.utils.format_inventory_for_error = function(player)
     end
 
     return table.concat(items, ", ")
+end
+
+-- Read fluid port geometry plus live connection state. Read-only: never
+-- mutates the entity or its fluidboxes.
+--
+-- Each port reports the fluidbox connection point (the fluidbox center, which
+-- is usually inside the machine body), whether that fluidbox currently has a
+-- live connection, its peers when connected, and -- for open ports -- the
+-- candidate tiles where a connecting pipe would go, best candidate first.
+-- The attach tile is one tile outward along the port's facing direction; when
+-- the runtime does not expose a facing, the outward ray from the entity
+-- center is used, then any free orthogonal neighbour.
+storage.utils.fluid_port_report = function(entity, player)
+    local report = { ports = {}, inputs = {}, outputs = {} }
+    if not entity then
+        return report
+    end
+    local valid_ok, is_valid = pcall(function() return entity.valid end)
+    if valid_ok and is_valid == false then
+        return report
+    end
+
+    local has_fluidbox, fluidbox = pcall(function() return entity.fluidbox end)
+    if not has_fluidbox or fluidbox == nil then
+        return report
+    end
+    local length_ok, length = pcall(function() return #fluidbox end)
+    if not length_ok or not length or length == 0 then
+        return report
+    end
+
+    local center = entity.position
+    local box = entity.bounding_box
+
+    local function inside_entity(tile)
+        if not box then
+            return false
+        end
+        return tile.x > box.left_top.x and tile.x < box.right_bottom.x
+            and tile.y > box.left_top.y and tile.y < box.right_bottom.y
+    end
+
+    local function can_place_pipe(tile)
+        if player == nil then
+            return false
+        end
+        local ok_place, placeable = pcall(function()
+            return storage.utils.can_place_entity(player, "pipe", tile, 0)
+        end)
+        return ok_place and placeable and true or false
+    end
+
+    local function direction_delta(direction)
+        if direction == nil then
+            return nil
+        end
+        if direction == defines.direction.north then
+            return 0, -1
+        elseif direction == defines.direction.east then
+            return 1, 0
+        elseif direction == defines.direction.south then
+            return 0, 1
+        elseif direction == defines.direction.west then
+            return -1, 0
+        end
+        return nil
+    end
+
+    local function attach_tiles(position, port_direction)
+        local candidates = {}
+        local seen = {}
+        local function add(tile)
+            local key = string.format("%.2f,%.2f", tile.x, tile.y)
+            if seen[key] then
+                return
+            end
+            seen[key] = true
+            if not inside_entity(tile) and can_place_pipe(tile) then
+                candidates[#candidates + 1] = tile
+            end
+        end
+
+        local dx, dy = direction_delta(port_direction)
+        if dx then
+            -- The runtime told us which face this port opens onto; only that
+            -- tile can carry the pipe. Listing other neighbours would send
+            -- the agent to tiles that can never connect.
+            add({ x = position.x + dx, y = position.y + dy })
+            return candidates
+        end
+        local rx = position.x - center.x
+        local ry = position.y - center.y
+        if math.abs(rx) >= math.abs(ry) and rx ~= 0 then
+            add({ x = position.x + (rx > 0 and 1 or -1), y = position.y })
+        elseif ry ~= 0 then
+            add({ x = position.x, y = position.y + (ry > 0 and 1 or -1) })
+        end
+        add({ x = position.x + 1, y = position.y })
+        add({ x = position.x - 1, y = position.y })
+        add({ x = position.x, y = position.y + 1 })
+        add({ x = position.x, y = position.y - 1 })
+        add({ x = math.floor(position.x) + 0.5, y = math.floor(position.y) + 0.5 })
+        return candidates
+    end
+
+    for fluidbox_index = 1, length do
+        local ports_ok, connections = pcall(function()
+            return fluidbox.get_pipe_connections(fluidbox_index)
+        end)
+        if ports_ok and type(connections) == "table" then
+            local peer_boxes = {}
+            local live_ok, live_connections = pcall(function()
+                return fluidbox.get_connections(fluidbox_index)
+            end)
+            local connection_state_known = live_ok
+                and type(live_connections) == "table"
+            if connection_state_known then
+                for _, neighbour in ipairs(live_connections) do
+                    local owner = neighbour and neighbour.owner
+                    if owner and owner.valid ~= false then
+                        peer_boxes[#peer_boxes + 1] = {
+                            entity_id = owner.unit_number,
+                            name = owner.name,
+                            position = owner.position,
+                            box = owner.bounding_box,
+                        }
+                    end
+                end
+            end
+
+            local function point_box_distance(point, box)
+                if not box then
+                    return math.huge
+                end
+                local dx = math.max(
+                    box.left_top.x - point.x, 0, point.x - box.right_bottom.x
+                )
+                local dy = math.max(
+                    box.left_top.y - point.y, 0, point.y - box.right_bottom.y
+                )
+                return math.sqrt(dx * dx + dy * dy)
+            end
+
+            for _, connection in ipairs(connections) do
+                local position = connection.position
+                if position then
+                    local port = {
+                        x = position.x,
+                        y = position.y,
+                        fluidbox_index = fluidbox_index,
+                        flow_direction = connection.flow_direction,
+                        connection_type = connection.connection_type,
+                    }
+                    if connection.direction ~= nil then
+                        port.direction = connection.direction
+                    end
+                    if connection_state_known then
+                        local peers = {}
+                        for _, peer in ipairs(peer_boxes) do
+                            if point_box_distance(position, peer.box) <= 1.0 then
+                                peers[#peers + 1] = {
+                                    entity_id = peer.entity_id,
+                                    name = peer.name,
+                                    position = peer.position,
+                                }
+                            end
+                        end
+                        port.connected = #peers > 0
+                        if #peers > 0 then
+                            port.peers = peers
+                        else
+                            port.attach_tiles = attach_tiles(
+                                position, connection.direction
+                            )
+                        end
+                    end
+                    report.ports[#report.ports + 1] = port
+                    if port.flow_direction == "input" then
+                        report.inputs[#report.inputs + 1] = port
+                    elseif port.flow_direction == "output" then
+                        report.outputs[#report.outputs + 1] = port
+                    end
+                end
+            end
+        end
+    end
+
+    return report
+end
+
+-- Attach the fluid connection report to a freshly serialized machine and add
+-- explicit warnings for open ports. Pipes and underground pipes are quiet:
+-- an open pipe end is a normal intermediate state, not a problem.
+storage.utils.attach_connection_report = function(serialized, entity, player)
+    local prototype = prototypes.entity[entity.name]
+    if not prototype then
+        return serialized
+    end
+    -- LuaEntityPrototype is strict: reading an absent key raises instead of
+    -- returning nil, so probe fluid_boxes defensively.
+    local boxes_ok, boxes = pcall(function() return prototype.fluid_boxes end)
+    if not boxes_ok or not boxes or #boxes == 0 then
+        return serialized
+    end
+
+    local report = storage.utils.fluid_port_report(entity, player)
+    if #report.ports == 0 then
+        return serialized
+    end
+    serialized.fluid = report
+
+    local quiet = prototype.type == "pipe" or prototype.type == "pipe-to-ground"
+    if quiet then
+        return serialized
+    end
+
+    serialized.warnings = serialized.warnings or {}
+    for _, port in ipairs(report.ports) do
+        if port.connected == false then
+            local label = port.flow_direction
+            if label == "input-output" or label == nil then
+                label = "fluid"
+            end
+            local text = "unconnected " .. label .. " port at ("
+                .. port.x .. ", " .. port.y .. ")"
+            if port.attach_tiles and #port.attach_tiles > 0 then
+                local tile = port.attach_tiles[1]
+                text = text .. "; place a pipe at (" .. tile.x .. ", " .. tile.y .. ")"
+            else
+                text = text .. "; no free pipe attach tile found"
+            end
+            table.insert(serialized.warnings, "'" .. text .. "'")
+        end
+    end
+    return serialized
+end
+
+storage.utils.escape_character_to_free_tile = function(player, avoid_box, prefer_away, prefer_toward)
+    if not player or not player.position then
+        return nil
+    end
+    local surface = player.surface
+    local origin = player.position
+    local candidates = {}
+    for _, radius in ipairs({1, 2}) do
+        candidates[#candidates + 1] = {x = origin.x + radius, y = origin.y}
+        candidates[#candidates + 1] = {x = origin.x - radius, y = origin.y}
+        candidates[#candidates + 1] = {x = origin.x, y = origin.y + radius}
+        candidates[#candidates + 1] = {x = origin.x, y = origin.y - radius}
+    end
+
+    local function inside_avoid_box(candidate)
+        if not avoid_box then
+            return false
+        end
+        local margin = 0.45
+        return candidate.x > avoid_box.left_top.x - margin
+            and candidate.x < avoid_box.right_bottom.x + margin
+            and candidate.y > avoid_box.left_top.y - margin
+            and candidate.y < avoid_box.right_bottom.y + margin
+    end
+
+    local function is_free(candidate)
+        if inside_avoid_box(candidate) then
+            return false
+        end
+        local blockers = surface.find_entities_filtered{
+            position = candidate, radius = 0.45,
+            collision_mask = "player", limit = 1
+        }
+        if blockers and #blockers > 0 then
+            return false
+        end
+        for _, offset in ipairs({{0, 0}, {0.45, 0}, {-0.45, 0}, {0, 0.45}, {0, -0.45}}) do
+            local tile = surface.get_tile(candidate.x + offset[1], candidate.y + offset[2])
+            -- Factorio 2.0: LuaTile has no `walkable` property; reading it raises
+            -- and kills the nth-tick walking-queue handler. Ask the engine
+            -- whether the player collision layer collides with this tile.
+            if tile and tile.collides_with("player") then
+                return false
+            end
+        end
+        return true
+    end
+
+    local function preference(candidate)
+        local reference = prefer_toward or prefer_away
+        if not reference then
+            return 0
+        end
+        local dx = candidate.x - reference.x
+        local dy = candidate.y - reference.y
+        local distance = math.sqrt(dx * dx + dy * dy)
+        if prefer_toward then
+            return -distance
+        end
+        return distance
+    end
+
+    table.sort(candidates, function(a, b)
+        return preference(a) > preference(b)
+    end)
+
+    for _, candidate in ipairs(candidates) do
+        if is_free(candidate) then
+            player.teleport(candidate)
+            return player.position
+        end
+    end
+    return nil
 end

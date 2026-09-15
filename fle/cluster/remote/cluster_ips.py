@@ -28,6 +28,7 @@ def get_public_ips(cluster_name):
         # Describe the tasks to get their details
         task_details = ecs_client.describe_tasks(cluster=cluster_name, tasks=batch)
 
+        eni_ids = []
         for task in task_details["tasks"]:
             # Get the ENI ID for the task
             eni_id = None
@@ -42,19 +43,36 @@ def get_public_ips(cluster_name):
             if not eni_id:
                 print(f"Warning: No ENI found for task {task['taskArn']}")
                 continue
+            eni_ids.append(eni_id)
 
-            # Describe the network interface to get its public IP
+        for eni_batch_start in range(0, len(eni_ids), 100):
+            eni_batch = eni_ids[eni_batch_start : eni_batch_start + 100]
             try:
                 eni_details = ec2_client.describe_network_interfaces(
-                    NetworkInterfaceIds=[eni_id]
+                    NetworkInterfaceIds=eni_batch
                 )
-                if "Association" in eni_details["NetworkInterfaces"][0]:
-                    public_ip = eni_details["NetworkInterfaces"][0]["Association"][
-                        "PublicIp"
-                    ]
-                    public_ips.append(public_ip)
-            except Exception as e:
-                print(f"Error getting public IP for ENI {eni_id}: {str(e)}")
+                by_id = {
+                    network_interface["NetworkInterfaceId"]: network_interface
+                    for network_interface in eni_details["NetworkInterfaces"]
+                }
+                for eni_id in eni_batch:
+                    network_interface = by_id.get(eni_id)
+                    if network_interface and "Association" in network_interface:
+                        public_ips.append(network_interface["Association"]["PublicIp"])
+            except Exception:
+                for eni_id in eni_batch:
+                    try:
+                        eni_details = ec2_client.describe_network_interfaces(
+                            NetworkInterfaceIds=[eni_id]
+                        )
+                        if "Association" in eni_details["NetworkInterfaces"][0]:
+                            public_ips.append(
+                                eni_details["NetworkInterfaces"][0]["Association"][
+                                    "PublicIp"
+                                ]
+                            )
+                    except Exception as inner:
+                        print(f"Error getting public IP for ENI {eni_id}: {str(inner)}")
 
     return public_ips
 

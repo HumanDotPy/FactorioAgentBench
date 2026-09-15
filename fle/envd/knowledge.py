@@ -305,6 +305,40 @@ class GameDataReference:
             for recipe_id in technology.get("unlocked_recipes", []) or []:
                 self.recipe_to_technologies.setdefault(str(recipe_id), []).append(name)
         self._hash = _sha256_text(_canonical(payload))
+        self._search_records: list[tuple[str, str, tuple[str, ...], set[str]]] = (
+            self._build_search_records(payload)
+        )
+
+    def _build_search_records(
+        self, payload: dict[str, Any]
+    ) -> list[tuple[str, str, tuple[str, ...], set[str]]]:
+        datasets: list[tuple[str, Iterable[tuple[str, Any]]]] = [
+            ("recipe", self.recipes.items()),
+            ("technology", self.technologies.items()),
+        ]
+        prototypes = payload.get("prototypes", {})
+        if isinstance(prototypes, dict):
+            datasets.append(("prototype", prototypes.items()))
+        elif isinstance(prototypes, list):
+            datasets.append(
+                (
+                    "prototype",
+                    (
+                        (str(item.get("name")), item)
+                        for item in prototypes
+                        if isinstance(item, dict) and item.get("name")
+                    ),
+                )
+            )
+        records: list[tuple[str, str, tuple[str, ...], set[str]]] = []
+        for kind, values in datasets:
+            for identifier, value in values:
+                name = str(identifier)
+                aliases = self._recipe_aliases(name) if kind == "recipe" else ()
+                searchable = _tokens(f"{name} {' '.join(aliases)} {_canonical(value)}")
+                records.append((kind, name, aliases, searchable))
+        records.sort(key=lambda item: (item[0], item[1]))
+        return records
 
     @property
     def reference_id(self) -> str:
@@ -537,40 +571,14 @@ class GameDataReference:
         requested = {str(kind).lower() for kind in (kinds or ())}
         q = _tokens(query)
         records: list[dict[str, Any]] = []
-        datasets: list[tuple[str, Iterable[tuple[str, Any]]]] = [
-            ("recipe", self.recipes.items()),
-            ("technology", self.technologies.items()),
-        ]
-        prototypes = self.payload.get("prototypes", {})
-        if isinstance(prototypes, dict):
-            datasets.append(("prototype", prototypes.items()))
-        elif isinstance(prototypes, list):
-            datasets.append(
-                (
-                    "prototype",
-                    (
-                        (str(item.get("name")), item)
-                        for item in prototypes
-                        if isinstance(item, dict) and item.get("name")
-                    ),
-                )
-            )
-        for kind, values in datasets:
+        for kind, identifier, _aliases, searchable in self._search_records:
             if requested and kind not in requested:
                 continue
-            for identifier, value in values:
-                text = _canonical(value)
-                aliases = (
-                    self._recipe_aliases(str(identifier)) if kind == "recipe" else ()
-                )
-                if not _query_matches(
-                    q, _tokens(f"{identifier} {' '.join(aliases)} {text}")
-                ):
-                    continue
-                records.append(
-                    {"kind": kind, "canonical_id": identifier, "title": identifier}
-                )
-        records.sort(key=lambda item: (item["kind"], item["canonical_id"]))
+            if not _query_matches(q, searchable):
+                continue
+            records.append(
+                {"kind": kind, "canonical_id": identifier, "title": identifier}
+            )
         page, next_cursor = _paginate(records, limit, cursor)
         return {
             "schema_version": REFERENCE_SCHEMA_VERSION,

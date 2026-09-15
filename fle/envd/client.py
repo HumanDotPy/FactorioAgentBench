@@ -84,6 +84,15 @@ class HTTPEnvironmentClient:
     async def health(self) -> HealthStatus:
         return HealthStatus.model_validate(await self._request("GET", "/v1/health"))
 
+    async def reference_world(
+        self, lease_id: str, action: str, arguments: dict, request_id: str
+    ) -> dict:
+        return await self._request(
+            "POST",
+            f"/v1/leases/{lease_id}/reference-world",
+            json={"action": action, "arguments": arguments, "request_id": request_id},
+        )
+
     async def lease(
         self,
         task: FactorioTaskSpec,

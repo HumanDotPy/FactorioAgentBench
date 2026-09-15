@@ -68,6 +68,23 @@ class HarvestResource(Tool):
 
         return response
 
+    def _harvest_status(self, item):
+        raw = str(
+            self.connection.rcon_client.send_command(
+                "/sc rcon.print("
+                + self._action_expression("get_harvest_status", self.player_index)
+                + ")"
+            )
+        )
+        parts = raw.split(",")
+        if len(parts) == 3:
+            tick, queue, count = (int(part) for part in parts)
+            return tick, queue, count
+        tick = self._native_tick()
+        queue = int(parts[0])
+        count = self.inspect_inventory()[item]
+        return tick, queue, count
+
     def _harvest_native(self, position, quantity, radius):
         resource = self.get_resource_type_at_position(position)
         item = resource[0]
@@ -87,26 +104,19 @@ class HarvestResource(Tool):
                     control = getattr(self.game_state, "_program_runtime", None)
                     if control is not None:
                         control.boundary()
-                    queue = self.connection.rcon_client.send_command(
-                        "/sc rcon.print("
-                        + self._action_expression(
-                            "get_harvest_queue_length", self.player_index
-                        )
-                        + ")"
-                    )
-                    observed = self.inspect_inventory()[item] - start_count
-                    now = self._native_tick()
+                    now, queue, count = self._harvest_status(item)
+                    observed = count - start_count
                     if observed > harvested:
                         harvested = observed
                         last_progress_tick = now
-                    if int(queue) == 0:
+                    if queue == 0:
                         break
                     if now - last_progress_tick >= 1800:
                         raise TimeoutError(
                             f"Harvesting {item} stalled for 30 simulated seconds; "
                             f"obtained {harvested}/{quantity}. Check target and reach."
                         )
-                    sleep(0.05)
+                    sleep(0.1)
             finally:
                 self.connection.rcon_client.send_command(
                     "/sc "

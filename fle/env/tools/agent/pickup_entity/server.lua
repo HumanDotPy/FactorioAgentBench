@@ -102,7 +102,9 @@ storage.actions.pickup_entity = function(player_index, x, y, entity)
                 end
 
                 -- game.print("Picked up placed "..ent.name)
-                pcall(ent.destroy{raise_destroy=false, do_cliff_correction=false})
+                pcall(function()
+                    ent.destroy{raise_destroy=false, do_cliff_correction=false}
+                end)
                 return true
             end
         end

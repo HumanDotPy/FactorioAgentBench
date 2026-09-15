@@ -1,20 +1,20 @@
 storage.alerts = {}
 
+local belt_direction_vector = {
+    [0] = {x = 0, y = -1},   -- North
+    [4] = {x = 1, y = 0},    -- East (Factorio 2.0)
+    [8] = {x = 0, y = 1},    -- South (Factorio 2.0)
+    [12] = {x = -1, y = 0},  -- West (Factorio 2.0)
+}
+
 -- Define a function to check if the transport belt is blocked
 local function is_transport_belt_blocked(entity)
     if entity.type == "transport-belt" then
         local line_1 = entity.get_transport_line(1)
         local line_2 = entity.get_transport_line(2)
 
-        local direction_vector = {
-            [0] = {x = 0, y = -1},   -- North
-            [4] = {x = 1, y = 0},    -- East (Factorio 2.0)
-            [8] = {x = 0, y = 1},    -- South (Factorio 2.0)
-            [12] = {x = -1, y = 0},  -- West (Factorio 2.0)
-        }
-
-        local dx = direction_vector[entity.direction].x
-        local dy = direction_vector[entity.direction].y
+        local dx = belt_direction_vector[entity.direction].x
+        local dy = belt_direction_vector[entity.direction].y
         local next_position = {x = entity.position.x + dx, y = entity.position.y + dy}
         local next_entities = entity.surface.find_entities_filtered {
             area = {{next_position.x - 0.5, next_position.y - 0.5}, {next_position.x + 0.5, next_position.y + 0.5}},
@@ -44,29 +44,30 @@ local function is_transport_belt_blocked(entity)
 end
 
 -- Define a function to check if an entity is full
-local function is_full(entity)
-    -- Map inventory types to string names
-    local inventory_names = {
-        [defines.inventory.rocket_silo_rocket] = "rocket",
-        [defines.inventory.rocket_silo_input] = "rocket input",
-        [defines.inventory.rocket_silo_output] = "rocket output",
-        [defines.inventory.rocket_silo_modules] = "rocket modules",
-        [defines.inventory.fuel] = "fuel source",
-        [defines.inventory.burnt_result] = "burnt result",
-        [defines.inventory.assembling_machine_input] = "assembling machine input",
-        [defines.inventory.assembling_machine_output] = "assembling machine output",
-        [defines.inventory.chest] = "chest",
-        [defines.inventory.furnace_source] = "furnace source",
-        [defines.inventory.furnace_result] = "furnace result",
-    }
+local inventory_names = {
+    [defines.inventory.rocket_silo_rocket] = "rocket",
+    [defines.inventory.rocket_silo_input] = "rocket input",
+    [defines.inventory.rocket_silo_output] = "rocket output",
+    [defines.inventory.rocket_silo_modules] = "rocket modules",
+    [defines.inventory.fuel] = "fuel source",
+    [defines.inventory.burnt_result] = "burnt result",
+    [defines.inventory.assembling_machine_input] = "assembling machine input",
+    [defines.inventory.chest] = "chest",
+    [defines.inventory.furnace_source] = "furnace source",
+}
 
+local function is_full(entity)
     local full_inventories = {}
 
     -- Iterate over all possible inventory types
     for inventory_id, inventory_name in pairs(inventory_names) do
         local inventory = entity.get_inventory(inventory_id)
+        -- Machine output inventories are reported by output_full_issue with
+        -- their item contents; the drill's chest inventory is its output.
+        local output_inventory_handled = inventory_id == defines.inventory.chest
+            and entity.type == "mining-drill"
         -- Check if the entity has this type of inventory and if it's full
-        if inventory and #inventory > 0 then
+        if inventory and #inventory > 0 and not output_inventory_handled then
             for i = 1, #inventory do
                 -- Check if the slot is completely filled
                 local stack = inventory[i]
@@ -97,12 +98,6 @@ local function is_full(entity)
                     inventory_name = "rocket silo output"
                 elseif inventory_id == defines.inventory.rocket_silo_modules then
                     inventory_name = "rocket silo modules"
-                elseif inventory_id == defines.inventory.rocket then
-                    inventory_name = "rocket"
-                end
-            elseif entity.type == "mining-drill" then
-                if inventory_id == defines.inventory.chest then
-                    inventory_name = "fuel source"
                 end
             elseif entity.type == "chest" then
                 if inventory_id == defines.inventory.chest then
@@ -156,12 +151,86 @@ local function has_ingredients(entity)
     return true
 end
 
+-- Concise "item count" summary of at most max_items stacks, roughly capped at
+-- max_chars. Never dumps a whole inventory.
+local function summarize_inventory(inventory, max_items, max_chars)
+    if not inventory then
+        return nil
+    end
+    local parts = {}
+    local length = 0
+    for i = 1, #inventory do
+        local stack = inventory[i]
+        if stack and stack.valid_for_read then
+            if #parts >= max_items then
+                break
+            end
+            local part = stack.name .. " " .. tostring(stack.count)
+            if #parts > 0 and length + #part + 2 > max_chars then
+                break
+            end
+            parts[#parts + 1] = part
+            length = length + #part + 2
+        end
+    end
+    if #parts == 0 then
+        return nil
+    end
+    return table.concat(parts, ", ")
+end
+
+-- The inventory a machine fills and the human-facing name for it.
+local function output_inventory(entity)
+    if entity.type == "furnace" then
+        return entity.get_inventory(defines.inventory.furnace_result), "furnace result"
+    elseif entity.type == "assembling-machine" then
+        return entity.get_inventory(defines.inventory.assembling_machine_output), "output"
+    elseif entity.type == "mining-drill" then
+        return entity.get_output_inventory(), "output"
+    end
+    return nil, nil
+end
+
+-- True when the machine cannot emit more product: the runtime says so
+-- (status full_output) or its output inventory cannot accept another stack.
+local function output_is_blocked(entity)
+    local inventory, label = output_inventory(entity)
+    if not inventory then
+        return false, nil, nil
+    end
+    if entity.status == defines.entity_status.full_output or inventory.is_full() then
+        return true, inventory, label
+    end
+    return false, inventory, label
+end
+
+local function output_full_issue(entity)
+    local blocked, inventory, label = output_is_blocked(entity)
+    if not blocked then
+        return nil
+    end
+    local detail = summarize_inventory(inventory, 2, 40)
+    local text = label .. " full"
+    if detail then
+        text = text .. ": " .. detail
+    end
+    return "\'" .. text .. "; extract to resume\'"
+end
+
 local function sink_has_space(entity)
     local inventory
     if entity.type == "container" or entity.type == "logistic-container" then
         inventory = entity.get_inventory(defines.inventory.chest)
     elseif entity.type == "furnace" then
         inventory = entity.get_inventory(defines.inventory.furnace_source)
+        -- furnace_source can still accept ore while furnace_result is jammed,
+        -- so a full result also means this sink cannot consume more items.
+        if inventory ~= nil and not inventory.is_full()
+            and entity.status ~= defines.entity_status.full_output then
+            local result = entity.get_inventory(defines.inventory.furnace_result)
+            return result == nil or not result.is_full()
+        end
+        return false
     elseif entity.type == "assembling-machine" then
         inventory = entity.get_inventory(defines.inventory.assembling_machine_input)
     else
@@ -196,14 +265,14 @@ local function has_output_space(entity)
         }[1]
 
         if #items_on_ground >= 1 then
-            return false
+            return false, destination_entity
         elseif destination_entity then
-            return sink_has_space(destination_entity)
+            return sink_has_space(destination_entity), destination_entity
         else
             -- No destination entity, check if output inventory is not empty and can't insert more
             local resource = entity.mining_target
             return not (output_inventory and not output_inventory.is_empty() and
-                        output_inventory.can_insert({name = resource.name, count = 1}) == false)
+                        output_inventory.can_insert({name = resource.name, count = 1}) == false), nil
         end
     end
     return true
@@ -278,6 +347,11 @@ function storage.utils.get_issues(entity)
         table.insert(issues, "\'"..full_inventory.."\'")
     end
 
+    local output_issue = output_full_issue(entity)
+    if output_issue then
+        table.insert(issues, output_issue)
+    end
+
     --if not has_output_space(entity) then
     --    if entity.drop_position ~= nil then
     --        local rounded_x = round_to_half(entity.drop_position.x)
@@ -288,12 +362,13 @@ function storage.utils.get_issues(entity)
     --        table.insert(issues, "\'waiting for space in destination\'")
     --    end
     --end
-    if not has_output_space(entity) then
+    local has_space, drop_destination = has_output_space(entity)
+    if not has_space then
         if entity.drop_position then
             local rounded_x = round_to_half(entity.drop_position.x)
             local rounded_y = round_to_half(entity.drop_position.y)
 
-            local destination_entity = entity.surface.find_entities_filtered{
+            local destination_entity = drop_destination or entity.surface.find_entities_filtered{
                 position = entity.drop_position,
                 type = {"container", "logistic-container", "transport-belt", "underground-belt", "splitter", "furnace", "assembling-machine"}
             }[1]
@@ -302,7 +377,17 @@ function storage.utils.get_issues(entity)
                 if destination_entity.type == "container" or destination_entity.type == "logistic-container" then
                     table.insert(issues, "\'chest at drop position is full. Empty the chest at (" .. rounded_x .. ", " .. rounded_y .. ") to continue mining.\'")
                 elseif destination_entity.type == "furnace" then
-                    table.insert(issues, "\'furnace at drop position is full. Mining resumes as it smelts.\'")
+                    local blocked, output_inv = output_is_blocked(destination_entity)
+                    if blocked then
+                        local detail = summarize_inventory(output_inv, 2, 36)
+                        local text = "furnace result at drop position is full"
+                        if detail then
+                            text = text .. ": " .. detail
+                        end
+                        table.insert(issues, "\'" .. text .. "; extract to resume\'")
+                    else
+                        table.insert(issues, "\'furnace at drop position is full. Mining resumes as it smelts.\'")
+                    end
                 elseif destination_entity.type == "assembling-machine" then
                     table.insert(issues, "\'machine at drop position cannot accept more items right now.\'")
                 else
@@ -385,28 +470,54 @@ end
 
 
 -- Define a function to be called every tick
-local function on_tick(event)
-    -- Run the check every 60 ticks (1 second)
-    if event.tick % 60 == 0 then
-        for _, surface in pairs(game.surfaces) do
-            local entities = surface.find_entities_filtered({force = "player"})
-            for _, entity in pairs(entities) do
-                local issues = storage.utils.get_issues(entity)
+local scan_entities = {}
+local scan_size = 1
 
-                if #issues > 0 then
-                    local position = entity.position
-                    local entity_key = entity.name .. "_" .. position.x .. "_" .. position.y
-                    local name = '"'..entity.name:gsub(" ", "_")..'"'
-                    if not storage.alerts[entity_key] then
-                        storage.alerts[entity_key] = {
-                            position = position,
-                            issues = issues,
-                            entity_name = name,
-                            tick = event.tick
-                        }
-                    end
-                end
-            end
+local function record_issues(entity, tick)
+    local issues = storage.utils.get_issues(entity)
+
+    if #issues > 0 then
+        local position = entity.position
+        local entity_key = entity.name .. "_" .. position.x .. "_" .. position.y
+        local name = '"'..entity.name:gsub(" ", "_")..'"'
+        if not storage.alerts[entity_key] then
+            storage.alerts[entity_key] = {
+                position = position,
+                issues = issues,
+                entity_name = name,
+                tick = tick
+            }
+        end
+    end
+end
+
+local function rebuild_scan_list()
+    scan_entities = {}
+    for _, surface in pairs(game.surfaces) do
+        for _, entity in pairs(surface.find_entities_filtered({force = "player"})) do
+            scan_entities[#scan_entities + 1] = entity
+        end
+    end
+    scan_size = math.max(1, math.ceil(#scan_entities / 60))
+end
+
+local function on_tick(event)
+    if event.tick % 60 == 0 then
+        rebuild_scan_list()
+    end
+    local count = #scan_entities
+    if count == 0 then
+        return
+    end
+    local start = 1 + (event.tick % 60) * scan_size
+    if start > count then
+        return
+    end
+    local stop = math.min(count, start + scan_size - 1)
+    for index = start, stop do
+        local entity = scan_entities[index]
+        if entity.valid then
+            record_issues(entity, event.tick)
         end
     end
 end

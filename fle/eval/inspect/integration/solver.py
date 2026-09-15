@@ -327,6 +327,11 @@ Now begin working toward this objective step by step."""
             previous_feedback_content = f"{original_user_message}\n\nAnalyze the current game state and begin your first action."
             previous_feedback_image = None
 
+            obs_formatter = TreeObservationFormatter(
+                include_research=False,
+                include_flows=False,
+            )
+
             for step in range(trajectory_length):
                 step_start = time.time()
 
@@ -335,10 +340,7 @@ Now begin working toward this objective step by step."""
                     observation: Observation = gym_env.get_observation()
                     # Don't include flows in pre-step observation since they're cumulative totals
                     # Flows are only meaningful after a step (showing delta production)
-                    obs_formatted = TreeObservationFormatter(
-                        include_research=False,
-                        include_flows=False,
-                    ).format(observation)
+                    obs_formatted = obs_formatter.format(observation)
 
                     # Create step message with current game state
                     current_score = production_scores[-1] if production_scores else 0
@@ -828,6 +830,11 @@ def factorio_unbounded_solver():
             # Full program codes for static analysis
             program_codes = []
 
+            obs_formatter = TreeObservationFormatter(
+                include_research=False,
+                include_flows=False,
+            )
+
             for step in range(trajectory_length):
                 step_start = time.time()
 
@@ -846,10 +853,7 @@ def factorio_unbounded_solver():
                     observation: Observation = gym_env.get_observation()
                     # Don't include flows in pre-step observation since they're cumulative totals
                     # Flows are only meaningful after a step (showing delta production)
-                    obs_formatted = TreeObservationFormatter(
-                        include_research=False,
-                        include_flows=False,
-                    ).format(observation)
+                    obs_formatted = obs_formatter.format(observation)
 
                     # Create step message with current game state
                     current_score = production_scores[-1] if production_scores else 0

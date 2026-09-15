@@ -41,13 +41,23 @@ class ProgressionSessionRecord(BaseModel):
     timing_complete: bool = True
 
 
-def validate_game_data(path: str | Path | None, task) -> None:
+def validate_game_data(
+    path: str | Path | None,
+    task,
+    *,
+    reference: Any = None,
+) -> None:
     if path is None:
         raise ValueError("Progression evaluations require --recipe-dump")
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
-    if data.get("factorio_version") != task.factorio_version:
-        raise ValueError("Game-data version does not match the task")
-    names = {item["name"] for item in data.get("technologies", [])}
+    if reference is None:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        if data.get("factorio_version") != task.factorio_version:
+            raise ValueError("Game-data version does not match the task")
+        names = {item["name"] for item in data.get("technologies", [])}
+    else:
+        if reference.factorio_version != task.factorio_version:
+            raise ValueError("Game-data version does not match the task")
+        names = set(reference.technologies)
     missing = {o.target for o in task.objectives if o.kind == "research"} - names
     if missing:
         raise ValueError(f"Unknown technology milestones: {sorted(missing)}")
@@ -85,9 +95,11 @@ async def run_progression_session(args) -> ProgressionSessionRecord:
     from scripts.adaptive_contract_benchmark import evaluation_execution_mode
 
     task = task.model_copy(update={"execution_mode": evaluation_execution_mode(args)})
-    validate_game_data(args.recipe_dump, task)
-    api_reference_hash = ApiReference().reference_hash
+    if args.recipe_dump is None:
+        raise ValueError("Progression evaluations require --recipe-dump")
     game_data, _ = load_game_data(args.recipe_dump)
+    validate_game_data(args.recipe_dump, task, reference=game_data)
+    api_reference_hash = ApiReference().reference_hash
     if args.max_session_ticks is not None and args.max_session_ticks <= 0:
         raise ValueError("Simulation budget must be positive")
     if args.wall_clock_failsafe_seconds <= 0:

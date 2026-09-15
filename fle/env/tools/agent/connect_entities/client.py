@@ -1067,9 +1067,14 @@ class ConnectEntities(Tool):
             "RIGHT": {"x": 1, "y": 0},
         }
 
+        target_varies = isinstance(target_entity, (ChemicalPlant, OilRefinery))
+        source_varies = isinstance(source_entity, (ChemicalPlant, OilRefinery))
+        target_runs = range(1, max_distance + 1) if target_varies else (1,)
+        source_runs = range(1, max_distance + 1) if source_varies else (1,)
+
         # Loop through possible distances for target extension
         # first get the target straight line
-        for target_run_idx in range(1, max_distance + 1):
+        for target_run_idx in target_runs:
             # try to create the target straight line extension if needed
             # we extend the target position in a straight line by the offset usng the target_run_idx as the distance to try
             # extension is only needed if the target is a chemical plant or oil refinery
@@ -1087,7 +1092,7 @@ class ConnectEntities(Tool):
             if not target_straight_line_path_dict:
                 continue
             # then for each target straight line extension, we get the source straight line
-            for source_run_idx in range(1, max_distance + 1):
+            for source_run_idx in source_runs:
                 # same logic as for target, just for source
                 source_straight_line_path_dict = self.create_straight_line_dict(
                     source_entity,

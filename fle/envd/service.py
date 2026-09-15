@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import json
 import threading
 import time
 import uuid
@@ -54,9 +55,10 @@ class _LeaseRecord:
     terminal_reason: str | None = None
     released: bool = False
     lock: threading.RLock = field(default_factory=threading.RLock)
-    execute_request_cache: dict[str, tuple[str, ExecutionResult]] = field(
+    execute_request_cache: dict[str, tuple[str, dict[str, Any]]] = field(
         default_factory=dict
     )
+    scored_interventions: int = 0
     # Adaptive contract session bookkeeping (section 14).  Idempotency caches
     # replay identical requests without re-touching the simulation.
     active_commitment_hash: str | None = None
@@ -68,6 +70,8 @@ class _LeaseRecord:
     profiling: ProfileStore = field(default_factory=ProfileStore)
     programs: ProgramRuntime | None = None
     programs_restore: dict[str, Any] | None = None
+    reference_requests: dict[str, tuple[str, dict]] = field(default_factory=dict)
+    reference_restore: dict | None = None
 
 
 def _template_view(record: Any) -> dict[str, Any]:
@@ -88,6 +92,7 @@ class EnvironmentService:
         lease_ttl_seconds: int = 900,
         capabilities: CapabilityManifest | None = None,
         audit_workers: list[FactorioWorker] | None = None,
+        reference_worlds=None,
     ):
         if not workers:
             raise ValueError("EnvironmentService requires at least one worker")
@@ -104,6 +109,7 @@ class EnvironmentService:
             raise ValueError("Lease and audit worker ids must be disjoint")
 
         self._workers = {worker.worker_id: worker for worker in workers}
+        self._reference_worlds = reference_worlds
         self._audit_workers = {worker.worker_id: worker for worker in audit_workers}
         self._busy_audit_workers: set[str] = set()
         self._leases: dict[str, _LeaseRecord] = {}
@@ -121,6 +127,7 @@ class EnvironmentService:
         features = dict(self.capabilities.features)
         features["checkpoints"] = checkpoint_capable
         features["runtime_profiling"] = True
+        features["creative_reference_worlds"] = reference_worlds is not None
         features["async_programs"] = checkpoint_capable
         self.capabilities = self.capabilities.model_copy(update={"features": features})
         if audit_workers:
@@ -286,9 +293,17 @@ class EnvironmentService:
         record.events = [
             ActionEvent.model_validate(value) for value in state.get("events", [])
         ]
+        record.scored_interventions = sum(
+            not event.evaluation_retry for event in record.events
+        )
         record.terminal_reason = state.get("terminal_reason")
         record.active_commitment_hash = state.get("active_commitment_hash")
         record.programs_restore = state.get("programs")
+        record.reference_restore = state.get("reference_world")
+        record.reference_requests = {
+            entry["request_id"]: (entry["fingerprint"], entry["result"])
+            for entry in state.get("reference_requests", [])
+        }
         record.lease.tool_error_retries_used = int(
             state.get("tool_error_retries_used", 0)
         )
@@ -297,9 +312,11 @@ class EnvironmentService:
             record.memory = SessionMemory.from_state(memory_state)
         for entry in state.get("execute_request_cache", []):
             cached_result = ExecutionResult.model_validate(entry["result"])
+            payload = cached_result.model_dump(mode="json")
+            payload["lease_id"] = record.lease.lease_id
             record.execute_request_cache[str(entry["request_id"])] = (
                 str(entry["code_sha256"]),
-                cached_result.model_copy(update={"lease_id": record.lease.lease_id}),
+                payload,
             )
         for entry in state.get("epoch_request_cache", []):
             method = str(entry["method"])
@@ -326,15 +343,23 @@ class EnvironmentService:
             "active_commitment_hash": record.active_commitment_hash,
             "tool_error_retries_used": record.lease.tool_error_retries_used,
             "memory": record.memory.export_state(),
+            "reference_requests": [
+                {"request_id": key, "fingerprint": fingerprint, "result": result}
+                for key, (fingerprint, result) in record.reference_requests.items()
+            ],
             "execute_request_cache": [
                 {
                     "request_id": request_id,
                     "code_sha256": code_sha256,
-                    "result": result.model_dump(mode="json"),
+                    "result": (
+                        payload.model_dump(mode="json")
+                        if hasattr(payload, "model_dump")
+                        else payload
+                    ),
                 }
                 for request_id, (
                     code_sha256,
-                    result,
+                    payload,
                 ) in record.execute_request_cache.items()
             ],
             "epoch_request_cache": [
@@ -374,7 +399,15 @@ class EnvironmentService:
                 quality_summary={
                     "schema_version": "factorio-resume-checkpoint-v1",
                     "worker_state": record.worker.export_resume_state(),
-                    "service_state": self._service_resume_state(record),
+                    "service_state": {
+                        **self._service_resume_state(record),
+                        "reference_world": (
+                            self._reference_worlds.checkpoint(lease_id)
+                            if self._reference_worlds is not None
+                            else None
+                        )
+                        or record.reference_restore,
+                    },
                 },
             )
             if safe_name.startswith(
@@ -476,14 +509,16 @@ class EnvironmentService:
             if request_id is not None:
                 cached = record.execute_request_cache.get(request_id)
                 if cached is not None:
-                    cached_hash, cached_result = cached
+                    cached_hash, cached_payload = cached
                     if cached_hash != code_sha256:
                         raise IdempotencyConflict(
                             f"Execute request_id {request_id!r} was already used "
                             "for a different program"
                         )
                     self._renew(record)
-                    return cached_result.model_copy(deep=True)
+                    return ExecutionResult.model_validate(cached_payload).model_copy(
+                        update={"lease_id": lease_id}
+                    )
             if record.snapshot is not None:
                 raise LeaseFinalized(f"Lease is already finalized: {lease_id}")
             if record.terminal_reason is not None:
@@ -491,9 +526,7 @@ class EnvironmentService:
                     "Lease reached terminal environment state: "
                     f"{record.terminal_reason}"
                 )
-            scored_interventions = sum(
-                not event.evaluation_retry for event in record.events
-            )
+            scored_interventions = record.scored_interventions
             intervention_limit = record.lease.task.max_interventions
             if (
                 intervention_limit is not None
@@ -616,10 +649,12 @@ class EnvironmentService:
                 record.lease.tool_error_retries_used += 1
             record.events.append(result.event)
             record.terminal_reason = result.terminal_reason
+            if not result.event.evaluation_retry:
+                record.scored_interventions += 1
             if request_id is not None:
                 record.execute_request_cache[request_id] = (
                     code_sha256,
-                    result.model_copy(deep=True),
+                    result.model_dump(mode="json"),
                 )
             self._renew(record)
             return result
@@ -1158,6 +1193,114 @@ class EnvironmentService:
             record.session_summary = summary
             return summary
 
+    def reference_world(
+        self, lease_id: str, action: str, arguments: dict, request_id: str
+    ) -> dict:
+        """Operate a separate creative process; only exchange documents cross back."""
+        from fle.envd.blueprint_exchange import (
+            decode_exchange,
+            encode_exchange,
+            select_blueprint,
+        )
+
+        record = self._live_record(lease_id)
+        if self._reference_worlds is None:
+            raise ValueError("This envd backend does not support reference worlds")
+        fingerprint = sha256(
+            json.dumps([action, arguments], sort_keys=True, allow_nan=False).encode()
+        ).hexdigest()
+        with profiled_lock(record.lock):
+            if record.released:
+                raise LeaseNotFound(lease_id)
+            cached = record.reference_requests.get(request_id)
+            if cached:
+                if cached[0] != fingerprint:
+                    raise IdempotencyConflict(
+                        "Reference request_id reused with different arguments"
+                    )
+                return cached[1]
+            if action == "create":
+                result = self._reference_worlds.create(
+                    lease_id, record.reference_restore
+                )
+                record.reference_restore = None
+            elif action == "destroy":
+                result = self._reference_worlds.release(lease_id)
+                record.reference_restore = None
+            else:
+                if record.reference_restore is not None:
+                    self._reference_worlds.create(lease_id, record.reference_restore)
+                    record.reference_restore = None
+                world = self._reference_worlds.get(lease_id)
+                with world.lock:
+                    if action == "status":
+                        result = world.status()
+                    elif action == "execute":
+                        result = world.execute(arguments.get("code", ""))
+                    elif action == "run":
+                        result = world.run(
+                            arguments.get("ticks"), arguments.get("speed", 10)
+                        )
+                    elif action in {"capture", "place"}:
+                        store = record.worker.blueprint_store
+                        if action == "capture":
+                            from fle.envd.blueprints import _validate_name
+
+                            name = _validate_name(arguments.get("name"))
+                            area = arguments.get("area")
+                            if not isinstance(area, list) or len(area) != 2:
+                                raise ValueError(
+                                    "capture requires area=[[left,top],[right,bottom]]"
+                                )
+                            # JSON is decoded by Factorio, never interpolated as Lua source.
+                            literal = json.dumps(json.dumps(area, allow_nan=False))
+                            result = world.execute(
+                                f"return blueprint.capture(helpers.json_to_table({literal}))",
+                                internal=True,
+                            )
+                            if not result.get("error"):
+                                captured = result["result"]
+                                decode_exchange(captured["content"])
+                                saved = store.save(
+                                    name,
+                                    captured["content"],
+                                    entity_count=captured["entity_count"],
+                                    source="reference",
+                                )
+                                result = {
+                                    **world.status(),
+                                    "saved": saved.summary(),
+                                    "tile_count": captured["tile_count"],
+                                }
+                        else:
+                            source = arguments.get("source", "")
+                            stored = store.try_get(source)
+                            content = stored.content if stored else source
+                            content = encode_exchange(
+                                select_blueprint(
+                                    decode_exchange(content), arguments.get("book_path")
+                                )
+                            )
+                            position = json.dumps(
+                                json.dumps(
+                                    arguments.get("position", [0, 0]), allow_nan=False
+                                )
+                            )
+                            options = json.dumps(
+                                json.dumps(
+                                    arguments.get("options", {}), allow_nan=False
+                                )
+                            )
+                            result = world.execute(
+                                f"return blueprint.place({json.dumps(content)}, helpers.json_to_table({position}), helpers.json_to_table({options}))",
+                                internal=True,
+                            )
+                    else:
+                        raise ValueError(f"Unknown reference action: {action}")
+            record.reference_requests[request_id] = (fingerprint, result)
+            self._renew(record)
+            return result
+
     def release(self, lease_id: str) -> bool:
         with self._lock:
             record = self._leases.get(lease_id)
@@ -1170,7 +1313,11 @@ class EnvironmentService:
                 return False
             record.released = True
             try:
-                record.worker.release()
+                try:
+                    if self._reference_worlds is not None:
+                        self._reference_worlds.release(lease_id)
+                finally:
+                    record.worker.release()
             finally:
                 with self._lock:
                     self._busy_workers.discard(record.worker.worker_id)

@@ -22,26 +22,39 @@ def _normalize_arrays(value):
 
 
 class TraceBelt(Tool):
-    def __call__(self, position: Position, max_tiles: int = 64) -> dict:
-        """Follow a belt downstream and report where flow stops.
+    def __call__(
+        self, position: Position, max_tiles: int = 64, upstream: bool = False
+    ) -> dict:
+        """Follow a belt line and report where flow starts or stops.
 
         Each entry in ``tiles`` includes the belt position, flow direction,
-        ``active`` flag, and per-lane item contents.  ``blocker`` is the first
-        downstream tile that cannot accept items: ``end_of_line`` when no belt
-        follows, ``blocked_by_entity`` (with the blocking entity) when a
-        non-belt entity occupies the next tile, or ``max_tiles_reached``.
+        ``active`` flag, and per-lane item contents.  With ``upstream=False``
+        the walk follows items downstream and ``blocker`` is the first tile
+        that cannot accept items: ``end_of_line`` when no belt follows,
+        ``blocked_by_entity`` (with the blocking entity) when a non-belt entity
+        occupies the next tile, or ``max_tiles_reached``.  With
+        ``upstream=True`` the walk answers "where does this line come from?",
+        starting at the queried belt and moving against the flow:
+        ``start_of_line`` when nothing feeds the current tile, ``fed_by_entity``
+        (with the feeding machine or inserter) when a non-belt entity sits in
+        the predecessor tile, or ``max_tiles_reached``.
 
         :param position: Position of any belt tile in the line
         :param max_tiles: Maximum number of belt tiles to follow (1-256)
-        :example trace_belt(Position(x=29, y=-80))
+        :param upstream: Walk against the flow to find the line's source
+        :example trace_belt(Position(x=29, y=-80), upstream=True)
         :return: {start, tiles, total_tiles, blocker}
         """
         if not isinstance(position, Position):
             raise ValueError("position must be a Position")  # noqa: TRY004
+        if not isinstance(upstream, bool):
+            raise ValueError("upstream must be a bool")  # noqa: TRY004
         max_tiles = int(max_tiles)
         if not 1 <= max_tiles <= 256:
             raise ValueError("max_tiles must be between 1 and 256")
-        response, _ = self.execute(self.player_index, position.x, position.y, max_tiles)
+        response, _ = self.execute(
+            self.player_index, position.x, position.y, max_tiles, upstream
+        )
         if not isinstance(response, dict) or "tiles" not in response:
             message = str(response).split(":")[-1].strip()
             raise Exception(  # noqa: TRY002 - matches the tool error convention

@@ -35,7 +35,6 @@ def game(instance):
     }
     instance.reset()
     yield instance.namespace
-    instance.reset()
 
 
 def test_offshore_pump_requires_water_tile(game):

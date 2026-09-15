@@ -119,17 +119,20 @@ class DBClient(ABC):
 
                     results = cur.fetchall()
                     if not results:
-                        logger.warning(f"No programs found for version {version}")
+                        logger.warning("No programs found for version %s", version)
                         return []
 
                     programs = [Program.from_row(dict(row)) for row in results]
                     depths = [p.depth for p in programs]
                     logger.info(
-                        f"Found {len(programs)} beam heads for version {version} - {depths}"
+                        "Found %s beam heads for version %s - %s",
+                        len(programs),
+                        version,
+                        depths,
                     )
                     return programs
         except Exception as e:
-            logger.error(f"Error fetching beam heads: {e}", exc_info=True)
+            logger.error("Error fetching beam heads: %s", e, exc_info=True)
             return []
 
     async def version_exists(self, version: int) -> bool:
@@ -234,7 +237,7 @@ class DBClient(ABC):
                     try:
                         self._pool.closeall()
                     except Exception as e:
-                        logger.error(f"Error closing connection pool: {e}")
+                        logger.error("Error closing connection pool: %s", e)
                     finally:
                         self._pool = None
 
@@ -569,6 +572,7 @@ class SQLliteDBClient(DBClient):
             max_conversation_length, min_connections, max_connections, **db_config
         )
         self.database_file = self.db_config.get("database_file")
+        self._local = threading.local()
 
     async def initialize(self):
         """Initialize the connection pool"""
@@ -579,16 +583,35 @@ class SQLliteDBClient(DBClient):
                         self.min_connections, self.max_connections, **self.db_config
                     )
 
+    def _local_connection(self):
+        conn = getattr(self._local, "connection", None)
+        if conn is None:
+            conn = sqlite3.connect(self.database_file)
+            conn.execute("PRAGMA journal_mode=WAL")
+            self._local.connection = conn
+        return conn
+
+    async def cleanup(self):
+        """Clean up database resources"""
+        conn = getattr(self._local, "connection", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception as e:
+                logger.error("Error closing SQLite connection: %s", e)
+            finally:
+                self._local.connection = None
+        await super().cleanup()
+
     @contextmanager
     def get_connection(self):
         """Context manager for SQLite database connections"""
-        conn = None
+        conn = self._local_connection()
         try:
-            conn = sqlite3.connect(self.database_file)
             yield conn
-        finally:
-            if conn:
-                conn.close()
+        except Exception:
+            conn.rollback()
+            raise
 
     @tenacity.retry(
         retry=retry_if_exception_type(get_sqlite_exceptions()),
@@ -741,12 +764,21 @@ class SQLliteDBClient(DBClient):
             return []
 
 
+_initialized_sqlite_files = set()
+_initialized_sqlite_lock = threading.Lock()
+
+
 def create_default_sqlite_db(db_file: str) -> None:
     """Create SQLite database with required schema if it doesn't exist"""
     db_path = Path(db_file)
 
     # Create directory if it doesn't exist
     db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    resolved = str(db_path.resolve())
+    with _initialized_sqlite_lock:
+        if resolved in _initialized_sqlite_files and os.path.isfile(db_file):
+            return
 
     # Create database and table if they don't exist
     conn = sqlite3.connect(db_file)
@@ -792,8 +824,14 @@ def create_default_sqlite_db(db_file: str) -> None:
             conn.commit()
             print("SQLite database schema created successfully!")
 
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.commit()
+
     finally:
         conn.close()
+
+    with _initialized_sqlite_lock:
+        _initialized_sqlite_files.add(resolved)
 
 
 def create_default_postgres_db(**db_config) -> None:

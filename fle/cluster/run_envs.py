@@ -7,6 +7,7 @@ import sys
 import socket
 import secrets
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import shutil
 import yaml
@@ -284,17 +285,20 @@ class ComposeGenerator:
 
     def services_dict(self, num_instances):
         services = {}
+        if num_instances <= 0:
+            return services
+        volume_templates = [
+            self._scenarios_volume(),
+            self._config_volume(),
+            self._screenshots_volume(),
+            self._bundled_mods_volume(),
+        ]
+        if self.save_file:
+            volume_templates.append(self._save_volume())
         for i in range(num_instances):
             host_rcon = START_RCON_PORT + i
             host_game = START_GAME_PORT + i
-            volumes = [
-                self._scenarios_volume(),
-                self._config_volume(),
-                self._screenshots_volume(),
-                self._bundled_mods_volume(),
-            ]
-            if self.save_file:
-                volumes.append(self._save_volume())
+            volumes = list(volume_templates)
             # Note: attach_mod overlays user mods on top of bundled mods (not currently used)
             services[f"factorio_{i}"] = {
                 "image": self.image,
@@ -386,12 +390,16 @@ class ClusterManager:
             return False
 
     def _find_port_conflicts(self, num_instances):
-        listening = []
-        for i in range(num_instances):
-            tcp_port = START_RCON_PORT + i
-            if self._is_tcp_listening(tcp_port):
-                listening.append(f"tcp/{tcp_port}")
-        return listening
+        ports = [START_RCON_PORT + i for i in range(num_instances)]
+        if not ports:
+            return []
+        with ThreadPoolExecutor(max_workers=min(len(ports), 32)) as executor:
+            listening = list(executor.map(self._is_tcp_listening, ports))
+        return [
+            f"tcp/{port}"
+            for port, is_listening in zip(ports, listening)
+            if is_listening
+        ]
 
     def start(
         self,

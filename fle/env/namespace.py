@@ -25,6 +25,27 @@ from fle.env.game_types import (
 )
 
 
+def _compile_expression(node, filename="file"):
+    attr = (
+        "_fle_compiled_annotation"
+        if filename == "annotation"
+        else "_fle_compiled_expression"
+    )
+    compiled = getattr(node, attr, None)
+    if compiled is None:
+        compiled = compile(ast.Expression(node), filename, "eval")
+        setattr(node, attr, compiled)
+    return compiled
+
+
+def _compile_module(node):
+    compiled = getattr(node, "_fle_compiled_module", None)
+    if compiled is None:
+        compiled = compile(ast.Module([node], type_ignores=[]), "file", "exec")
+        setattr(node, "_fle_compiled_module", compiled)
+    return compiled
+
+
 class LoopContext:
     def __init__(self):
         self.in_loop = False
@@ -68,6 +89,8 @@ class FactorioNamespace:
         self.agent_index = agent_index
         self.agent_id = str(agent_index)
         self.loop_context = LoopContext()
+        self._persistent_dirty = True
+        self._last_score = None
 
         # Add all builtins to the namespace
         for name in dir(builtins):
@@ -221,6 +244,10 @@ class FactorioNamespace:
                 f"Choose a different name."
             )
 
+    def _persist(self, name, value):
+        self.persistent_vars[name] = value
+        self._persistent_dirty = True
+
     def get_functions(self) -> List[SerializableFunction]:
         """
         Gets all defined functions mapped from their attribute name in the namespace.
@@ -240,7 +267,7 @@ class FactorioNamespace:
             for key, value in env.items():
                 # Unwrap any serialized values (like functions)
                 restored_value = unwrap_after_deserialization(self, value)
-                self.persistent_vars[key] = restored_value
+                self._persist(key, restored_value)
                 setattr(self, key, restored_value)
 
         except Exception as e:
@@ -284,6 +311,8 @@ class FactorioNamespace:
         self.persistent_vars = {
             k: v for k, v in self.persistent_vars.items() if k in builtin_names
         }
+        self._persistent_dirty = True
+        self._last_score = None
 
         # Clear agent-created attributes (non-callable, non-private, non-static)
         for attr in dir(self):
@@ -457,8 +486,7 @@ class FactorioNamespace:
                     return f"{base_type}[{type_arg}]"
 
             try:
-                compiled = compile(ast.Expression(annotation), "annotation", "eval")
-                return eval(compiled, eval_dict)
+                return eval(_compile_expression(annotation, "annotation"), eval_dict)
             except Exception:
                 return ast.unparse(annotation)
 
@@ -474,9 +502,7 @@ class FactorioNamespace:
         elif isinstance(node, ast.For):
             try:
                 self.loop_context.enter_loop(node)
-                iter_obj = eval(
-                    compile(ast.Expression(node.iter), "file", "eval"), eval_dict
-                )
+                iter_obj = eval(_compile_expression(node.iter), eval_dict)
                 for item in iter_obj:
                     self._assign_target(node.target, item, eval_dict)
                     result = self.execute_body(node.body, eval_dict, node)
@@ -511,9 +537,8 @@ class FactorioNamespace:
         elif isinstance(node, ast.While):
             self.loop_context.enter_loop(node)
             try:
-                while eval(
-                    compile(ast.Expression(node.test), "file", "eval"), eval_dict
-                ):
+                test_code = _compile_expression(node.test)
+                while eval(test_code, eval_dict):
                     result = self.execute_body(node.body, eval_dict, node)
 
                     # Handle return statement propagation
@@ -545,9 +570,7 @@ class FactorioNamespace:
 
         elif isinstance(node, ast.If):
             # Handle if statements
-            test_result = eval(
-                compile(ast.Expression(node.test), "file", "eval"), eval_dict
-            )
+            test_result = eval(_compile_expression(node.test), eval_dict)
             if test_result:
                 result = self.execute_body(node.body, eval_dict, node)
                 # Handle return statement propagation
@@ -624,10 +647,8 @@ class FactorioNamespace:
                 # Create function namespace that shares globals properly
                 function_namespace = {**self.essential_builtins, **eval_dict}
 
-                wrapped_node = ast.Module([node], type_ignores=[])
-                compiled = compile(wrapped_node, "file", "exec")
                 exec(
-                    compiled, function_namespace, eval_dict
+                    _compile_module(node), function_namespace, eval_dict
                 )  # Pass eval_dict as locals
 
                 # The new function is stored in eval_dict (locals), not function_namespace (globals)
@@ -637,21 +658,20 @@ class FactorioNamespace:
                     func.__annotations__ = getattr(node, "__annotations__")
 
                 serialized_func = SerializableFunction(func, self)
-                self.persistent_vars[node.name] = serialized_func
+                self._persist(node.name, serialized_func)
                 setattr(self, node.name, serialized_func)
                 eval_dict[node.name] = serialized_func
 
                 return True
             except Exception:
                 # If function definition fails, fall back to exec()
-                compiled = compile(ast.Module([node], type_ignores=[]), "file", "exec")
-                exec(compiled, eval_dict)
+                exec(_compile_module(node), eval_dict)
 
                 # Store the function in persistent vars if it was created
                 if node.name in eval_dict:
                     func = eval_dict[node.name]
                     if callable(func):
-                        self.persistent_vars[node.name] = wrap_for_serialization(func)
+                        self._persist(node.name, wrap_for_serialization(func))
                         setattr(self, node.name, func)
                 return True
 
@@ -665,8 +685,7 @@ class FactorioNamespace:
             original_keys = set(eval_dict.keys())
 
             # Compile and execute the assignment
-            compiled = compile(ast.Module([node], type_ignores=[]), "file", "exec")
-            exec(compiled, eval_dict)
+            exec(_compile_module(node), eval_dict)
 
             # Find all new or updated variables
             new_or_updated_keys = set()
@@ -684,7 +703,7 @@ class FactorioNamespace:
             for name in new_or_updated_keys:
                 if name in eval_dict and not name.startswith("_"):
                     value = eval_dict[name]
-                    self.persistent_vars[name] = wrap_for_serialization(value)
+                    self._persist(name, wrap_for_serialization(value))
                     setattr(self, name, value)
             return True
 
@@ -692,14 +711,13 @@ class FactorioNamespace:
             if isinstance(node.target, ast.Name):
                 self._check_protected(node.target.id)
             if node.value:
-                compiled = compile(ast.Module([node], type_ignores=[]), "file", "exec")
-                exec(compiled, eval_dict)
+                exec(_compile_module(node), eval_dict)
 
                 if isinstance(node.target, ast.Name):
                     name = node.target.id
                     if name in eval_dict:
                         value = eval_dict[name]
-                        self.persistent_vars[name] = wrap_for_serialization(value)
+                        self._persist(name, wrap_for_serialization(value))
                         setattr(self, name, value)
                         # print(f"{self.tcp_port}: Stored annotated variable {name} - {type(value)}")
 
@@ -709,15 +727,14 @@ class FactorioNamespace:
             if isinstance(node.target, ast.Name):
                 self._check_protected(node.target.id)
             # Handle augmented assignments (+=, -=, *=, /=, //=, %=, **=, &=, |=, ^=, >>=, <<=)
-            compiled = compile(ast.Module([node], type_ignores=[]), "file", "exec")
-            exec(compiled, eval_dict)
+            exec(_compile_module(node), eval_dict)
 
             # Update persistent vars for the target variable
             if isinstance(node.target, ast.Name):
                 name = node.target.id
                 if name in eval_dict:
                     value = eval_dict[name]
-                    self.persistent_vars[name] = wrap_for_serialization(value)
+                    self._persist(name, wrap_for_serialization(value))
                     setattr(self, name, value)
                     # print(f"{self.tcp_port}: Updated augmented variable {name} = {value}")
 
@@ -743,7 +760,7 @@ class FactorioNamespace:
                 for name in target_vars:
                     if name in eval_dict and not name.startswith("_"):
                         value = eval_dict[name]
-                        self.persistent_vars[name] = wrap_for_serialization(value)
+                        self._persist(name, wrap_for_serialization(value))
                         setattr(self, name, value)
 
             return True
@@ -775,18 +792,12 @@ class FactorioNamespace:
                     kwargs = {}
                     for arg in node.value.args:
                         args.append(
-                            eval(
-                                compile(ast.Expression(arg), "file", "eval"),
-                                eval_dict,
-                                eval_dict,
-                            )
+                            eval(_compile_expression(arg), eval_dict, eval_dict)
                         )
                     for keyword in node.value.keywords:
                         key = keyword.arg
                         value = eval(
-                            compile(ast.Expression(keyword.value), "file", "eval"),
-                            eval_dict,
-                            eval_dict,
+                            _compile_expression(keyword.value), eval_dict, eval_dict
                         )
                         kwargs[key] = value
 
@@ -805,14 +816,11 @@ class FactorioNamespace:
                             if not name.startswith("_") and name in eval_dict:
                                 if eval_dict[name] != value:
                                     eval_dict[name] = value
-                                    self.persistent_vars[name] = wrap_for_serialization(
-                                        value
-                                    )
+                                    self._persist(name, wrap_for_serialization(value))
                                     setattr(self, name, value)
             else:
                 # For non-function call expressions
-                compiled = compile(ast.Expression(node.value), "file", "eval")
-                response = eval(compiled, eval_dict, eval_dict)
+                response = eval(_compile_expression(node.value), eval_dict, eval_dict)
 
             # Only log if it's not a print statement (which has already been converted to log)
             if self.capture_whole_output:
@@ -836,9 +844,7 @@ class FactorioNamespace:
             # Handle return statements
             if node.value:
                 # Return with a value
-                return_value = eval(
-                    compile(ast.Expression(node.value), "file", "eval"), eval_dict
-                )
+                return_value = eval(_compile_expression(node.value), eval_dict)
                 return ("RETURN", return_value)
             else:
                 # Return without a value (return None)
@@ -848,14 +854,10 @@ class FactorioNamespace:
             # Handle raise statements
             if node.exc:
                 # Raise with an exception
-                exception = eval(
-                    compile(ast.Expression(node.exc), "file", "eval"), eval_dict
-                )
+                exception = eval(_compile_expression(node.exc), eval_dict)
                 if node.cause:
                     # Raise with 'from' clause
-                    cause = eval(
-                        compile(ast.Expression(node.cause), "file", "eval"), eval_dict
-                    )
+                    cause = eval(_compile_expression(node.cause), eval_dict)
                     raise exception from cause
                 else:
                     # Simple raise
@@ -866,15 +868,11 @@ class FactorioNamespace:
 
         elif isinstance(node, ast.Assert):
             # Handle assertion statements
-            test_result = eval(
-                compile(ast.Expression(node.test), "file", "eval"), eval_dict
-            )
+            test_result = eval(_compile_expression(node.test), eval_dict)
             if not test_result:
                 if node.msg:
                     # Assert with custom message
-                    msg = eval(
-                        compile(ast.Expression(node.msg), "file", "eval"), eval_dict
-                    )
+                    msg = eval(_compile_expression(node.msg), eval_dict)
                     raise AssertionError(msg)
                 else:
                     # Assert without message
@@ -895,14 +893,14 @@ class FactorioNamespace:
                         for part in parts[1:]:
                             final_module = getattr(final_module, part)
                         eval_dict[alias.asname] = final_module
-                        self.persistent_vars[alias.asname] = final_module
+                        self._persist(alias.asname, final_module)
                         setattr(self, alias.asname, final_module)
                     else:
                         # For dotted imports like "import os.path", we need to make "os" available
                         # so that "os.path" works
                         top_name = parts[0]
                         eval_dict[top_name] = top_module
-                        self.persistent_vars[top_name] = top_module
+                        self._persist(top_name, top_module)
                         setattr(self, top_name, top_module)
 
                 except ImportError:
@@ -920,18 +918,12 @@ class FactorioNamespace:
                 if level > 0:
                     # Relative import - requires proper package context
                     # For now, fall back to exec() as relative imports are complex
-                    compiled = compile(
-                        ast.Module([node], type_ignores=[]), "file", "exec"
-                    )
-                    exec(compiled, eval_dict)
+                    exec(_compile_module(node), eval_dict)
                 else:
                     # Absolute import
                     if node.names[0].name == "*":
                         # from module import * - fall back to exec()
-                        compiled = compile(
-                            ast.Module([node], type_ignores=[]), "file", "exec"
-                        )
-                        exec(compiled, eval_dict)
+                        exec(_compile_module(node), eval_dict)
                         # Update persistent vars with new imports
                         # Protect essential functions from being overwritten
                         protected_names = {
@@ -944,7 +936,7 @@ class FactorioNamespace:
                                 and name not in self.persistent_vars
                                 and name not in protected_names
                             ):
-                                self.persistent_vars[name] = value
+                                self._persist(name, value)
                                 setattr(self, name, value)
 
                         # Ensure our essential functions are restored after import *
@@ -966,7 +958,7 @@ class FactorioNamespace:
                             name = alias.asname if alias.asname else alias.name
                             if name not in protected_names:
                                 eval_dict[name] = obj
-                                self.persistent_vars[name] = obj
+                                self._persist(name, obj)
                                 setattr(self, name, obj)
             except ImportError:
                 # Let import errors propagate naturally
@@ -988,8 +980,7 @@ class FactorioNamespace:
                 # Similar to global, this affects assignment behavior
                 pass
             # For now, use fallback exec() to handle nonlocal semantics properly
-            compiled = compile(ast.Module([node], type_ignores=[]), "file", "exec")
-            exec(compiled, eval_dict)
+            exec(_compile_module(node), eval_dict)
             return True
 
         elif isinstance(node, ast.Try):
@@ -1006,11 +997,7 @@ class FactorioNamespace:
                 handled = False
                 for handler in node.handlers:
                     if handler.type is None or isinstance(
-                        e,
-                        eval(
-                            compile(ast.Expression(handler.type), "file", "eval"),
-                            eval_dict,
-                        ),
+                        e, eval(_compile_expression(handler.type), eval_dict)
                     ):
                         if handler.name:
                             eval_dict[handler.name] = e
@@ -1050,8 +1037,7 @@ class FactorioNamespace:
             return True
 
         else:
-            compiled = compile(ast.Module([node], type_ignores=[]), "file", "exec")
-            exec(compiled, eval_dict)
+            exec(_compile_module(node), eval_dict)
             return True
 
     def eval_with_timeout(self, expr):
@@ -1086,6 +1072,7 @@ class FactorioNamespace:
         self.logging_results = {}
         self.line_value = 0
         self.loop_context = LoopContext()
+        self._last_score = None
 
         eval_dict = {
             **{
@@ -1105,6 +1092,7 @@ class FactorioNamespace:
         for key, value in eval_dict.items():
             if isinstance(value, SerializableFunction):
                 eval_dict[key] = value.bind(self)
+        self._persistent_dirty = False
 
         last_successful_state = None
 
@@ -1126,7 +1114,17 @@ class FactorioNamespace:
                         self.log(return_value)
                     break
 
-                last_successful_state = dict(self.persistent_vars)
+                if self._persistent_dirty:
+                    self._persistent_dirty = False
+                    eval_dict.update(self.persistent_vars)
+                    # Re-bind any new SerializableFunction objects after dict update
+                    for key, value in eval_dict.items():
+                        if (
+                            isinstance(value, SerializableFunction)
+                            and value._instance is not self
+                        ):
+                            value.bind(self)
+                    last_successful_state = dict(self.persistent_vars)
             except (Exception, NameError, SystemExit) as e:
                 self._sequential_exception_count += 1
                 error_traceback = traceback.format_exc()
@@ -1160,17 +1158,13 @@ class FactorioNamespace:
 
                 if last_successful_state is not None:
                     self.persistent_vars = last_successful_state.copy()
+                self._persistent_dirty = True
 
                 # if self._sequential_exception_count >= self.max_sequential_exception_count:
                 break
 
-            eval_dict.update(self.persistent_vars)
-            # Re-bind any new SerializableFunction objects after dict update
-            for key, value in eval_dict.items():
-                if isinstance(value, SerializableFunction):
-                    eval_dict[key] = value.bind(self)
-
         score, automated_score = self.score()
+        self._last_score = (score, automated_score)
         result_output = parse_result_into_str(self.logging_results)
 
         # if had_error:

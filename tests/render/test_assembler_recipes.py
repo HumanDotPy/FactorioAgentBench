@@ -41,7 +41,6 @@ def game(instance):
     }
     instance.reset()
     yield instance.namespace
-    instance.reset()
 
 
 # Recipes as Prototype enum values that assemblers can craft

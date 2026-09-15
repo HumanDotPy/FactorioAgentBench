@@ -1,4 +1,3 @@
-from time import sleep
 from typing import Union
 
 from fle.env.entities import Entity, EntityGroup, Position, BeltGroup, PipeGroup
@@ -13,13 +12,20 @@ class InsertItem(Tool):
         super().__init__(connection, game_state)
 
     def __call__(
-        self, entity: Prototype, target: Union[Entity, EntityGroup], quantity=5
+        self,
+        entity: Prototype,
+        target: Union[Entity, EntityGroup],
+        quantity=5,
+        replace: bool = False,
     ) -> Entity:
         """
         Insert an item into a target entity's inventory
         :param entity: Type to insert from inventory
         :param target: Entity to insert into
         :param quantity: Quantity to insert
+        :param replace: For burner fuel slots holding a different item, swap
+            the old fuel back into your inventory before inserting. Without
+            it the call fails and names the blocking item.
         :return: The target entity inserted into
         """
         assert quantity is not None, "Quantity cannot be None"
@@ -55,7 +61,15 @@ class InsertItem(Tool):
                 x, y = target.belts[0].position.x, target.belts[0].position.y
 
             while items_inserted < quantity:
-                response, elapsed = self.execute(self.player_index, name, 1, x, y, None)
+                response, elapsed = self.execute(
+                    self.player_index,
+                    name,
+                    quantity - items_inserted,
+                    x,
+                    y,
+                    None,
+                    False,
+                )
 
                 if isinstance(response, str):
                     if (
@@ -66,9 +80,11 @@ class InsertItem(Tool):
                         )
                     break
 
-                items_inserted += 1
+                inserted = int(response.get("inserted", 0))
+                if inserted <= 0:
+                    break
+                items_inserted += inserted
                 last_response = response
-                sleep(0.05)
 
             if last_response:
                 group = self.get_entities(
@@ -88,7 +104,7 @@ class InsertItem(Tool):
             return target
 
         response, elapsed = self.execute(
-            self.player_index, name, quantity, x, y, target_name
+            self.player_index, name, quantity, x, y, target_name, replace
         )
 
         if isinstance(response, str):
@@ -96,6 +112,7 @@ class InsertItem(Tool):
 
         cleaned_response = self.clean_response(response)
         if isinstance(cleaned_response, dict):
+            cleaned_response.pop("inserted", None)
             if not isinstance(target, (BeltGroup, PipeGroup)):
                 _type = type(target)
                 prototype = Prototype._value2member_map_[(target.name, type(target))]

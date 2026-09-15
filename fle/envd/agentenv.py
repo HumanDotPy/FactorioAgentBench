@@ -13,7 +13,7 @@ import json
 import logging
 import uuid
 from urllib.parse import urlencode
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
@@ -260,6 +260,7 @@ class _AgentEnvLeaseRecord:
     inner_lease_id: str
     lock: asyncio.Lock
     paused: bool = False
+    refreshed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class AgentEnvEnvironmentGateway:
@@ -342,10 +343,13 @@ class AgentEnvEnvironmentGateway:
         return expired
 
     async def _touch(self, record: _AgentEnvLeaseRecord) -> None:
+        now = datetime.now(timezone.utc)
+        record.lease.expires_at = now + timedelta(seconds=self.config.lease_ttl_seconds)
+        interval = self.config.sandbox_timeout_seconds * 0.5
+        if (now - record.refreshed_at).total_seconds() < interval:
+            return
         await self.control.refresh_sandbox(record.sandbox_id)
-        record.lease.expires_at = datetime.now(timezone.utc) + timedelta(
-            seconds=self.config.lease_ttl_seconds
-        )
+        record.refreshed_at = now
 
     async def health(self) -> HealthStatus:
         await self.reap_expired()
@@ -792,6 +796,7 @@ class AgentEnvEnvironmentGateway:
             await self.control.resume_sandbox(record.sandbox_id)
             await self.control.wait_guest_health(record.sandbox_id)
             record.paused = False
+            record.refreshed_at = datetime.now(timezone.utc)
             record.lease.expires_at = datetime.now(timezone.utc) + timedelta(
                 seconds=self.config.lease_ttl_seconds
             )

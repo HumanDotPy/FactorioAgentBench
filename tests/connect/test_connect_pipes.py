@@ -35,7 +35,6 @@ def game(instance):
     }
     instance.reset()
     yield instance.namespace
-    instance.reset()
 
 
 def test_connect_offshore_pump_to_boiler(game):

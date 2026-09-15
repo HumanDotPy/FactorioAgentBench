@@ -19,3 +19,9 @@ pump = place_entity(Prototype.OffshorePump, direction=Direction.UP,
 
 Generic `exact=False` searches belong only to the explicit planner-assisted
 ablation profile. They are unavailable in the canonical benchmark.
+
+When the only blocker is your own character, exact placement steps the
+character to a nearby free tile away from the requested footprint, retries
+once, and discloses `recovered='character_moved'` plus `character_position` in
+the receipt. Position, prototype, and direction are never altered; any other
+blocker fails with `blocked_by` diagnostics.

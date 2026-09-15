@@ -1,5 +1,3 @@
-from time import sleep
-
 import pytest
 
 from fle.env.entities import (
@@ -86,7 +84,7 @@ def test_build_iron_gear_factory(game):
 
     # check if the stone furnace has produced iron plates
     while game.inspect_inventory(stone_furnace)[Prototype.IronPlate] < 50:
-        sleep(1)
+        game.sleep(1)
 
     # extract the iron plates from the stone furnace
     game.extract_item(Prototype.IronPlate, stone_furnace, quantity=50)
@@ -96,7 +94,7 @@ def test_build_iron_gear_factory(game):
 
     # check if the stone furnace has produced iron plates
     while game.inspect_inventory(stone_furnace)[Prototype.IronPlate] < 30:
-        sleep(1)
+        game.sleep(1)
 
     # extract the iron plates from the stone furnace
     game.extract_item(Prototype.IronPlate, stone_furnace, quantity=30)
@@ -106,7 +104,7 @@ def test_build_iron_gear_factory(game):
 
     # check if the stone furnace has produced copper plates
     while game.inspect_inventory(stone_furnace)[Prototype.CopperPlate] < 20:
-        sleep(5)
+        game.sleep(5)
 
     # extract the copper plates from the stone furnace
     game.extract_item(Prototype.CopperPlate, stone_furnace, quantity=20)

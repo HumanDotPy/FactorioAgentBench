@@ -148,6 +148,7 @@ MODEL_OBSERVATION_HISTORY_LIMIT = 256
 MODEL_OBSERVATION_KEYFRAME_INTERVAL = 20
 MODEL_OBSERVATION_KEYFRAME_TICKS = 5 * 60 * 60
 MODEL_HISTORY_QUERY_LIMIT = 128
+PRODUCTION_HISTORY_LIMIT = 256
 
 
 @dataclass(frozen=True)
@@ -1742,6 +1743,17 @@ class FLEWorker(FactorioWorker):
                 store = None
         namespace._blueprint_store = store
 
+    @property
+    def blueprint_store(self) -> BlueprintStore:
+        namespace = self.instance.first_namespace
+        store = getattr(namespace, "_blueprint_store", None) or getattr(
+            namespace, "_ephemeral_blueprints", None
+        )
+        if store is None:
+            store = BlueprintStore(scope=None)
+            namespace._ephemeral_blueprints = store
+        return store
+
     def _blueprint_summaries(self) -> list[BlueprintSummary]:
         namespace = self.instance.first_namespace
         store = getattr(namespace, "_ephemeral_blueprints", None)
@@ -1865,6 +1877,9 @@ class FLEWorker(FactorioWorker):
         return _jsonable(
             {
                 "schema_version": "fle-worker-resume-v1",
+                "blueprint_library": self.blueprint_store.export_state()
+                if hasattr(self.instance, "first_namespace")
+                else None,
                 "evaluation_progress": getattr(self, "_evaluation_progress", None),
                 "epoch_game_tick": self._epoch_game_tick,
                 "customer_events": self._customer_events,
@@ -1923,6 +1938,8 @@ class FLEWorker(FactorioWorker):
         )
         if state.get("schema_version") != "fle-worker-resume-v1":
             raise ValueError("unsupported FLE worker resume state")
+        if state.get("blueprint_library") is not None:
+            self.blueprint_store.restore_state(state["blueprint_library"])
         self._epoch_game_tick = int(state.get("epoch_game_tick", self._epoch_game_tick))
         self._customer_events = list(state.get("customer_events") or [])
         self.contract_session_id = state.get("contract_session_id")
@@ -2743,27 +2760,34 @@ class FLEWorker(FactorioWorker):
             history[-1]["output"] = sample["output"]
         else:
             history.append(sample)
+        if len(history) > PRODUCTION_HISTORY_LIMIT:
+            del history[: len(history) - PRODUCTION_HISTORY_LIMIT]
         # Contract-feature capture uses the older output-only history. Keep it
         # in sync so existing candidate generation retains its semantics.
         self._record_flow_sample(int(tick), dict(counters.get("output", {})))
 
     @staticmethod
     def _window_counter_rate(
-        samples: list[dict[str, Any]], field: str, window_seconds: int
+        samples: list[dict[str, Any]],
+        field: str,
+        window_seconds: int,
+        *,
+        ordered: bool = False,
     ) -> dict[str, int | float]:
         if len(samples) < 2:
             return {}
-        ordered = sorted(samples, key=lambda sample: int(sample.get("tick", 0)))
-        latest = ordered[-1]
+        if not ordered:
+            samples = sorted(samples, key=lambda sample: int(sample.get("tick", 0)))
+        latest = samples[-1]
         latest_tick = int(latest.get("tick", 0))
         cutoff = latest_tick - max(int(window_seconds), 1) * 60
         baseline = next(
             (
                 sample
-                for sample in reversed(ordered[:-1])
+                for sample in reversed(samples[:-1])
                 if int(sample.get("tick", 0)) <= cutoff
             ),
-            ordered[0],
+            samples[0],
         )
         baseline_tick = int(baseline.get("tick", 0))
         span_ticks = latest_tick - baseline_tick
@@ -2783,6 +2807,22 @@ class FLEWorker(FactorioWorker):
             values[item] = int(rate) if rate.is_integer() else round(rate, 6)
         return values
 
+    @staticmethod
+    def _recent_rate_number(response: Any) -> float | None:
+        if not isinstance(response, dict) or response.get("error"):
+            return None
+        dynamic = response.get("dynamic_per_minute")
+        if dynamic is None:
+            return None
+        try:
+            return max(float(dynamic), 0.0)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _round_recent_rate(number: float) -> int | float:
+        return int(number) if number.is_integer() else round(number, 6)
+
     def _compact_production_snapshot(
         self,
         stats: dict[str, Any],
@@ -2793,16 +2833,19 @@ class FLEWorker(FactorioWorker):
         counters = self._production_counters(stats)
         if record_sample:
             self._record_production_sample(tick, counters)
-        history = list(getattr(self, "_production_history", []))
+        history = sorted(
+            getattr(self, "_production_history", []),
+            key=lambda sample: int(sample.get("tick", 0)),
+        )
         baseline = getattr(
             self,
             "_contract_production_baseline",
             {"input": {}, "output": {}},
         )
         raw_rates = {
-            "5s": self._window_counter_rate(history, "output", 5),
-            "60s": self._window_counter_rate(history, "output", 60),
-            "300s": self._window_counter_rate(history, "output", 300),
+            "5s": self._window_counter_rate(history, "output", 5, ordered=True),
+            "60s": self._window_counter_rate(history, "output", 60, ordered=True),
+            "300s": self._window_counter_rate(history, "output", 300, ordered=True),
         }
         automated_rates: dict[str, dict[str, int | float]] = {
             "5s": {},
@@ -2814,23 +2857,36 @@ class FLEWorker(FactorioWorker):
         if recent_rate is not None:
             # Keep this bounded: the model needs rates for the active output
             # frontier, not a second serialization of every production item.
-            for item in sorted(counters["output"])[:32]:
-                for window in (5, 60, 300):
-                    try:
-                        response = _jsonable(recent_rate(item, window))
-                    except Exception:
-                        response = None
-                    if not isinstance(response, dict) or response.get("error"):
+            items = sorted(counters["output"])[:32]
+            windows = (5, 60, 300)
+            batched: dict[str, Any] | None = None
+            if items:
+                try:
+                    batch_response = _jsonable(recent_rate(items, list(windows)))
+                except Exception:
+                    batch_response = None
+                if isinstance(batch_response, dict):
+                    candidate = batch_response.get("rates")
+                    if isinstance(candidate, dict):
+                        batched = candidate
+            for item in items:
+                per_item = batched.get(item) if batched is not None else None
+                for window in windows:
+                    response = None
+                    if isinstance(per_item, dict):
+                        response = per_item.get(str(window))
+                        if response is None:
+                            response = per_item.get(window)
+                    if response is None:
+                        try:
+                            response = _jsonable(recent_rate(item, window))
+                        except Exception:
+                            response = None
+                    number = self._recent_rate_number(response)
+                    if number is None:
                         continue
-                    dynamic = response.get("dynamic_per_minute")
-                    if dynamic is None:
-                        continue
-                    try:
-                        number = max(float(dynamic), 0.0)
-                    except (TypeError, ValueError):
-                        continue
-                    automated_rates[f"{window}s"][item] = (
-                        int(number) if number.is_integer() else round(number, 6)
+                    automated_rates[f"{window}s"][item] = self._round_recent_rate(
+                        number
                     )
                     automated_available = True
         compact = {

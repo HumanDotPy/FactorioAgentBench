@@ -296,6 +296,7 @@ def fle_inspect_eval(args):
             print("Checking Factorio server availability...")
             import socket
             import time as _time
+            from concurrent.futures import ThreadPoolExecutor
 
             def check_port(host, port, timeout=2):
                 try:
@@ -308,11 +309,12 @@ def fle_inspect_eval(args):
                     return False
 
             def _count_reachable(n):
-                found = []
-                for i in range(n):
-                    if check_port("localhost", 27000 + i, timeout=1):
-                        found.append(f"factorio_{i}")
-                return found
+                def probe(i):
+                    return i, check_port("localhost", 27000 + i, timeout=1)
+
+                with ThreadPoolExecutor(max_workers=n) as executor:
+                    results = list(executor.map(probe, range(n)))
+                return [f"factorio_{i}" for i, reachable in results if reachable]
 
             # Determine how many servers we need
             needed = min(

@@ -7,8 +7,6 @@ import base64
 import io
 import os
 import json
-from typing import List, Tuple
-from concurrent import futures
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -40,7 +38,7 @@ if _FASTMCP_AVAILABLE:
         prototypes,
     )
     from fle.env.protocols._mcp.tools import reconnect
-    from fle.env.protocols._mcp.init import state, initialize_session
+    from fle.env.protocols._mcp.init import state
     from mcp.types import ImageContent
 
 from dotenv import load_dotenv
@@ -48,69 +46,50 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+@pytest.fixture(scope="module")
+def mcp_instance() -> FactorioInstance:
+    """Create one cached Factorio instance from the first local server"""
+    ips, _udp_ports, tcp_ports = get_local_container_ips()
+    instance = FactorioInstance(
+        address=ips[0],
+        tcp_port=tcp_ports[0],
+        bounding_box=200,
+        fast=True,
+        cache_scripts=True,
+        inventory={},
+    )
+    instance.set_speed(100)
+    yield instance
+    try:
+        instance.cleanup()
+    except Exception:
+        pass
+
+
+@pytest.fixture(scope="module")
+def mcp_state(mcp_instance):
+    state.active_server = mcp_instance
+    state.available_servers = {
+        mcp_instance.tcp_port: MagicMock(
+            name="TestServer",
+            address="127.0.0.1",
+            tcp_port=mcp_instance.tcp_port,
+        )
+    }
+    yield state
+    state.active_server = None
+    state.available_servers = {}
+
+
 class TestMCPResources:
     """Integration tests for MCP resources"""
 
-    @classmethod
-    def setup_class(cls):
-        """Setup test fixtures once for all tests"""
-        cls.instances = cls.create_factorio_instances()
-        cls.test_instance = cls.instances[0] if cls.instances else None
-
-    @classmethod
-    def teardown_class(cls):
-        """Cleanup after all tests"""
-        if cls.instances:
-            for instance in cls.instances:
-                try:
-                    instance.close()
-                except:
-                    pass
-
-    @staticmethod
-    def create_factorio_instances() -> List[FactorioInstance]:
-        """Create Factorio instances in parallel from local servers"""
-
-        def init_instance(params: Tuple[str, int, int]) -> FactorioInstance:
-            ip, udp_port, tcp_port = params
-            try:
-                instance = FactorioInstance(
-                    address=ip,
-                    tcp_port=tcp_port,
-                    bounding_box=200,
-                    fast=True,
-                    cache_scripts=False,
-                    inventory={},
-                )
-            except Exception as e:
-                raise e
-            instance.set_speed(100)
-            return instance
-
-        # Mock or get actual server details
-        ips, udp_ports, tcp_ports = get_local_container_ips()
-        with futures.ThreadPoolExecutor() as executor:
-            return list(executor.map(init_instance, zip(ips, udp_ports, tcp_ports)))
-
     @pytest_asyncio.fixture(autouse=True)
-    async def setup_state(self):
+    async def setup_state(self, mcp_instance, mcp_state):
         """Setup state before each test"""
-        # Initialize state with test instance
-        if self.test_instance:
-            state.active_server = self.test_instance
-            state.available_servers = {
-                self.test_instance.tcp_port: MagicMock(
-                    name="TestServer",
-                    address="127.0.0.1",
-                    tcp_port=self.test_instance.tcp_port,
-                )
-            }
-            # Initialize VCS if needed
-            await initialize_session(None)
+        state.active_server = mcp_instance
         yield
-        # Cleanup after each test
         state.active_server = None
-        state.available_servers = {}
 
     @pytest.mark.asyncio
     async def test_render_with_position_default(self):

@@ -93,8 +93,14 @@ local on_player_respawned = function(event)
 end
 
 local on_tick = function(event)
-  story_update(storage.story, event)
-  game.print("tick!")
+  local story = storage.story
+  if story and story_branches then
+    local branches = story_branches[story.story_index]
+    if not branches or story.story_position > #branches then
+      return
+    end
+  end
+  story_update(story, event)
 end
 
 local on_cutscene_waypoint_reached = function(event)

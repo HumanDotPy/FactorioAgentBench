@@ -32,7 +32,7 @@ storage.actions.move_to = function(player_index, path_handle, trailing_entity, i
             end
         end
         return {active = queue ~= nil and queue.current_target ~= nil,
-            x = player.position.x, y = player.position.y,
+            x = player.position.x, y = player.position.y, tick = game.tick,
             stop_reason = queue and queue.stop_reason or "arrived", event=interrupt}
     elseif path_handle == "__cancel__" then
         player.walking_state = {walking = false}
@@ -283,9 +283,18 @@ storage.actions.update_walking_queues = function()
             queue.last_progress_tick = game.tick
         elseif game.tick - (queue.last_progress_tick or game.tick) >= 180 then
             player.walking_state = {walking = false}
+            local stepped = nil
+            if storage.utils.escape_character_to_free_tile then
+                stepped = storage.utils.escape_character_to_free_tile(
+                    player, nil, nil, queue.final_target)
+            end
             queue.positions = {}
             queue.current_target = nil
-            queue.stop_reason = "blocked_no_progress"
+            if stepped then
+                queue.stop_reason = "escaped"
+            else
+                queue.stop_reason = "blocked_no_progress"
+            end
             goto continue
         end
 

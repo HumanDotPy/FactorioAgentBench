@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+import time
 from typing import Dict, Optional
 
 from rich.console import Console
@@ -47,6 +48,9 @@ class FactorioLogger:
         self.instances: Dict[int, InstanceMetrics] = {}
         self.live: Optional[Live] = None
         self.start_time = datetime.now()
+        self._last_layout_update = 0.0
+        self._layout_dirty = False
+        self._layout_interval = 0.25
 
         self.progress = Progress(
             TextColumn("[progress.description]{task.description}"),
@@ -68,17 +72,26 @@ class FactorioLogger:
             transient=False,  # Prevents clearing/redrawing
         )
         self.live.start()
+        self._last_layout_update = time.monotonic()
 
     def stop(self):
         """Stop the live display"""
         if self.live:
+            if self._layout_dirty:
+                self.live.update(self._generate_layout())
+                self._layout_dirty = False
             self.live.stop()
+
+    def _refresh_layout(self):
+        self._last_layout_update = time.monotonic()
+        self._layout_dirty = False
+        self.live.update(self._generate_layout())
 
     def update_progress(self, advance: int = 1):
         if self.progress_task is not None:
             self.progress.update(self.progress_task, advance=advance)
             if self.live:
-                self.live.update(self._generate_layout())
+                self._refresh_layout()
 
     def update_instance(self, instance_id: int, **updates):
         """Update metrics for a specific instance"""
@@ -89,7 +102,10 @@ class FactorioLogger:
                     setattr(instance, key, value)
             instance.last_update = datetime.now()
             if self.live:
-                self.live.update(self._generate_layout())
+                if time.monotonic() - self._last_layout_update >= self._layout_interval:
+                    self._refresh_layout()
+                else:
+                    self._layout_dirty = True
 
     def _generate_instance_panel(self, instance: InstanceMetrics) -> Panel:
         """Generate a panel for a single instance"""

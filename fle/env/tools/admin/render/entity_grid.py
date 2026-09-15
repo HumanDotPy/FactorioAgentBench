@@ -25,6 +25,7 @@ class EntityGridView:
         self.center_x = center_x
         self.center_y = center_y
         self.available_trees = available_trees or {}
+        self._dump_cache: Dict[int, tuple] = {}
 
     def get_relative(self, relative_x: float, relative_y: float) -> Optional[Dict]:
         """Get entity at relative position from center.
@@ -44,7 +45,12 @@ class EntityGridView:
         val = self.grid[x].get(y)
         if val is None:
             return None
-        return val.model_dump()
+        cached = self._dump_cache.get(id(val))
+        if cached is not None and cached[0] is val:
+            return cached[1]
+        dumped = val.model_dump()
+        self._dump_cache[id(val)] = (val, dumped)
+        return dumped
 
     def set_center(self, center_x: float, center_y: float) -> None:
         """Update center position.

@@ -1,6 +1,16 @@
-from copy import deepcopy
+from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, List, Any, Optional
+
+
+def _crafted_key(item: Any) -> Any:
+    if isinstance(item, dict):
+        return tuple(sorted((key, _crafted_key(value)) for key, value in item.items()))
+    if isinstance(item, (list, tuple)):
+        return tuple(_crafted_key(value) for value in item)
+    if isinstance(item, set):
+        return frozenset(_crafted_key(value) for value in item)
+    return item
 
 
 @dataclass
@@ -69,11 +79,20 @@ class ProductionFlows:
                 if diff > 0:
                     new_dict[item] = diff
 
-        pre_crafted = deepcopy(cls.crafted)
-        for item in post.crafted:
-            if item in pre_crafted:
-                pre_crafted.remove(item)
-            else:
-                new_flows.crafted.append(item)
+        try:
+            pre_crafted = Counter(_crafted_key(item) for item in cls.crafted)
+            for item in post.crafted:
+                key = _crafted_key(item)
+                if pre_crafted.get(key, 0) > 0:
+                    pre_crafted[key] -= 1
+                else:
+                    new_flows.crafted.append(item)
+        except TypeError:
+            pre_crafted = list(cls.crafted)
+            for item in post.crafted:
+                if item in pre_crafted:
+                    pre_crafted.remove(item)
+                else:
+                    new_flows.crafted.append(item)
 
         return new_flows

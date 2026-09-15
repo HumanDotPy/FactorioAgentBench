@@ -77,6 +77,8 @@ class SessionMemory:
         self._entries: dict[str, MemoryEntry] = {}
         self._revisions: dict[str, int] = {}
         self._mutations: list[MemoryMutation] = []
+        self._total_bytes = 0
+        self._tokens: dict[str, tuple[int, set[str]]] = {}
         self._lock = threading.RLock()
 
     @staticmethod
@@ -111,7 +113,7 @@ class SessionMemory:
                 entries=entries,
                 next_cursor=next_cursor,
                 total=len(keys),
-                retained_bytes=sum(entry.byte_size for entry in self._entries.values()),
+                retained_bytes=self._total_bytes,
             )
 
     def read(self, key: str) -> MemoryEntry:
@@ -153,7 +155,7 @@ class SessionMemory:
                 raise MemoryLimitExceeded(
                     f"memory entry limit ({self.max_entries}) reached"
                 )
-            retained = sum(entry.byte_size for entry in self._entries.values())
+            retained = self._total_bytes
             if current is not None:
                 retained -= current.byte_size
             if retained + content_bytes > self.max_total_bytes:
@@ -172,6 +174,8 @@ class SessionMemory:
             )
             self._entries[normalized] = entry
             self._revisions[normalized] = revision
+            self._total_bytes = retained + content_bytes
+            self._tokens.pop(normalized, None)
             mutation = self._mutation(
                 operation="write",
                 key=normalized,
@@ -210,6 +214,8 @@ class SessionMemory:
             revision = current_revision + 1
             self._entries.pop(normalized, None)
             self._revisions[normalized] = revision
+            self._total_bytes -= current.byte_size
+            self._tokens.pop(normalized, None)
             mutation = self._mutation(
                 operation="delete",
                 key=normalized,
@@ -236,7 +242,11 @@ class SessionMemory:
         with self._lock:
             hits: list[MemorySearchHit] = []
             for entry in self._entries.values():
-                searchable = _tokens(f"{entry.key} {entry.content}")
+                cached = self._tokens.get(entry.key)
+                if cached is None or cached[0] != entry.revision:
+                    cached = (entry.revision, _tokens(f"{entry.key} {entry.content}"))
+                    self._tokens[entry.key] = cached
+                searchable = cached[1]
                 if not wanted.issubset(searchable):
                     continue
                 lower = entry.content.lower()
@@ -316,6 +326,7 @@ class SessionMemory:
             str(key): MemoryEntry.model_validate(value)
             for key, value in dict(state.get("entries") or {}).items()
         }
+        memory._total_bytes = sum(entry.byte_size for entry in memory._entries.values())
         memory._revisions = {
             str(key): int(value)
             for key, value in dict(state.get("revisions") or {}).items()

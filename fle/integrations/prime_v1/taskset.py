@@ -70,6 +70,15 @@ class FactorioTools(vf.Toolset[FactorioToolConfig, FactorioState]):
 
     TOOL_PREFIX = "factorio"
 
+    def __init__(self, config: FactorioToolConfig) -> None:
+        super().__init__(config)
+        self._http_client = HTTPEnvironmentClient(
+            config.envd_url, config.request_timeout_seconds
+        )
+
+    async def setup(self) -> None:
+        await self._exit_stack.enter_async_context(self._http_client)
+
     def _require_lease(self) -> str:
         if not self.state.lease_id:
             raise RuntimeError("Factorio rollout has no active environment lease")
@@ -79,10 +88,7 @@ class FactorioTools(vf.Toolset[FactorioToolConfig, FactorioState]):
     async def execute_program(self, code: str) -> dict[str, Any]:
         """Execute one short Python intervention through FLE's auditable program API."""
         lease_id = self._require_lease()
-        async with HTTPEnvironmentClient(
-            self.config.envd_url, self.config.request_timeout_seconds
-        ) as client:
-            result = await client.execute(lease_id, code)
+        result = await self._http_client.execute(lease_id, code)
         self.state.interventions = result.event.sequence
         self.state.last_state_hash = result.state_hash
         self.state.terminal_reason = result.terminal_reason
@@ -92,10 +98,7 @@ class FactorioTools(vf.Toolset[FactorioToolConfig, FactorioState]):
     async def observe_factory(self) -> dict[str, Any]:
         """Inspect current inventory, production statistics, ticks, and state hash."""
         lease_id = self._require_lease()
-        async with HTTPEnvironmentClient(
-            self.config.envd_url, self.config.request_timeout_seconds
-        ) as client:
-            observation = await client.observe(lease_id)
+        observation = await self._http_client.observe(lease_id)
         self.state.last_state_hash = observation.state_hash
         return observation.model_dump(mode="json")
 

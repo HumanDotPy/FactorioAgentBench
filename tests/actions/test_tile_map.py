@@ -71,6 +71,27 @@ def test_tile_map_marks_machines_resources_and_terrain():
     """)
 
 
+def test_tile_map_marks_neutral_obstacles_and_character():
+    lua = runtime()
+    lua.execute("""
+        add_entity(0,0,{name='tree-04', type='tree',
+            position={x=0,y=0}, direction=0, unit_number=7, status=1})
+        add_entity(1,0,{name='big-rock', type='simple-entity',
+            position={x=1,y=0}, direction=0, unit_number=8, status=1})
+        add_entity(-1,0,{name='tree-07-stump', type='corpse',
+            position={x=-1,y=0}, direction=0, unit_number=9, status=1})
+        add_entity(0,1,{name='character', type='character',
+            position={x=0,y=1}, direction=0, unit_number=10, status=1})
+        result=storage.actions.get_tile_map(1,0,0,1)
+        assert(result.rows[1]=='...')
+        assert(result.rows[2]=='stR')
+        assert(result.rows[3]=='.@.')
+        assert(#result.entities==4)
+        assert(result.legend:find('tree') ~= nil)
+        assert(result.legend:find('rock') ~= nil)
+    """)
+
+
 def test_tile_map_bounds_are_clamped():
     lua = runtime()
     lua.execute("""
@@ -84,6 +105,9 @@ def test_tile_map_bounds_are_clamped():
 def test_client_validates_center_and_radius():
     tool = GetTileMap.__new__(GetTileMap)
     tool.player_index = 1
+    tool.game_state = Mock()
+    tool.game_state._program_runtime = None
+    tool.name = "get_tile_map"
     tool.execute = Mock(return_value=({"rows": []}, 0))
     with pytest.raises(ValueError, match="center must be a Position"):
         tool((0, 0))

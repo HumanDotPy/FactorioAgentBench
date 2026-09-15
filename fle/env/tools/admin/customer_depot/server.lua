@@ -9,6 +9,7 @@ storage.customer = storage.customer or {
     manual_delivered_total = {}, -- item -> direct agent insertions (not credited)
     manual_pending = {},   -- unit_number -> item -> direct insertions awaiting drain
     delta_log = {},        -- array of {start_tick = t, items = {item = delta}}
+    delta_index = {},      -- start_tick -> bucket (index into delta_log)
     tamper_events = {},    -- array of {tick, unit_number, reason}
     tamper_reported = {},  -- unit_number -> true (dedupe)
     handlers_installed = false,
@@ -38,6 +39,7 @@ end
 
 local BUCKET_TICKS = 60
 local DRAIN_EVERY_TICKS = 6
+local MAX_DELTA_BUCKETS = 1440
 
 -- The canonical episode clock: game.tick minus the episode epoch. Schedules,
 -- buckets, and telemetry all use this so contract timing cannot drift against
@@ -49,13 +51,27 @@ end
 
 local function ensure_bucket(tick)
     local start_tick = math.floor(tick / BUCKET_TICKS) * BUCKET_TICKS
-    for _, bucket in ipairs(storage.customer.delta_log) do
-        if bucket.start_tick == start_tick then
-            return bucket
+    local index = storage.customer.delta_index
+    if not index then
+        index = {}
+        for _, bucket in ipairs(storage.customer.delta_log) do
+            index[bucket.start_tick] = bucket
+        end
+        storage.customer.delta_index = index
+    end
+    local bucket = index[start_tick]
+    if bucket then
+        return bucket
+    end
+    bucket = {start_tick = start_tick, items = {}}
+    table.insert(storage.customer.delta_log, bucket)
+    index[start_tick] = bucket
+    while #storage.customer.delta_log > MAX_DELTA_BUCKETS do
+        local oldest = table.remove(storage.customer.delta_log, 1)
+        if oldest and index[oldest.start_tick] == oldest then
+            index[oldest.start_tick] = nil
         end
     end
-    local bucket = {start_tick = start_tick, items = {}}
-    table.insert(storage.customer.delta_log, bucket)
     return bucket
 end
 
@@ -121,6 +137,7 @@ local function clear_depots()
     storage.customer.manual_delivered_total = {}
     storage.customer.manual_pending = {}
     storage.customer.delta_log = {}
+    storage.customer.delta_index = {}
     storage.customer.tamper_events = {}
     storage.customer.tamper_reported = {}
     storage.customer.active_products = {}
@@ -154,6 +171,9 @@ local function sink_contents(inventory)
 end
 
 local function drain_depots(tick)
+    if next(storage.customer.depots) == nil then
+        return
+    end
     local active_bucket = nil
     local replacements = {}
     local stale_units = {}
@@ -204,6 +224,9 @@ local function drain_depots(tick)
                         end
                     end
                     local consumed = manual_count + accepted_count
+                    if consumed > 0 then
+                        contents[name] = count - consumed
+                    end
                     if consumed > 0 or automated_count > 0 then
                         has_items = true
                         active_bucket = active_bucket or ensure_bucket(tick)
@@ -234,7 +257,13 @@ local function drain_depots(tick)
                     -- post-drain contents as the baseline so only new inserter
                     -- arrivals are counted on the next pass. This keeps service
                     -- telemetry live after the finite order allowance is full.
-                    storage.customer.retained_contents[unit_number] = sink_contents(inventory)
+                    local retained = {}
+                    for name, count in pairs(contents) do
+                        if count > 0 then
+                            retained[name] = count
+                        end
+                    end
+                    storage.customer.retained_contents[unit_number] = retained
                 end
                 if has_items then
                     if storage.customer.mode ~= "designated" then
@@ -449,6 +478,7 @@ storage.actions.customer_depot = function(player_index, command, x, y, chest_cou
     elseif command == "telemetry" then
         local buckets = storage.customer.delta_log
         storage.customer.delta_log = {}
+        storage.customer.delta_index = {}
         -- Do not return the same Lua table under two keys. Serpent represents
         -- aliases with a placeholder that the legacy controller parser cannot
         -- decode reliably.
@@ -510,6 +540,7 @@ storage.actions.customer_depot = function(player_index, command, x, y, chest_cou
         storage.customer.manual_delivered_total = {}
         storage.customer.manual_pending = {}
         storage.customer.delta_log = {}
+        storage.customer.delta_index = {}
         storage.customer.tamper_events = {}
         storage.customer.tamper_reported = {}
         storage.customer.mode = "designated"

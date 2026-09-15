@@ -12,12 +12,15 @@ storage.actions.get_circuit_network = function(player_index, x, y, wire, connect
             local network = entity.get_circuit_network(id)
             if network then
                 local signals = network.signals or {}
-                table.sort(signals, function(a,b)
-                    local function key(s) return (s.type or "item") .. ":" .. s.name .. ":" .. (s.quality or "normal") end
-                    return key(a.signal) < key(b.signal)
-                end)
+                local decorated = {}
+                for i, signal in ipairs(signals) do
+                    local s = signal.signal
+                    decorated[i] = {signal = signal,
+                        key = (s.type or "item") .. ":" .. s.name .. ":" .. (s.quality or "normal")}
+                end
+                table.sort(decorated, function(a,b) return a.key < b.key end)
                 local selected = {}
-                for i=offset+1,math.min(#signals,offset+limit) do selected[#selected+1]=signals[i] end
+                for i=offset+1,math.min(#signals,offset+limit) do selected[#selected+1]=decorated[i].signal end
                 entries[#entries+1] = {connector_id=id, network_id=network.network_id,
                     connected_circuit_count=network.connected_circuit_count,
                     signals=selected, total=#signals, offset=offset, truncated=offset+#selected<#signals}

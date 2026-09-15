@@ -36,35 +36,22 @@ function analyze_cliff_orientation(entity, surface)
                 right_bottom = {x = check_pos.x + 0.1, y = check_pos.y + 0.1}
             }
 
-            -- Use pcall to safely find entities
-            local find_success, found_cliffs = pcall(function()
-                return surface.find_entities_filtered{
-                    area = area,
-                    type = "cliff"
-                }
-            end)
+            local found_cliffs = surface.find_entities_filtered{
+                area = area,
+                type = "cliff"
+            }
 
-            if find_success and found_cliffs then
-                -- Check if any of the found cliffs are NOT the current entity
-                local has_neighbor = false
-                for _, cliff in ipairs(found_cliffs) do
-                    -- Use pcall to safely check validity and unit_number
-                    local check_success, is_different = pcall(function()
-                        return cliff.valid and cliff.unit_number ~= current_unit_number
-                    end)
-
-                    if check_success and is_different then
-                        has_neighbor = true
-                        break
-                    end
+            -- Check if any of the found cliffs are NOT the current entity
+            local has_neighbor = false
+            for _, cliff in ipairs(found_cliffs) do
+                if cliff.valid and cliff.unit_number ~= current_unit_number then
+                    has_neighbor = true
+                    break
                 end
-
-                neighbors[dir.name] = has_neighbor
-                checked_positions[pos_key] = has_neighbor
-            else
-                neighbors[dir.name] = false
-                checked_positions[pos_key] = false
             end
+
+            neighbors[dir.name] = has_neighbor
+            checked_positions[pos_key] = has_neighbor
         else
             -- Use the cached result
             neighbors[dir.name] = checked_positions[pos_key]
@@ -294,45 +281,6 @@ storage.actions.render = function(player_index, include_status, radius, compress
         end
     end
 
-    -- Also explicitly add all characters in the area (in case we missed any)
-    local characters = surface.find_entities_filtered({
-        area = area,
-        type = "character"
-    })
-
-    -- Create a lookup to avoid duplicates
-    local entity_positions = {}
-    for _, data in ipairs(entity_data) do
-        local key = data.position.x .. "," .. data.position.y
-        entity_positions[key] = true
-    end
-
-    -- Add any characters we might have missed
-    for _, character in pairs(characters) do
-        if character.valid then
-            local key = character.position.x .. "," .. character.position.y
-            if not entity_positions[key] then
-                -- Add character with full data (same as above)
-                local data = {
-                    name = "\"character\"",
-                    position = {
-                        x = character.position.x,
-                        y = character.position.y
-                    },
-                    direction = character.direction or 0,
-                    orientation = character.orientation or 0,
-                    player_index = character.player and character.player.index or nil,
-                    state = "\""..character.state.."\"", --"\"idle\"",
-                    animation_frame = 0,
-                    level = 1,
-                    has_gun = false,
-                    color = {255, 165, 0}
-                }
-                table.insert(entity_data, data)
-            end
-        end
-    end
-
     -- WATER TILES - Optimized using run-length encoding
     local water_runs = {}
     local min_x = math.floor(area.left_top.x - MARGIN)
@@ -387,6 +335,17 @@ storage.actions.render = function(player_index, include_status, radius, compress
             local patches = {}
             local processed = {}
 
+            -- Bucket entity indices by floored tile so nearby candidates are
+            -- found without scanning every remaining resource.
+            local buckets = {}
+            for i, entity in ipairs(resource_entities) do
+                local bucket_x = math.floor(entity.position.x)
+                local bucket_y = math.floor(entity.position.y)
+                buckets[bucket_x] = buckets[bucket_x] or {}
+                buckets[bucket_x][bucket_y] = buckets[bucket_x][bucket_y] or {}
+                table.insert(buckets[bucket_x][bucket_y], i)
+            end
+
             -- Simple clustering - group resources within 3 tiles of each other
             for i, entity in ipairs(resource_entities) do
                 if not processed[i] then
@@ -399,8 +358,27 @@ storage.actions.render = function(player_index, include_status, radius, compress
                     }
                     processed[i] = true
 
-                    -- Find nearby resources
-                    for j = i + 1, #resource_entities do
+                    -- Find nearby resources in ascending index order so patch
+                    -- contents match the original scan order.
+                    local candidates = {}
+                    for bucket_x = patch.c[1] - 3, patch.c[1] + 3 do
+                        local column = buckets[bucket_x]
+                        if column then
+                            for bucket_y = patch.c[2] - 3, patch.c[2] + 3 do
+                                local indices = column[bucket_y]
+                                if indices then
+                                    for _, j in ipairs(indices) do
+                                        if j > i and not processed[j] then
+                                            candidates[#candidates + 1] = j
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    table.sort(candidates)
+
+                    for _, j in ipairs(candidates) do
                         if not processed[j] then
                             local other = resource_entities[j]
                             local dx = other.position.x - patch.c[1]
@@ -575,14 +553,26 @@ end
 function base64_encode(data)
     -- Use - and _ instead of + and / to avoid RCON command interpretation
     local b='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
-    return ((data:gsub('.', function(x)
-        local r,b='',x:byte()
-        for i=8,1,-1 do r=r..(b%2^i-b%2^(i-1)>0 and '1' or '0') end
-        return r;
-    end)..'0000'):gsub('%d%d%d?%d?%d?%d?', function(x)
-        if (#x < 6) then return '' end
-        local c=0
-        for i=1,6 do c=c+(x:sub(i,i)=='1' and 2^(6-i) or 0) end
-        return b:sub(c+1,c+1)
-    end)..({ '', '==', '=' })[#data%3+1])
+    local out = {}
+    local length = #data
+    for i = 1, length, 3 do
+        local first = string.byte(data, i)
+        local second = string.byte(data, i + 1)
+        local third = string.byte(data, i + 2)
+        out[#out + 1] = b:sub(bit32.rshift(first, 2) + 1, bit32.rshift(first, 2) + 1)
+        out[#out + 1] = b:sub(bit32.band(bit32.lshift(first, 4), 0x30) + (second and bit32.rshift(second, 4) or 0) + 1,
+            bit32.band(bit32.lshift(first, 4), 0x30) + (second and bit32.rshift(second, 4) or 0) + 1)
+        if second then
+            out[#out + 1] = b:sub(bit32.band(bit32.lshift(second, 2), 0x3C) + (third and bit32.rshift(third, 6) or 0) + 1,
+                bit32.band(bit32.lshift(second, 2), 0x3C) + (third and bit32.rshift(third, 6) or 0) + 1)
+        else
+            out[#out + 1] = "="
+        end
+        if third then
+            out[#out + 1] = b:sub(bit32.band(third, 0x3F) + 1, bit32.band(third, 0x3F) + 1)
+        else
+            out[#out + 1] = "="
+        end
+    end
+    return table.concat(out)
 end

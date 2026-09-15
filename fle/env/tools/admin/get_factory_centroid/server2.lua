@@ -63,6 +63,10 @@ storage.actions.get_factory_centroid = function(player)
     local total_x = 0
     local total_y = 0
     local entity_count = 0
+    local min_x = math.huge
+    local max_x = -math.huge
+    local min_y = math.huge
+    local max_y = -math.huge
 
     -- Entity types to exclude from centroid calculation
     local excluded_types = {
@@ -77,7 +81,7 @@ storage.actions.get_factory_centroid = function(player)
         ["simple-entity"] = true -- rocks and other decorative elements
     }
 
-    -- Iterate through all surfaces
+    -- Iterate through all surfaces once for both centroid and bounds
     for _, surface in pairs(surfaces) do
         -- Get all entities on the surface belonging to the specified force
         local entities = surface.find_entities_filtered{
@@ -90,6 +94,11 @@ storage.actions.get_factory_centroid = function(player)
                 total_x = total_x + entity.position.x
                 total_y = total_y + entity.position.y
                 entity_count = entity_count + 1
+                local box = entity.bounding_box
+                min_x = math.min(min_x, box.left_top.x)
+                max_x = math.max(max_x, box.right_bottom.x)
+                min_y = math.min(min_y, box.left_top.y)
+                max_y = math.max(max_y, box.right_bottom.y)
             end
         end
     end
@@ -105,12 +114,22 @@ storage.actions.get_factory_centroid = function(player)
         y = total_y / entity_count
     }
 
+    local bounds = nil
+    if min_x ~= math.huge then
+        bounds = {
+            left_top = {x = min_x, y = min_y},
+            right_bottom = {x = max_x, y = max_y},
+            width = max_x - min_x,
+            height = max_y - min_y
+        }
+    end
+
     -- Calculate additional statistics
     local stats = {
         centroid = centroid,
         entity_count = entity_count,
         -- Find the bounds of the factory
-        bounds = calculate_factory_bounds(force)
+        bounds = bounds
     }
 
     return stats

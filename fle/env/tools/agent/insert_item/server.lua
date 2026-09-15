@@ -4,6 +4,22 @@ local function is_module(item_name)
     return item_proto and item_proto.type == "module"
 end
 
+local smelting_ingredients = nil
+
+local function is_smelting_ingredient(item_name)
+    if not smelting_ingredients then
+        smelting_ingredients = {}
+        for _, recipe in pairs(prototypes.recipe) do
+            if recipe.category == "smelting" then
+                for _, ingredient in pairs(recipe.ingredients) do
+                    smelting_ingredients[ingredient.name] = true
+                end
+            end
+        end
+    end
+    return smelting_ingredients[item_name] == true
+end
+
 -- Function to get inventory fullness information
 local function get_inventory_info(entity)
     if entity.get_inventory then
@@ -30,7 +46,7 @@ local function get_inventory_info(entity)
     return ""
 end
 
-storage.actions.insert_item = function(player_index, insert_item, count, x, y, target_name)
+storage.actions.insert_item = function(player_index, insert_item, count, x, y, target_name, replace)
     -- Ensure we have a valid character, recreating if necessary
     local player = storage.utils.ensure_valid_character(player_index)
     local position = {x=x, y=y}
@@ -119,16 +135,7 @@ storage.actions.insert_item = function(player_index, insert_item, count, x, y, t
                 end
             end
             -- Check if it's a valid ingredient for any furnace recipe
-            for _, recipe in pairs(prototypes.recipe) do
-                if recipe.category == "smelting" then
-                    for _, ingredient in pairs(recipe.ingredients) do
-                        if ingredient.name == item_name then
-                            return true
-                        end
-                    end
-                end
-            end
-            return false
+            return is_smelting_ingredient(item_name)
             ---- Check if it's a fuel
             --if prototypes.item[item_name].fuel_value > 0 then
             --    return true
@@ -182,25 +189,71 @@ storage.actions.insert_item = function(player_index, insert_item, count, x, y, t
     end
 
     -- Function to insert items onto a transport belt - one at a time
-    local function insert_on_belt(belt, item_name)
+    local function insert_on_belt(belt, item_name, count)
         local line1 = belt.get_transport_line(1)
         local line2 = belt.get_transport_line(2)
+        local inserted = 0
 
-        -- Try first line
-        if line1.can_insert_at_back() then
-            if line1.insert_at_back({name = item_name, count = 1}) then
-                return 1
+        for _ = 1, count do
+            -- Try first line
+            if line1.can_insert_at_back()
+                and line1.insert_at_back({name = item_name, count = 1}) then
+                inserted = inserted + 1
+            elseif line2.can_insert_at_back()
+                and line2.insert_at_back({name = item_name, count = 1}) then
+                inserted = inserted + 1
+            else
+                break
             end
         end
 
-        -- If first line failed, try second line
-        if line2.can_insert_at_back() then
-            if line2.insert_at_back({name = item_name, count = 1}) then
-                return 1
+        return inserted
+    end
+
+    -- Burner machines have a single fuel slot. Swapping fuel types means the
+    -- old stack must leave the machine first: replace=true moves it back into
+    -- the player inventory, otherwise fail with an actionable message.
+    local replaced_fuel = nil
+    local insert_prototype = prototypes.item[insert_item]
+    if closest_entity.burner and insert_prototype
+        and (insert_prototype.fuel_value or 0) > 0
+    then
+        local fuel_inventory = closest_entity.get_inventory(defines.inventory.fuel)
+        if fuel_inventory and not fuel_inventory.is_empty() then
+            for index = 1, #fuel_inventory do
+                local stack = fuel_inventory[index]
+                if stack and stack.valid_for_read and stack.name ~= insert_item then
+                    local old_name = stack.name
+                    local old_count = stack.count
+                    if not replace then
+                        error("\"fuel slot holds " .. old_count .. " " .. old_name
+                            .. " so it cannot take " .. insert_item
+                            .. ". Pass replace=true to swap the fuel, or extract the "
+                            .. old_name .. " first.\"")
+                    end
+                    local main_inventory = player.get_inventory(
+                        defines.inventory.character_main)
+                    local fits = main_inventory and main_inventory.can_insert{
+                        name = old_name, count = old_count
+                    }
+                    if not fits then
+                        error("\"cannot replace " .. old_name
+                            .. ": no room in your inventory for " .. old_count
+                            .. " " .. old_name .. "\"")
+                    end
+                    local removed = fuel_inventory.remove{
+                        name = old_name, count = old_count
+                    }
+                    if removed ~= old_count then
+                        error("\"failed to extract " .. old_name
+                            .. " from the fuel slot\"")
+                    end
+                    player.insert{name = old_name, count = removed}
+                    replaced_fuel = {name = old_name, count = removed}
+                    break
+                end
             end
         end
-
-        return 0  -- Could not insert on either line
     end
 
     -- Determine how many items can be inserted
@@ -211,7 +264,7 @@ storage.actions.insert_item = function(player_index, insert_item, count, x, y, t
     if closest_entity.type == "transport-belt" then
         -- For transport belts, we need to use a different method
         -- game.print("Inserting ".. insertable_count.. " items onto transport belt...")
-        inserted = insert_on_belt(closest_entity, insert_item)
+        inserted = insert_on_belt(closest_entity, insert_item, insertable_count)
     elseif closest_entity.type == "assembling-machine" then
         -- Check if inserting a module
         if is_module(insert_item) then
@@ -278,7 +331,14 @@ storage.actions.insert_item = function(player_index, insert_item, count, x, y, t
         -- Only remove successfully inserted items from player
         player.remove_item{name=insert_item, count=inserted}
         -- game.print("Successfully inserted " .. inserted .. " items.")
-        return storage.utils.serialize_entity(closest_entity)
+        local serialized = storage.utils.serialize_entity(closest_entity)
+        if replaced_fuel then
+            serialized.replaced_fuel = replaced_fuel
+        end
+        if closest_entity.type == "transport-belt" then
+            serialized.inserted = inserted
+        end
+        return serialized
     else
         local inventory_info = get_inventory_info(closest_entity)
         local error_msg = string.format(

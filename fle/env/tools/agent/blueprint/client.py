@@ -1,6 +1,11 @@
 from typing import Any
 
 from fle.env.tools import Tool
+from fle.envd.blueprint_exchange import (
+    decode_exchange,
+    encode_exchange,
+    select_blueprint,
+)
 from fle.envd.blueprints import (
     BlueprintError,
     BlueprintStore,
@@ -8,7 +13,7 @@ from fle.envd.blueprints import (
 
 
 class Blueprint(Tool):
-    """Agent-facing blueprint library: save, place, list, get.
+    """Editable native blueprint library and construction plans.
 
     Content lives in the generation-scoped store; agents normally reference
     blueprints by name rather than re-emitting exchange strings.
@@ -32,13 +37,13 @@ class Blueprint(Tool):
             return None
 
     def __call__(self, command: str = "list", *args: Any, **kwargs: Any):
-        """Blueprint library: save, place, list, or get factory fragments.
+        """Create, edit, inspect, share and place native construction plans.
 
         Commands:
         - ``blueprint('save', name, x, y, radius)`` captures force-owned
           entities around (x, y) into the library.
         - ``blueprint('place', name_or_string, x, y)`` places a saved design
-          by name (materials are billed against your inventory).
+          by name as native ghosts, for manual or robot construction.
         - ``blueprint('list')`` lists saved names and usage counts.
         - ``blueprint('get', name)`` returns the exchange string.
         """
@@ -47,12 +52,18 @@ class Blueprint(Tool):
             "place": self.place,
             "list": self.list_blueprints,
             "get": self.get,
+            "import": self.import_blueprint,
+            "edit": self.import_blueprint,
+            "inspect": self.inspect,
+            "delete": self.delete,
+            "ghosts": self.ghosts,
+            "apply": self.apply,
         }.get(command)
         if handler is None:
             return {"error": f"unknown command: {command}"}
         return handler(*args, **kwargs)
 
-    def save(self, name: str = "", x: float = 0, y: float = 0, radius: float = 0):
+    def save(self, name: str = "", x: float = 0, y: float = 0, radius: float = 32):
         capture, _ = self.execute(self.player_index, "capture", x, y, radius)
         if not isinstance(capture, dict) or capture.get("error"):
             return capture if isinstance(capture, dict) else {"error": str(capture)}
@@ -63,6 +74,11 @@ class Blueprint(Tool):
             content = content[1:-1]
         store = self._store()
         resolved_name = name or f"bp-{store.count() + 1}"
+        if not name:
+            index = store.count() + 1
+            while store.try_get(resolved_name) is not None:
+                index += 1
+                resolved_name = f"bp-{index}"
         try:
             record = store.save(
                 resolved_name,
@@ -76,7 +92,16 @@ class Blueprint(Tool):
             return {"error": str(exc)}
         return {"saved": record.name, **record.summary()}
 
-    def place(self, source: str = "", x: float = 0, y: float = 0):
+    def place(
+        self,
+        source: str = "",
+        x: float = 0,
+        y: float = 0,
+        *,
+        direction: int = 0,
+        build_mode: str = "normal",
+        book_path: list[int] | None = None,
+    ):
         if not source:
             return {"error": "place requires a blueprint name or string"}
         store = self._store()
@@ -85,8 +110,24 @@ class Blueprint(Tool):
         except BlueprintError as exc:
             return {"error": str(exc)}
         content = record.content if record is not None else source
+        try:
+            content = encode_exchange(
+                select_blueprint(decode_exchange(content), book_path)
+            )
+        except BlueprintError as exc:
+            return {"error": str(exc)}
         from_store = record is not None
-        result, _ = self.execute(self.player_index, "place", content, x, y)
+        result, _ = self.execute(
+            self.player_index,
+            "place",
+            content,
+            x,
+            y,
+            {
+                "direction": direction,
+                "build_mode": build_mode,
+            },
+        )
         if isinstance(result, dict) and not result.get("error"):
             # Invoking a stored design counts as library use even when every
             # entity dedupes against existing world state.
@@ -94,6 +135,66 @@ class Blueprint(Tool):
                 store.record_use(record.name, self._tick())
             return {**result, "source": "library" if from_store else "inline"}
         return result if isinstance(result, dict) else {"error": str(result)}
+
+    def import_blueprint(self, name: str, content: str | dict):
+        """Create/replace a library item from an exchange string or native JSON."""
+        try:
+            content = encode_exchange(content) if isinstance(content, dict) else content
+            decode_exchange(content)
+            result, _ = self.execute(self.player_index, "validate", content)
+            if not isinstance(result, dict) or result.get("error"):
+                return result
+            record = self._store().save(
+                name,
+                str(result["content"]).strip('"'),
+                entity_count=int(result.get("entity_count", 0)),
+                created_tick=self._tick(),
+            )
+            return {"saved": name, **record.summary()}
+        except BlueprintError as exc:
+            return {"error": str(exc)}
+
+    def inspect(self, name: str):
+        try:
+            return decode_exchange(self._store().get(name).content)
+        except BlueprintError as exc:
+            return {"error": str(exc)}
+
+    def delete(self, name: str):
+        try:
+            return {"deleted": self._store().delete(name)}
+        except BlueprintError as exc:
+            return {"error": str(exc)}
+
+    def ghosts(self, x: float = 0, y: float = 0, radius: float = 32, offset: int = 0):
+        result, _ = self.execute(
+            self.player_index, "ghosts", x, y, radius, {"offset": offset}
+        )
+        return result
+
+    def apply(
+        self,
+        source: str,
+        x: float = 0,
+        y: float = 0,
+        radius: float = 32,
+        cancel: bool = False,
+    ):
+        record = self._store().try_get(source)
+        content = record.content if record else source
+        try:
+            decode_exchange(content)
+        except BlueprintError as exc:
+            return {"error": str(exc)}
+        result, _ = self.execute(
+            self.player_index,
+            "apply",
+            content,
+            x,
+            y,
+            {"radius": radius, "cancel": cancel},
+        )
+        return result
 
     def list_blueprints(self):
         return {"blueprints": self._store().list_summaries()}

@@ -33,7 +33,7 @@ ARTIFACTS = ROOT / ".runtime/reference-factory"
 LAYOUT = ROOT / "tests/fixtures/reference_iron_factory.lua"
 
 
-def start_cluster():
+def start_cluster(*, force_recreate: bool = False):
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
     generator = ComposeGenerator(state_dir=ARTIFACTS / "state", work_dir=ARTIFACTS)
     services = generator.services_dict(2)
@@ -58,6 +58,7 @@ def start_cluster():
             str(compose),
             "up",
             "-d",
+            *(["--force-recreate"] if force_recreate else []),
         ],
         check=True,
     )

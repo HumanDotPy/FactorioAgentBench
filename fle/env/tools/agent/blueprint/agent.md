@@ -1,49 +1,55 @@
 # blueprint
 
-The blueprint library stores reusable factory fragments (captured from the
-world as Factorio exchange strings) so they can be placed again by name in the
-same lease, or across a training generation when the task provisions a
-blueprint scope. Blueprints are macros over the normal build rules: placement
-bills every entity against your inventory and obeys the same material checks
-as manual construction.
-
-## Commands
+Blueprints are native construction plans. `place` creates ghosts; it does not
+build entities or consume materials. Build matching ghosts manually with
+`place_entity`, or let construction robots use available network materials.
+Recipes, settings, wires and item requests are retained by Factorio.
 
 ```python
-# Capture force-owned entities around a center point.
-blueprint('save', name='iron-pair', x=5, y=-64, radius=16)
-# -> {'saved': 'iron-pair', 'name': 'iron-pair', 'entity_count': 6, ...}
+# Capture entities, tiles, modules, wires, station names and trains.
+blueprint('save', 'iron-line', 10, 10, radius=16)
+blueprint('list')
+blueprint('get', 'iron-line')                 # Full native exchange string
+blueprint('inspect', 'iron-line')             # Full editable native JSON
 
-# Place a saved fragment by name at a center position.
-blueprint('place', 'iron-pair', 40, -60)
-# -> {'placed': 6, 'requested': 6, 'source': 'library', ...}
+# Create or edit a design using a native document or exchange string.
+blueprint('import', 'new-design', {'blueprint': {
+    'item': 'blueprint', 'version': 562949958467584,
+    'entities': [{'entity_number': 1, 'name': 'transport-belt',
+                  'position': {'x': 0.5, 'y': 0.5}, 'direction': 4}]
+}})
+design = blueprint('inspect', 'new-design')
+design['blueprint']['label'] = 'Eastbound belt'
+blueprint('edit', 'new-design', design)
 
-# Inline exchange strings also work (program size limit is 32 KiB, so prefer
-# library names for anything nontrivial).
-blueprint('place', '0eNq...', 40, -60)
+# Native placement: cardinal direction 0/4/8/12; normal, forced, superforced.
+blueprint('place', 'iron-line', 40, 20, direction=4, build_mode='normal')
+blueprint('ghosts', 40, 20, radius=32, offset=0)
+# Receipt gives created_ghosts and up to 128 positions; zero can mean collision
+# or that the plan already exists. Inspect ghosts before assuming construction.
 
-# Discover and inspect the library.
-blueprint('list')          # -> {'blueprints': [{'name', 'entity_count', ...}]}
-blueprint('get', 'iron-pair')  # -> {'name', 'content', 'entity_count'}
+# Books retain complete native metadata; select zero-based entry indices.
+blueprint('place', 'my-book', 40, 20, book_path=[2, 0])
+# Imported native planners mark/cancel construction orders.
+blueprint('apply', 'upgrade-belts', 40, 20, radius=16)
+blueprint('apply', 'clear-area', 40, 20, radius=16, cancel=True)
+blueprint('delete', 'new-design')
 ```
 
-Method syntax (`blueprint.save(...)`, `blueprint.place(...)`) is equivalent to
-the command form and records the same tool call.
+`import`/`edit` replace the complete document, preserving unspecified engine
+fields only when retained in that document. Use inspect → edit for changes to
+an existing design. The engine rejects invalid documents before saving. The
+codec accepts blueprints, nested books, upgrade planners and deconstruction
+planners. Import/inspect/get do not modify world entities.
 
-## When to use it
+For unrestricted experiments use the direct `factorio_reference_world` MCP tool:
+create → execute native Lua → run exact ticks → capture to a library name →
+place in the real factory. This is a separate process with all research and free
+native construction. Only designs transfer back. See the
+[workshop contract](../../../../../docs/architecture/blueprint-workshop.md).
 
-- Rebuilding a proven fragment for a new ore patch or power plant.
-- Duplicating a working production line instead of re-placing every entity.
-- Moving a saved design between leases in lineage-scoped training runs.
-
-## Practical guidance
-
-- Capture only complete, self-contained fragments; the world around the
-  capture area is not included.
-- Check the returned `placed` vs `requested` counts: placement charges the
-  full material bill, then refunds (and clears) any ghost that fails to
-  revive, so the net debit matches what actually appeared in the world.
-- Confirm the target area is clear; collision failures are refunded but the
-  fragment will be incomplete.
-- Query `blueprint('list')` before saving to reuse or update an existing
-  name instead of growing the library.
+The library is lease-scoped by default and checkpointed. An explicitly supplied
+lineage/generation scope uses shared durable storage. Reference worlds are owned
+by the lease and released with it. Capture is bounded to a radius in (0,128].
+There is no geometric flip convenience argument in the headless API; native
+JSON remains editable, including entity mirror settings.

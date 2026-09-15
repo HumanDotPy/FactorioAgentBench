@@ -25,5 +25,6 @@ class LoadEntityState(Tool):
             entities = json.dumps(entities)
 
         result, _ = self.execute(self.player_index, entities)
-
-        return result
+        if result is not True and result != 1:
+            raise RuntimeError(f"Factorio entity-state restore failed: {result}")
+        return True

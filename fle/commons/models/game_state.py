@@ -244,42 +244,56 @@ class GameState:
 
 def filter_serializable_vars(vars_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Filter dictionary to only include serializable items"""
-    return {key: value for key, value in vars_dict.items() if is_serializable(value)}
+    cache: Dict[int, bool] = {}
+    return {
+        key: value for key, value in vars_dict.items() if _is_serializable(value, cache)
+    }
 
 
 def is_serializable(obj: Any) -> bool:
     """Test if an object can be serialized with pickle"""
-    try:
-        if obj is True or obj is False:
-            return True
+    return _is_serializable(obj, {})
 
-        # Common built-in values do not expose ``__module__``. Check them
-        # before the class/module filters so ordinary queue state survives an
-        # environment checkpoint.
-        if isinstance(obj, (int, float, str, bool, type(None))):
-            return True
 
-        if isinstance(obj, (list, tuple, set)):
-            return all(is_serializable(item) for item in obj)
-
-        if isinstance(obj, dict):
-            return all(
-                is_serializable(key) and is_serializable(value)
-                for key, value in obj.items()
-            )
-
-        # Skip type objects
-        if isinstance(obj, type):
-            return False
-
-        # Skip builtin types
-        if obj.__module__ == "builtins":
-            return False
-
-        if isinstance(obj, Enum):
-            return True
-
-        pickle.dumps(obj)
+def _is_serializable(obj: Any, cache: Dict[int, bool]) -> bool:
+    if obj is True or obj is False:
         return True
-    except (pickle.PicklingError, TypeError, AttributeError):
-        return False
+
+    # Common built-in values do not expose ``__module__``. Check them
+    # before the class/module filters so ordinary queue state survives an
+    # environment checkpoint.
+    if isinstance(obj, (int, float, str, bool, type(None))):
+        return True
+
+    cache_key = id(obj)
+    if cache_key in cache:
+        return cache[cache_key]
+
+    result = True
+    if isinstance(obj, (list, tuple, set)):
+        result = all(_is_serializable(item, cache) for item in obj)
+    elif isinstance(obj, dict):
+        result = all(
+            _is_serializable(key, cache) and _is_serializable(value, cache)
+            for key, value in obj.items()
+        )
+    elif isinstance(obj, type):
+        result = False
+    else:
+        try:
+            module = obj.__module__
+        except AttributeError:
+            result = False
+        else:
+            if module == "builtins":
+                result = False
+            elif isinstance(obj, Enum):
+                result = True
+            else:
+                try:
+                    pickle.dumps(obj)
+                except (pickle.PicklingError, TypeError, AttributeError):
+                    result = False
+
+    cache[cache_key] = result
+    return result

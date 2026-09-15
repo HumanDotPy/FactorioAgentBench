@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import subprocess
 import sys
 import time
 
@@ -23,19 +22,7 @@ from scripts.validate_reference_factory import start_cluster, ARTIFACTS, lua
 
 
 def validate():
-    start_cluster()
-    subprocess.run(
-        [
-            "docker",
-            "compose",
-            "-p",
-            "fle-reference-factory",
-            "-f",
-            str(ARTIFACTS / "compose.yaml"),
-            "restart",
-        ],
-        check=True,
-    )
+    start_cluster(force_recreate=True)
     # Do not restage mod-list.json while Factorio is loading its mods.
     from factorio_rcon import RCONClient
 

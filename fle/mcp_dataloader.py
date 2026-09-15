@@ -63,7 +63,7 @@ class MCPReadOnlyClient:
             return True
 
         except Exception as e:
-            logger.error(f"Failed to connect to MCP server: {e}")
+            logger.error("Failed to connect to MCP server: %s", e)
             return False
 
     async def disconnect(self):
@@ -74,7 +74,7 @@ class MCPReadOnlyClient:
             try:
                 await self.client.close()  # .__aexit__(None, None, None)
             except Exception as e:
-                logger.error(f"Error disconnecting from MCP server: {e}")
+                logger.error("Error disconnecting from MCP server: %s", e)
             self.client = None
 
     async def read_resource(self, ctx, uri: str) -> Any:
@@ -104,7 +104,7 @@ class MCPReadOnlyClient:
             return None
 
         except Exception as e:
-            logger.debug(f"Error reading resource {uri}: {e}")
+            logger.debug("Error reading resource %s: %s", uri, e)
             return None
 
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any] = None) -> Any:
@@ -116,7 +116,7 @@ class MCPReadOnlyClient:
             result = await self.client.call_tool(tool_name, arguments or {})
             return result
         except Exception as e:
-            logger.debug(f"Error calling tool {tool_name}: {e}")
+            logger.debug("Error calling tool %s: %s", tool_name, e)
             return None
 
     async def poll_game_state(self):
@@ -191,7 +191,7 @@ class MCPReadOnlyClient:
                                             logger.debug("Got rendered image")
                                             break
                         except Exception as e:
-                            logger.debug(f"Could not get render: {e}")
+                            logger.debug("Could not get render: %s", e)
 
                     # Send update to queue if we have data
                     if state and self.update_queue:
@@ -200,18 +200,20 @@ class MCPReadOnlyClient:
                         state["poll_count"] = poll_count
                         self.update_queue.put(state)
                         logger.debug(
-                            f"Poll #{poll_count}: sent update with keys: {list(state.keys())}"
+                            "Poll #%s: sent update with keys: %s",
+                            poll_count,
+                            list(state.keys()),
                         )
 
                 except Exception as e:
-                    logger.error(f"Error during polling (poll #{poll_count}): {e}")
+                    logger.error("Error during polling (poll #%s): %s", poll_count, e)
                     if self.update_queue:
                         self.update_queue.put({"type": "error", "message": str(e)})
 
                 # Wait before next poll
                 await asyncio.sleep(3.0)
 
-        logger.info(f"Polling stopped after {poll_count} polls")
+        logger.info("Polling stopped after %s polls", poll_count)
 
     async def start_polling(self):
         """Start polling for game state updates"""
@@ -254,7 +256,7 @@ class MCPDataBridge:
         try:
             self.bridge_loop.run_until_complete(self._async_connect_and_poll())
         except Exception as e:
-            logger.error(f"Bridge error: {e}")
+            logger.error("Bridge error: %s", e)
             if self.update_queue:
                 self.update_queue.put(
                     {"type": "error", "message": f"MCP Bridge error: {str(e)}"}
@@ -292,7 +294,7 @@ class MCPDataBridge:
             await self.client.start_polling()
 
         except Exception as e:
-            logger.error(f"Error in async connect and poll: {e}")
+            logger.error("Error in async connect and poll: %s", e)
             raise
 
         finally:

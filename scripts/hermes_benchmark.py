@@ -493,7 +493,7 @@ def _write_hermes_profile(
         "FACTORIO_RESUME_POINTER_FILE": str(
             trace_file.parent / "resume" / "world-checkpoint.json"
         ),
-        "FACTORIO_CHECKPOINT_EVERY": "1",
+        "FACTORIO_CHECKPOINT_EVERY": "5",
         "FACTORIO_GAME_DATA_FILE": str(game_data_path or ""),
         "MEMORY_PATH": str(memory_path or ""),
         "MEMORY_ENABLED": "1" if memory_enabled else "0",
@@ -811,7 +811,13 @@ async def run_attempt(
     return attempt, detail
 
 
+_git_commit_cache: str | None = None
+
+
 def _git_commit() -> str:
+    global _git_commit_cache
+    if _git_commit_cache is not None:
+        return _git_commit_cache
     try:
         completed = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -822,9 +828,10 @@ def _git_commit() -> str:
             check=True,
         )
         commit = completed.stdout.strip()
-        return commit or "unknown"
+        _git_commit_cache = commit or "unknown"
     except (OSError, subprocess.SubprocessError):
-        return "unknown"
+        _git_commit_cache = "unknown"
+    return _git_commit_cache
 
 
 def _select_task_ids(args: argparse.Namespace) -> list[str]:
@@ -927,76 +934,78 @@ async def main_async(args: argparse.Namespace) -> None:
         started_at = datetime.now(timezone.utc)
         attempts: list[BenchmarkAttempt] = []
         details: list[dict[str, Any]] = []
-        for task_id in task_ids:
-            for attempt_index in range(args.attempts):
-                print(
-                    f"[hermes-bench] {model} :: {task_id} :: attempt {attempt_index}",
-                    flush=True,
-                )
-                attempt, detail = await run_attempt(model, task_id, attempt_index, args)
-                attempts.append(attempt)
-                details.append(detail)
-                # Persist incrementally so harness failures are never lost.
-                (output_dir / f"{_safe_model_name(model)}-details.json").write_text(
-                    json.dumps(details, indent=2), encoding="utf-8"
-                )
-                print(
-                    f"    -> status={attempt.status} success={attempt.success} "
-                    f"reward={attempt.scalar_reward:.3f} "
-                    f"({attempt.interventions} interventions, "
-                    f"{attempt.elapsed_seconds:.0f}s)",
-                    flush=True,
-                )
+        details_path = output_dir / f"{_safe_model_name(model)}-details.json"
+        try:
+            for task_id in task_ids:
+                for attempt_index in range(args.attempts):
+                    print(
+                        f"[hermes-bench] {model} :: {task_id} :: attempt {attempt_index}",
+                        flush=True,
+                    )
+                    attempt, detail = await run_attempt(
+                        model, task_id, attempt_index, args
+                    )
+                    attempts.append(attempt)
+                    details.append(detail)
+                    print(
+                        f"    -> status={attempt.status} success={attempt.success} "
+                        f"reward={attempt.scalar_reward:.3f} "
+                        f"({attempt.interventions} interventions, "
+                        f"{attempt.elapsed_seconds:.0f}s)",
+                        flush=True,
+                    )
+                details_path.write_text(json.dumps(details, indent=2), encoding="utf-8")
 
-        provider, _, name = model.rpartition("/")
-        safe_name = name.replace("/", "_").replace(":", "-")
-        run = BenchmarkRun(
-            run_id=f"hermes-{safe_name}-{started_at.strftime('%Y%m%dT%H%M%SZ')}",
-            model=ModelIdentity(name=name, provider=provider or "openrouter"),
-            suite=suite,
-            benchmark_split=split,
-            started_at=started_at,
-            completed_at=datetime.now(timezone.utc),
-            repository_commit=_git_commit(),
-            environment={
-                "os": platform.platform(),
-                "python": platform.python_version(),
-                "harness_binary": str(HERMES),
-                "envd_url": args.envd_url,
-                "selection_status": status,
-            },
-            generation_config={
-                "harness": "hermes-agent",
-                "harness_mode": "oneshot",
-                "provider": "openrouter",
-                "reasoning": args.reasoning,
-                "max_turns": effective_max_turns,
-                "timeout_seconds": args.timeout_seconds,
-                "attempts_per_task": args.attempts,
-                "toolsets": [MCP_SERVER_NAME],
-                "web_search_enabled": False,
-                "action_reference_id": ACTION_PROFILE_REFERENCE_ID,
-                "action_reference_sha256": ACTION_PROFILE_REFERENCE_SHA256,
-            },
-            attempts=attempts,
-        )
-        # Custom-spec runs (e.g. customer contracts) are not catalog members.
-        if not getattr(args, "spec_file", None):
-            errors = validate_against_catalog(run)
-            if errors:
-                raise RuntimeError(
-                    "generated benchmark run failed validation:\n" + "\n".join(errors)
-                )
-        out_path = output_dir / f"{safe_name}-run.json"
-        out_path.write_text(run.model_dump_json(indent=2), encoding="utf-8")
-        (output_dir / f"{safe_name}-details.json").write_text(
-            json.dumps(details, indent=2), encoding="utf-8"
-        )
-        summary = summarize_run(run)
-        (output_dir / f"{safe_name}-summary.json").write_text(
-            json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8"
-        )
-        print(f"[hermes-bench] wrote {out_path}", flush=True)
+            provider, _, name = model.rpartition("/")
+            safe_name = name.replace("/", "_").replace(":", "-")
+            run = BenchmarkRun(
+                run_id=f"hermes-{safe_name}-{started_at.strftime('%Y%m%dT%H%M%SZ')}",
+                model=ModelIdentity(name=name, provider=provider or "openrouter"),
+                suite=suite,
+                benchmark_split=split,
+                started_at=started_at,
+                completed_at=datetime.now(timezone.utc),
+                repository_commit=_git_commit(),
+                environment={
+                    "os": platform.platform(),
+                    "python": platform.python_version(),
+                    "harness_binary": str(HERMES),
+                    "envd_url": args.envd_url,
+                    "selection_status": status,
+                },
+                generation_config={
+                    "harness": "hermes-agent",
+                    "harness_mode": "oneshot",
+                    "provider": "openrouter",
+                    "reasoning": args.reasoning,
+                    "max_turns": effective_max_turns,
+                    "timeout_seconds": args.timeout_seconds,
+                    "attempts_per_task": args.attempts,
+                    "toolsets": [MCP_SERVER_NAME],
+                    "web_search_enabled": False,
+                    "action_reference_id": ACTION_PROFILE_REFERENCE_ID,
+                    "action_reference_sha256": ACTION_PROFILE_REFERENCE_SHA256,
+                },
+                attempts=attempts,
+            )
+            # Custom-spec runs (e.g. customer contracts) are not catalog members.
+            if not getattr(args, "spec_file", None):
+                errors = validate_against_catalog(run)
+                if errors:
+                    raise RuntimeError(
+                        "generated benchmark run failed validation:\n"
+                        + "\n".join(errors)
+                    )
+            out_path = output_dir / f"{safe_name}-run.json"
+            out_path.write_text(run.model_dump_json(indent=2), encoding="utf-8")
+            details_path.write_text(json.dumps(details, indent=2), encoding="utf-8")
+            summary = summarize_run(run)
+            (output_dir / f"{safe_name}-summary.json").write_text(
+                json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8"
+            )
+            print(f"[hermes-bench] wrote {out_path}", flush=True)
+        finally:
+            details_path.write_text(json.dumps(details, indent=2), encoding="utf-8")
 
 
 def main() -> None:

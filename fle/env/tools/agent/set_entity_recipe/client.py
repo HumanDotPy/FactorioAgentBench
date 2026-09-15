@@ -1,5 +1,5 @@
 from fle.env.entities import Entity
-from fle.env.game_types import Prototype, RecipeName
+from fle.env.game_types import RecipeName, prototype_by_name
 from fle.env.tools import Tool
 
 
@@ -35,11 +35,9 @@ class SetEntityRecipe(Tool):
         cleaned_response = self.clean_response(response)
 
         # Find the matching Prototype
-        matching_prototype = None
-        for prototype in Prototype:
-            if prototype.value[0] == cleaned_response["name"].replace("_", "-"):
-                matching_prototype = prototype
-                break
+        matching_prototype = prototype_by_name.get(
+            cleaned_response["name"].replace("_", "-")
+        )
 
         if matching_prototype is None:
             print(

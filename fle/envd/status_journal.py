@@ -49,7 +49,10 @@ class StatusJournal:
                 raise ValueError("status samples require stable entity_id")
         pending: dict[tuple[str, int], dict[str, Any]] = {}
         for raw in samples:
-            sample = deepcopy(raw)
+            sample = dict(raw)
+            position = sample.get("position")
+            if isinstance(position, dict):
+                sample["position"] = dict(position)
             entity_id = str(sample["entity_id"])
             before = self.current.get(entity_id)
             if sample.get("removed"):

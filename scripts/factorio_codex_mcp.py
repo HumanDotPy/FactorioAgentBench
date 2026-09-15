@@ -86,19 +86,34 @@ def _tool_artifact_dir() -> Path | None:
     return path
 
 
-def _execution_artifact_id(result: dict[str, Any]) -> str:
+def _execution_serialization(result: dict[str, Any]) -> tuple[str, str, str]:
+    serialized = json.dumps(result, sort_keys=True, separators=(",", ":"), default=str)
+    digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
     event = result.get("event") if isinstance(result.get("event"), dict) else {}
     sequence = event.get("sequence", "unknown")
-    material = json.dumps(result, sort_keys=True, separators=(",", ":"), default=str)
-    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
-    return f"execution-{sequence}-{digest[:16]}"
+    return serialized, digest, f"execution-{sequence}-{digest[:16]}"
+
+
+def _execution_artifact_id(result: dict[str, Any]) -> str:
+    return _execution_serialization(result)[2]
 
 
 @timed("mcp.execution_artifact")
-def _persist_execution_artifact(result: dict[str, Any]) -> dict[str, Any]:
-    serialized = json.dumps(result, sort_keys=True, separators=(",", ":"), default=str)
-    digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-    artifact_id = _execution_artifact_id(result)
+def _persist_execution_artifact(
+    result: dict[str, Any],
+    *,
+    serialized: str | None = None,
+    digest: str | None = None,
+    artifact_id: str | None = None,
+) -> dict[str, Any]:
+    if serialized is None:
+        serialized, digest, artifact_id = _execution_serialization(result)
+    if digest is None:
+        digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    if artifact_id is None:
+        event = result.get("event") if isinstance(result.get("event"), dict) else {}
+        sequence = event.get("sequence", "unknown")
+        artifact_id = f"execution-{sequence}-{digest[:16]}"
     directory = _tool_artifact_dir()
     if directory is not None:
         destination = directory / f"{artifact_id}.json"
@@ -221,7 +236,7 @@ def _envd_request(method: str, path: str, payload: dict | None = None) -> dict:
     attempts = (
         2
         if method == "POST"
-        and path.endswith(("/execute", "/programs", "/run"))
+        and path.endswith(("/execute", "/programs", "/run", "/reference-world"))
         and payload is not None
         and payload.get("request_id")
         else 1
@@ -653,9 +668,17 @@ def _preserved_payload_summary(payload: Any) -> dict[str, Any]:
         "ticks",
         "terminal_reason",
         "contract_status",
+        "artifact",
     ):
         if key in payload:
             summary[key] = _bounded_nested_value(payload[key], max_string_chars=512)
+    output = payload.get("output")
+    if isinstance(output, dict):
+        summary["output"] = {
+            "preview": _truncate_model_text(output.get("preview", ""), 512),
+            "chars": output.get("chars"),
+            "truncated": bool(output.get("truncated")),
+        }
     event = payload.get("event")
     if isinstance(event, dict):
         summary["event"] = {
@@ -744,9 +767,17 @@ def _contract_result(result: dict[str, Any]) -> dict[str, Any] | None:
     return _bounded_nested_value(normalized)
 
 
-def _execution_receipt(result: dict[str, Any]) -> dict[str, Any]:
+def _execution_receipt(
+    result: dict[str, Any],
+    *,
+    serialized: str | None = None,
+    digest: str | None = None,
+    artifact_id: str | None = None,
+) -> dict[str, Any]:
     """Return compact public facts while retaining the full audit artifact."""
 
+    if serialized is None:
+        serialized, digest, artifact_id = _execution_serialization(result)
     event = result.get("event") if isinstance(result.get("event"), dict) else {}
     raw_output = str(event.get("result", ""))
     contract_result = _contract_result(result)
@@ -764,7 +795,7 @@ def _execution_receipt(result: dict[str, Any]) -> dict[str, Any]:
     )
     receipt: dict[str, Any] = {
         "schema_version": "factorio-execution-receipt-v1",
-        "execution_id": _execution_artifact_id(result),
+        "execution_id": artifact_id,
         "sequence": event.get("sequence"),
         "status": "error" if event.get("error") else "success",
         "execution_started": not bool(event.get("policy_violations")),
@@ -794,7 +825,12 @@ def _execution_receipt(result: dict[str, Any]) -> dict[str, Any]:
             "sha256": hashlib.sha256(raw_output.encode("utf-8")).hexdigest(),
             "truncated": len(raw_output) > MAX_EXECUTION_OUTPUT_PREVIEW_CHARS,
         },
-        "artifact": _persist_execution_artifact(result),
+        "artifact": _persist_execution_artifact(
+            result,
+            serialized=serialized,
+            digest=digest,
+            artifact_id=artifact_id,
+        ),
     }
     event_summary = _summarise_event_stream(result.get("events", []))
     receipt.update(
@@ -834,18 +870,138 @@ def _read_execution_artifact(arguments: dict[str, Any]) -> dict[str, Any]:
     else:
         raise ValueError("section must be receipt, output, events, or delivery")
     encoded = json.dumps(value, separators=(",", ":"), default=str)
-    cursor = max(int(arguments.get("cursor", 0)), 0)
     max_chars = min(max(int(arguments.get("max_chars", 8_000)), 256), 12_000)
-    chunk = encoded[cursor : cursor + max_chars]
-    next_cursor = cursor + len(chunk) if cursor + len(chunk) < len(encoded) else None
+
+    def optional_int(name: str, minimum: int, maximum: int) -> int | None:
+        raw = arguments.get(name)
+        if raw is None:
+            return None
+        try:
+            number = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be an integer") from exc
+        if not minimum <= number <= maximum:
+            raise ValueError(f"{name} must be between {minimum} and {maximum}")
+        return number
+
+    head = optional_int("head", 1, 10_000)
+    tail = optional_int("tail", 1, 10_000)
+    if head is not None and tail is not None:
+        raise ValueError("provide head or tail, not both")
+    line_start = optional_int("line_start", 1, 10_000_000)
+    line_end = optional_int("line_end", 1, 10_000_000)
+    if line_start is not None and line_end is not None and line_end < line_start:
+        raise ValueError("line_end must be >= line_start")
+    context = optional_int("context", 0, 10) or 0
+    search = arguments.get("search")
+    if search is not None:
+        search = str(search)
+        if not search:
+            raise ValueError("search must be a nonempty string")
+    ignore_case = bool(arguments.get("ignore_case", False))
+    line_mode = search is not None or any(
+        selection is not None for selection in (head, tail, line_start, line_end)
+    )
+
+    if not line_mode:
+        cursor = max(int(arguments.get("cursor", 0)), 0)
+        chunk = encoded[cursor : cursor + max_chars]
+        next_cursor = (
+            cursor + len(chunk) if cursor + len(chunk) < len(encoded) else None
+        )
+        return {
+            "execution_id": artifact_id,
+            "section": section,
+            "mode": "char",
+            "cursor": cursor,
+            "content": chunk,
+            "next_cursor": next_cursor,
+            "total_chars": len(encoded),
+            "sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+        }
+
+    if isinstance(value, str):
+        text = value
+    else:
+        text = json.dumps(value, indent=1, default=str)
+    lines = text.splitlines()
+    total_lines = len(lines)
+
+    def render(number: int) -> str:
+        return f"{number}: {lines[number - 1]}"
+
+    if search is not None:
+        needle = search.lower() if ignore_case else search
+        hits = [
+            number
+            for number, line in enumerate(lines, start=1)
+            if needle in (line.lower() if ignore_case else line)
+        ]
+        emitted: set[int] = set()
+        selected: list[str] = []
+        budget = max_chars
+        truncated = False
+        for number in hits:
+            low = max(1, number - context)
+            high = min(total_lines, number + context)
+            for current in range(low, high + 1):
+                if current in emitted:
+                    continue
+                entry = render(current)
+                if len(entry) + 1 > budget:
+                    truncated = True
+                    break
+                budget -= len(entry) + 1
+                emitted.add(current)
+                selected.append(entry)
+            if truncated:
+                break
+        ordered = sorted(emitted)
+        return {
+            "execution_id": artifact_id,
+            "section": section,
+            "mode": "search",
+            "search": search,
+            "ignore_case": ignore_case,
+            "context": context,
+            "matches_total": len(hits),
+            "lines_returned": len(selected),
+            "total_lines": total_lines,
+            "line_start": ordered[0] if ordered else None,
+            "line_end": ordered[-1] if ordered else None,
+            "content": "\n".join(selected),
+            "truncated": truncated,
+        }
+
+    if head is not None:
+        start, end = 1, min(total_lines, head)
+    elif tail is not None:
+        start, end = max(1, total_lines - tail + 1), total_lines
+    else:
+        start = line_start or 1
+        end = min(total_lines, line_end or total_lines)
+
+    selected = []
+    budget = max_chars
+    truncated = False
+    for number in range(start, end + 1):
+        entry = render(number)
+        if len(entry) + 1 > budget:
+            truncated = True
+            break
+        budget -= len(entry) + 1
+        selected.append(entry)
+    last = start + len(selected) - 1 if selected else None
     return {
         "execution_id": artifact_id,
         "section": section,
-        "cursor": cursor,
-        "content": chunk,
-        "next_cursor": next_cursor,
-        "total_chars": len(encoded),
-        "sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+        "mode": "lines",
+        "content": "\n".join(selected),
+        "line_start": start if selected else None,
+        "line_end": last,
+        "next_line": (last + 1) if truncated and last is not None else None,
+        "total_lines": total_lines,
+        "truncated": truncated,
     }
 
 
@@ -955,12 +1111,13 @@ TOOLS = [
             "craft_item, place_entity, place_path, place_grid, repeat_pattern, wait, "
             "place_entity_next_to, insert_item, extract_item, set_entity_recipe, "
             "transfer_item, place_between, place_power_line, resolve_entity, "
-            "get_entity_ports, get_tile_map, trace_belt, "
+            "get_entity_ports, get_power_network, get_fluid_network, get_tile_map, "
+            "trace_belt, deconstruct_area, mine_entity, "
             "get_technology, get_available_technologies, get_research_queue, "
             "get_recipes_using, get_logistic_network, get_circuit_network, "
             "get_trains, get_train_stop, get_pollution, get_force_bonuses, "
             "place_offshore_pump, get_resource_patch, "
-            "blueprint('save'|'place'|'list'|'get'), "
+            "blueprint('save'|'place'|'list'|'get'|'inspect'|'import'|'edit'|'ghosts'|'apply'|'delete'), "
             "set_research, sleep, print. Planner-assisted connect_entities and "
             "nearest_buildable are intentionally absent from the canonical profile. "
             "When insert_item is used, the result includes a delivery_receipt "
@@ -1099,7 +1256,11 @@ TOOLS.extend(
             (
                 "Read a bounded section of a prior factorio_execute_program "
                 "artifact when its compact receipt is insufficient. Full results "
-                "are never injected automatically."
+                "are never injected automatically. Sections: receipt, output, "
+                "events, delivery. Character paging uses cursor+max_chars; line "
+                "tools select head or tail, line_start/line_end ranges, or a "
+                "search (optionally case-insensitive with context lines) and "
+                "return greppable 'N: line' views."
             ),
             {
                 "execution_id": {"type": "string"},
@@ -1114,6 +1275,18 @@ TOOLS.extend(
                     "minimum": 256,
                     "maximum": 12000,
                     "default": 8000,
+                },
+                "head": {"type": "integer", "minimum": 1, "maximum": 10000},
+                "tail": {"type": "integer", "minimum": 1, "maximum": 10000},
+                "line_start": {"type": "integer", "minimum": 1},
+                "line_end": {"type": "integer", "minimum": 1},
+                "search": {"type": "string"},
+                "ignore_case": {"type": "boolean", "default": False},
+                "context": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10,
+                    "default": 0,
                 },
             },
             ["execution_id"],
@@ -1493,6 +1666,45 @@ TOOLS.extend(
     ]
 )
 
+TOOLS.append(
+    {
+        "name": "factorio_reference_world",
+        "description": (
+            "Create and operate your own isolated creative Factorio process. Actions: create, status, "
+            "execute (arguments.code: native Lua returning JSON-compatible data), run (ticks, speed), "
+            "capture (name, area=[[left,top],[right,bottom]]) saves to your real blueprint library, "
+            "place (source library name or exchange string, position=[x,y], options, book_path), destroy. "
+            "Execute exposes surface, force and blueprint.capture(area)/blueprint.place(string,position,options). "
+            "All native Factorio Lua APIs are available ONLY in this disposable process: free create_entity, "
+            "set_tiles, insert, infinity-chest/pipe filters, circuits and production statistics. "
+            "Research is unlocked, the initial 128x128 area is flat; generate more chunks as needed. "
+            "Return scalar/table data, not LuaObjects. Use run for exact simulation ticks. "
+            "Only blueprint designs transfer back; the real factory still uses native ghosts and construction. "
+            "Reference worlds are lease-scoped and do not count as real-world interventions."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "create",
+                        "status",
+                        "execute",
+                        "run",
+                        "capture",
+                        "place",
+                        "destroy",
+                    ],
+                },
+                "arguments": {"type": "object"},
+            },
+            "required": ["action"],
+            "additionalProperties": False,
+        },
+    }
+)
+
 # Keep the historical ``TOOLS`` import as the two world-action tools for
 # callers that use it as a narrow execution manifest.  The MCP server and
 # evaluation identity use ``ALL_TOOLS`` so every callable knowledge/memory
@@ -1512,6 +1724,7 @@ MEMORY_TOOL_NAMES = {
 }
 
 EXCLUSIVE_TOOL_NAMES = {
+    "factorio_reference_world",
     "factorio_set_camera",
     "factorio_set_realtime",
     "factorio_execute_program",
@@ -1581,7 +1794,10 @@ def tools_for_profile(*, memory_enabled: bool | None = None) -> list[dict]:
         if tool in factorio_program_mcp.TOOLS and not factorio_program_mcp.enabled():
             continue
         decorated = dict(tool)
-        if factorio_program_mcp.enabled() and tool["name"] == "factorio_execute_program":
+        if (
+            factorio_program_mcp.enabled()
+            and tool["name"] == "factorio_execute_program"
+        ):
             decorated["description"] = (
                 "Accept a bounded Python program for ordered background execution at 1x. "
                 "Returns a program_id immediately, not success. Plan independent work while it runs; "
@@ -1925,6 +2141,64 @@ def _call_tool(
             persist_trace(Path(directory) / "profiling", profile)
 
 
+_checkpoint_mutation_counts: dict[str, int] = {}
+
+
+def _checkpoint_interval() -> int:
+    raw = os.environ.get("FACTORIO_CHECKPOINT_EVERY", "1")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _checkpoint_after_mutation(
+    result: dict, lease_id: str
+) -> tuple[str, str, str] | None:
+    resume_pointer = os.environ.get("FACTORIO_RESUME_POINTER_FILE")
+    if not resume_pointer:
+        return None
+    interval = _checkpoint_interval()
+    if interval <= 0:
+        return None
+    count = _checkpoint_mutation_counts.get(lease_id, 0) + 1
+    _checkpoint_mutation_counts[lease_id] = count
+    if (count - 1) % interval != 0:
+        return None
+    try:
+        checkpoint = _envd(
+            "POST",
+            f"/v1/leases/{lease_id}/checkpoints",
+            {"name": f"mcp-active-{lease_id[:12]}"},
+        )
+        result["resume_checkpoint"] = checkpoint
+        serialized, digest, artifact_id = _execution_serialization(result)
+        pointer_path = Path(resume_pointer)
+        pointer_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = pointer_path.with_suffix(pointer_path.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(
+                {
+                    "schema_version": "factorio-resume-pointer-v1",
+                    "checkpoint": checkpoint,
+                    "execution_id": artifact_id,
+                    "sequence": (result.get("event") or {}).get("sequence", "unknown"),
+                    "evaluation_progress": result.get("evaluation_progress"),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, pointer_path)
+        return serialized, digest, artifact_id
+    except Exception as exc:  # execution itself already committed
+        result["resume_checkpoint_error"] = f"{type(exc).__name__}: {exc}"
+        _trace(f"post-execution checkpoint failed: {exc}")
+        return None
+
+
 def _call_tool_impl(
     name: str,
     arguments: dict,
@@ -2008,6 +2282,19 @@ def _call_tool_impl(
             ), False
         if name.endswith("factorio_set_camera"):
             return _camera_call(arguments), False
+        if name.endswith("factorio_reference_world"):
+            payload = _envd(
+                "POST",
+                f"/v1/leases/{lease_id}/reference-world",
+                {
+                    "action": arguments.get("action"),
+                    "arguments": arguments.get("arguments", {}),
+                    "request_id": _next_execute_request_id(request_id),
+                },
+            )
+            if arguments.get("action") != "status":
+                _checkpoint_after_mutation(payload, lease_id)
+            return _bounded_json_text(payload), bool(payload.get("error"))
         if name.endswith("factorio_set_realtime"):
             payload: dict[str, object] = {"enabled": bool(arguments.get("enabled"))}
             if arguments.get("speed") is not None:
@@ -2141,43 +2428,7 @@ def _call_tool_impl(
                 f"/v1/leases/{lease_id}/execute",
                 execute_payload,
             )
-            resume_pointer = os.environ.get("FACTORIO_RESUME_POINTER_FILE")
-            if (
-                resume_pointer
-                and os.environ.get("FACTORIO_CHECKPOINT_EVERY", "1") != "0"
-            ):
-                try:
-                    sequence = (result.get("event") or {}).get("sequence", "unknown")
-                    checkpoint = _envd(
-                        "POST",
-                        f"/v1/leases/{lease_id}/checkpoints",
-                        {"name": f"mcp-active-{lease_id[:12]}"},
-                    )
-                    result["resume_checkpoint"] = checkpoint
-                    pointer_path = Path(resume_pointer)
-                    pointer_path.parent.mkdir(parents=True, exist_ok=True)
-                    temporary = pointer_path.with_suffix(pointer_path.suffix + ".tmp")
-                    temporary.write_text(
-                        json.dumps(
-                            {
-                                "schema_version": "factorio-resume-pointer-v1",
-                                "checkpoint": checkpoint,
-                                "execution_id": _execution_artifact_id(result),
-                                "sequence": sequence,
-                                "evaluation_progress": result.get(
-                                    "evaluation_progress"
-                                ),
-                            },
-                            indent=2,
-                            sort_keys=True,
-                        )
-                        + "\n",
-                        encoding="utf-8",
-                    )
-                    os.replace(temporary, pointer_path)
-                except Exception as exc:  # execution itself already committed
-                    result["resume_checkpoint_error"] = f"{type(exc).__name__}: {exc}"
-                    _trace(f"post-execution checkpoint failed: {exc}")
+            checkpoint_serialization = _checkpoint_after_mutation(result, lease_id)
             event_failed = bool((result.get("event") or {}).get("error"))
             failure_count = _record_execution_result(fingerprint, event_failed)
             if result.get("terminal_reason"):
@@ -2194,8 +2445,17 @@ def _call_tool_impl(
                 )
                 if adaptive_terminal:
                     _signal_epoch_terminal(str(adaptive_terminal), result)
+            receipt_kwargs: dict[str, str] = {}
+            if checkpoint_serialization is not None:
+                serialized, digest, artifact_id = checkpoint_serialization
+                receipt_kwargs = {
+                    "serialized": serialized,
+                    "digest": digest,
+                    "artifact_id": artifact_id,
+                }
             text = _bounded_json_text(
-                _execution_receipt(result), max_chars=MAX_EXECUTION_RECEIPT_CHARS
+                _execution_receipt(result, **receipt_kwargs),
+                max_chars=MAX_EXECUTION_RECEIPT_CHARS,
             )
             if event_failed and failure_count >= REPEATED_FAILURE_LIMIT:
                 text += "\n\n" + _repetition_error(failure_count)

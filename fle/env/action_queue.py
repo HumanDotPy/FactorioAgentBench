@@ -45,6 +45,7 @@ def _state(namespace) -> dict[str, Any] | None:
 
 def _store(namespace, state: dict[str, Any]) -> None:
     namespace.persistent_vars["_action_queue_state"] = state
+    namespace._persistent_dirty = True
 
 
 def _normalize_action(spec: dict[str, Any], index: int) -> dict[str, Any]:
@@ -209,6 +210,44 @@ def _event_snapshot(namespace, since_tick: int, interrupt_on: set[str]) -> dict 
     return event or None
 
 
+def _tick_and_event_snapshot(
+    namespace, since_tick: int, interrupt_on: set[str]
+) -> tuple[int, dict | None]:
+    namespace.instance.ensure_connected()
+    kinds = json.dumps(sorted(interrupt_on))
+    wanted_json = kinds.replace("'", "\\'")
+    manager = getattr(namespace.instance, "lua_script_manager", None)
+    if manager is not None and manager.runtime_bundled:
+        command = (
+            "/sc local names=helpers.json_to_table('"
+            + wanted_json
+            + "') local wanted={} for _,v in ipairs(names) do wanted[v]=true end "
+            + "local event=remote.call('fle_runtime', 'dispatch', '__semantic_event', "
+            + f"{int(since_tick)}, wanted) "
+            + "rcon.print(helpers.table_to_json({tick=game.tick, event=event}))"
+        )
+    else:
+        command = (
+            "/sc local wanted={} for _,v in ipairs(helpers.json_to_table('"
+            + wanted_json
+            + "')) do wanted[v]=true end local found=nil "
+            + f"for _,e in ipairs(storage.semantic_events or {{}}) do if e.tick>{int(since_tick)} "
+            + "and wanted[e.type] then found=e break end end "
+            + "rcon.print(helpers.table_to_json({tick=game.tick, event=found or {}}))"
+        )
+    response = namespace.instance.rcon_client.send_command(command)
+    payload = json.loads(response or "{}")
+    if not isinstance(payload, dict):
+        payload = {}
+    tick = payload.get("tick")
+    if tick is None:
+        tick = int(
+            namespace.instance.rcon_client.send_command("/sc rcon.print(game.tick)")
+            or 0
+        )
+    return int(tick), payload.get("event") or None
+
+
 def inspect_queue(namespace) -> dict[str, Any]:
     state = _state(namespace)
     return (
@@ -251,10 +290,16 @@ def run_queue(namespace) -> dict[str, Any]:
             results.pop("__namespace__", None)
             _store(namespace, state)
             return _public_state(state)
-        end_tick = int(
-            namespace.instance.rcon_client.send_command("/sc rcon.print(game.tick)")
-            or start_tick
-        )
+        if state["interrupt_on"]:
+            end_tick, event = _tick_and_event_snapshot(
+                namespace, start_tick, state["interrupt_on"]
+            )
+        else:
+            end_tick = int(
+                namespace.instance.rcon_client.send_command("/sc rcon.print(game.tick)")
+                or start_tick
+            )
+            event = None
         frozen_result = _freeze(result)
         results[spec["id"]] = frozen_result
         results[index] = frozen_result
@@ -269,7 +314,6 @@ def run_queue(namespace) -> dict[str, Any]:
                 "result": _result_summary(result),
             }
         )
-        event = _event_snapshot(namespace, start_tick, state["interrupt_on"])
         if event:
             state["status"] = "interrupted"
             state["stop_reason"] = str(event.get("type", "event"))

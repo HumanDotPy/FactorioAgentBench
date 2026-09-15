@@ -24,7 +24,6 @@ def game(instance):
     }
     instance.reset()
     yield instance.namespace
-    instance.reset()
 
 
 def create_electricity_connection(game, steam_engine_pos, boiler_pos):

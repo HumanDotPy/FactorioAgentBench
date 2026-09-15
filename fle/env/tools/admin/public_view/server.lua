@@ -27,16 +27,25 @@ storage.actions.public_view = function(player_index, radius, entity_limit)
                 cell.water = surface.count_tiles_filtered{area=area,
                     name={"water", "deepwater", "water-green", "deepwater-green"}}
                 cell.blocked_tiles = surface.count_tiles_filtered{area=area, collision_mask="player"}
-                cell.trees = surface.count_entities_filtered{area=area,type="tree"}
-                cell.cliffs = surface.count_entities_filtered{area=area,type="cliff"}
+                -- Combined probes skip per-type counts when a cell is empty.
+                local natural_count = surface.count_entities_filtered{area=area,type={"tree","cliff"}}
+                if natural_count > 0 then
+                    cell.trees = surface.count_entities_filtered{area=area,type="tree"}
+                    cell.cliffs = surface.count_entities_filtered{area=area,type="cliff"}
+                else
+                    cell.trees = 0
+                    cell.cliffs = 0
+                end
                 cell.occupied = surface.count_entities_filtered{area=area,force=force}
                 -- Occupancy specifically means character-colliding entities,
                 -- independent of ownership; resource deposits are walkable.
                 cell.obstacles = surface.count_entities_filtered{area=area,collision_mask="player"}
                 cell.resources = {}
-                for _, name in ipairs(resources) do
-                    local count = surface.count_entities_filtered{area=area,name=name}
-                    if count > 0 then cell.resources[name] = count end
+                if surface.count_entities_filtered{area=area,name=resources} > 0 then
+                    for _, name in ipairs(resources) do
+                        local count = surface.count_entities_filtered{area=area,name=name}
+                        if count > 0 then cell.resources[name] = count end
+                    end
                 end
                 cell.walkable = cell.blocked_tiles == 0 and cell.obstacles == 0
             end

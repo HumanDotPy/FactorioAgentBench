@@ -333,14 +333,23 @@ end
 
 storage.goal = nil
 
+local function get_cached_price_list()
+    if not storage.price_list_cache then
+        storage.price_list_cache = production_score.generate_price_list()
+    end
+    return storage.price_list_cache
+end
+
 if game then
-    local scores = production_score.get_production_scores()
+    local price_list = production_score.generate_price_list()
+    storage.price_list_cache = price_list
+    local scores = production_score.get_production_scores(price_list)
     if scores then storage.initial_score = scores end
 end
 storage.initial_score = storage.initial_score or {player = 0}
 
 storage.actions.score = function()
-    local prod_score = production_score.get_production_scores()
+    local prod_score = production_score.get_production_scores(get_cached_price_list())
     prod_score["player"] = prod_score["player"] - storage.initial_score["player"]
     
     -- Try to get goal description from first player if available, otherwise skip

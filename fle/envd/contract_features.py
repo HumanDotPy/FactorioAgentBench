@@ -342,6 +342,8 @@ class ProductCatalog:
         self._tech_closure: dict[str, frozenset[str]] = {}
         self._intermediates: dict[str, frozenset[str]] = {}
         self._chain_seconds: dict[str, float] = {}
+        self._unit_requirements: dict[str, dict[str, float]] = {}
+        self._reachable: dict[str, frozenset[str]] = {}
 
     @property
     def game_version(self) -> str:
@@ -370,25 +372,67 @@ class ProductCatalog:
         Cyclic catalyst edges are ignored conservatively.
         """
 
-        requirements: dict[str, float] = {}
-
-        def visit(item: str, multiplier: float, stack: frozenset[str]) -> None:
-            recipe = self._source.recipe(item)
-            if recipe is None or item in stack:
-                return
-            product_yield = max(
-                (amount for name, amount in recipe.products if name == item),
-                default=1.0,
-            )
-            next_stack = stack | {item}
-            for ingredient, amount in recipe.ingredients:
-                needed = multiplier * amount / max(product_yield, 1e-9)
-                requirements[ingredient] = requirements.get(ingredient, 0.0) + needed
-                visit(ingredient, needed, next_stack)
-
-        visit(product_id, 1.0, frozenset())
+        requirements = dict(self._unit_requirements_for(product_id, frozenset()))
         requirements.pop(product_id, None)
         return requirements
+
+    def _unit_requirements_for(
+        self, item: str, stack: frozenset[str]
+    ) -> dict[str, float]:
+        """Transitive ingredient units for one unit of ``item``.
+
+        A cached map is reused only when no stack entry is reachable from the
+        item, which guarantees the stack cannot change the traversal.
+        """
+
+        if item in stack:
+            return {}
+        reachable = self._reachable_items(item)
+        cacheable = not (reachable & stack)
+        if cacheable:
+            cached = self._unit_requirements.get(item)
+            if cached is not None:
+                return cached
+        recipe = self._source.recipe(item)
+        if recipe is None:
+            return {}
+        product_yield = max(
+            (amount for name, amount in recipe.products if name == item),
+            default=1.0,
+        )
+        yield_factor = max(product_yield, 1e-9)
+        next_stack = stack | {item}
+        result: dict[str, float] = {}
+        for ingredient, amount in recipe.ingredients:
+            factor = amount / yield_factor
+            result[ingredient] = result.get(ingredient, 0.0) + factor
+            if ingredient in next_stack:
+                continue
+            for name, units in self._unit_requirements_for(
+                ingredient, next_stack
+            ).items():
+                result[name] = result.get(name, 0.0) + factor * units
+        if cacheable:
+            self._unit_requirements[item] = result
+        return result
+
+    def _reachable_items(self, item: str) -> frozenset[str]:
+        cached = self._reachable.get(item)
+        if cached is not None:
+            return cached
+        seen: set[str] = set()
+        frontier = [item]
+        while frontier:
+            current = frontier.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            recipe = self._source.recipe(current)
+            if recipe is not None:
+                frontier.extend(name for name, _ in recipe.ingredients)
+        result = frozenset(seen)
+        self._reachable[item] = result
+        return result
 
     def _derive(self, product_id: str) -> ProductFacts | None:
         recipe = self._source.recipe(product_id)
@@ -934,7 +978,11 @@ def _window_rate(
     """Per-minute production deltas between now and now-window."""
     if len(history) < 2:
         return {}
-    ordered = sorted(history, key=lambda sample: sample[0])
+    ordered = history
+    for index in range(1, len(history)):
+        if history[index - 1][0] > history[index][0]:
+            ordered = sorted(history, key=lambda sample: sample[0])
+            break
     now_tick, now_counts = ordered[-1]
     cutoff = now_tick - window_ticks
     base_counts: dict[str, float] | None = None

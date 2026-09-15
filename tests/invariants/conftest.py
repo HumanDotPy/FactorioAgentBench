@@ -67,7 +67,6 @@ def game_with_full_inventory(instance):
     }
     instance.reset()
     yield instance.namespace
-    instance.reset()
 
 
 @pytest.fixture()
@@ -94,7 +93,6 @@ def game_near_water(instance):
         game.move_to(water_pos)
 
     yield game
-    instance.reset()
 
 
 @pytest.fixture()
@@ -119,7 +117,6 @@ def game_with_power_setup(instance):
     }
     instance.reset()
     yield instance.namespace
-    instance.reset()
 
 
 @pytest.fixture()
@@ -144,4 +141,3 @@ def game_with_belts(instance):
     }
     instance.reset()
     yield instance.namespace
-    instance.reset()

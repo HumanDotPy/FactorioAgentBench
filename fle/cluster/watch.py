@@ -24,6 +24,8 @@ from fle.cluster.run_envs import (
     resolve_state_dir,
 )
 
+_rcon_clients: dict[int, RCONClient] = {}
+
 
 def _factorio_candidates(explicit: str | None = None) -> list[Path]:
     candidates: list[Path] = []
@@ -66,42 +68,48 @@ def factorio_version(executable: Path) -> str:
     return match.group(1)
 
 
-def server_version(rcon_port: int) -> str:
-    client = RCONClient("127.0.0.1", rcon_port, RCON_PASSWORD)
+def _rcon_command(rcon_port: int, command: str) -> str:
+    client = _rcon_clients.get(rcon_port)
+    if client is None:
+        client = RCONClient("127.0.0.1", rcon_port, RCON_PASSWORD)
+        _rcon_clients[rcon_port] = client
     try:
-        return client.send_command("/sc rcon.print(script.active_mods.base)").strip()
-    finally:
-        client.close()
+        return client.send_command(command)
+    except Exception:
+        _rcon_clients.pop(rcon_port, None)
+        try:
+            client.close()
+        except Exception:
+            pass
+        raise
+
+
+def server_version(rcon_port: int) -> str:
+    return _rcon_command(rcon_port, "/sc rcon.print(script.active_mods.base)").strip()
 
 
 def observer_policy_ready(rcon_port: int) -> bool:
-    client = RCONClient("127.0.0.1", rcon_port, RCON_PASSWORD)
-    try:
-        response = client.send_command(
-            "/sc rcon.print(helpers.table_to_json("
-            "remote.call('fle_runtime', 'dispatch', '__observer_status')))"
-        )
-        policy = json.loads(response)
-        return bool(
-            policy.get("runtime")
-            and policy.get("connected")
-            and policy.get("spectator")
-            and policy.get("read_only")
-        )
-    finally:
-        client.close()
+    response = _rcon_command(
+        rcon_port,
+        "/sc rcon.print(helpers.table_to_json("
+        "remote.call('fle_runtime', 'dispatch', '__observer_status')))",
+    )
+    policy = json.loads(response)
+    return bool(
+        policy.get("runtime")
+        and policy.get("connected")
+        and policy.get("spectator")
+        and policy.get("read_only")
+    )
 
 
 def runtime_ready(rcon_port: int) -> bool:
-    client = RCONClient("127.0.0.1", rcon_port, RCON_PASSWORD)
-    try:
-        response = client.send_command(
-            "/sc rcon.print(remote.interfaces['fle_runtime'] and "
-            "remote.interfaces['fle_runtime']['dispatch'] and 'true' or 'false')"
-        )
-        return response.strip() == "true"
-    finally:
-        client.close()
+    response = _rcon_command(
+        rcon_port,
+        "/sc rcon.print(remote.interfaces['fle_runtime'] and "
+        "remote.interfaces['fle_runtime']['dispatch'] and 'true' or 'false')",
+    )
+    return response.strip() == "true"
 
 
 def observer_password() -> str:
@@ -210,17 +218,14 @@ def prepare_observer_profile(executable: Path) -> Path:
 
 
 def observer_connected(rcon_port: int) -> bool:
-    client = RCONClient("127.0.0.1", rcon_port, RCON_PASSWORD)
-    try:
-        return (
-            client.send_command(
-                "/sc local p=game.get_player('fle-observer'); "
-                "rcon.print(p and p.connected and 'true' or 'false')"
-            ).strip()
-            == "true"
-        )
-    finally:
-        client.close()
+    return (
+        _rcon_command(
+            rcon_port,
+            "/sc local p=game.get_player('fle-observer'); "
+            "rcon.print(p and p.connected and 'true' or 'false')",
+        ).strip()
+        == "true"
+    )
 
 
 def enabled_client_mods() -> list[str]:

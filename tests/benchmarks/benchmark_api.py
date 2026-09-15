@@ -1,4 +1,5 @@
 import time
+from fle.commons.cluster_ips import get_local_container_ips
 from fle.env import FactorioInstance, Direction
 from entities import Position
 from game_types import Prototype, Resource
@@ -226,12 +227,16 @@ if __name__ == "__main__":
         "assembling-machine-1": 20,
         "iron-chest": 10,
     }
+    ips, _udp_ports, tcp_ports = get_local_container_ips()
     game = FactorioInstance(
-        address="localhost",
+        address=ips[0],
         bounding_box=200,
-        tcp_port=27000,
+        tcp_port=tcp_ports[0],
         fast=True,
-        cache_scripts=False,
+        cache_scripts=True,
         inventory=inventory,
     )
-    run_and_print_results(game)
+    try:
+        run_and_print_results(game)
+    finally:
+        game.cleanup()

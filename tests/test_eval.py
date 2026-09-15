@@ -1,8 +1,3 @@
-import unittest
-
-from fle.commons.cluster_ips import get_local_container_ips
-from fle.env import FactorioInstance
-
 embedded_function = """
 def inspect_inventory_wrapper():
    return inspect_inventory()
@@ -35,17 +30,7 @@ expected_result = "{'iron-chest': 2, 'transport-belt': 50, 'burner-inserter': 32
 #                            inventory=inventory)
 
 
-def test_nested_functions():
-    ips, udp_ports, tcp_ports = get_local_container_ips()
-    instance = FactorioInstance(
-        address="localhost",
-        bounding_box=200,
-        tcp_port=tcp_ports[-1],
-        fast=True,
-        # cache_scripts=False,
-        inventory={},
-    )
-
+def test_nested_functions(instance):
     score, goal, result = instance.eval_with_error("print(inspect_inventory())")
 
     # Accept both Inventory() and Inventory({}) as valid representations
@@ -57,16 +42,7 @@ def test_nested_functions():
     assert result[3:] in ("(Inventory({}),)", "(Inventory(),)")
 
 
-def test_builtin_functions():
-    instance = FactorioInstance(
-        address="localhost",
-        bounding_box=200,
-        tcp_port=27000,
-        fast=True,
-        # cache_scripts=False,
-        inventory={},
-    )
-
+def test_builtin_functions(instance):
     score, goal, result = instance.eval_with_error("print(len('hello'))")
 
     assert result[4:-2] == "5"
@@ -90,81 +66,32 @@ def test_builtin_functions():
     assert result[4:-2] == "5"
 
 
-def test_math():
-    instance = FactorioInstance(
-        address="localhost",
-        bounding_box=200,
-        tcp_port=27000,
-        fast=True,
-        # cache_scripts=False,
-        inventory={},
-    )
-
+def test_math(instance):
     score, goal, result = instance.eval_with_error("print(sqrt(100))", timeout=60)
     assert "10" in result
 
 
-def test_loop_print():
-    instance = FactorioInstance(
-        address="localhost",
-        bounding_box=200,
-        tcp_port=27000,
-        fast=True,
-        # cache_scripts=False,
-        inventory={},
-    )
-
+def test_loop_print(instance):
     score, goal, result = instance.eval_with_error(
         "for i in range(3):\n\tprint(i)", timeout=60
     )
     assert "2: (0,)\n2: (1,)\n2: (2,)" in result
 
 
-def test_name_error():
-    instance = FactorioInstance(
-        address="localhost",
-        bounding_box=200,
-        tcp_port=27000,
-        fast=True,
-        # cache_scripts=False,
-        inventory={},
-    )
-
+def test_name_error(instance):
     score, goal, result = instance.eval_with_error(
         "an_existing_variable=10\nprint(none_existing_variable)", timeout=60
     )
     assert "an_existing_variable" in result
 
 
-def test_sleep():
-    instance = FactorioInstance(
-        address="localhost",
-        bounding_box=200,
-        tcp_port=27000,
-        fast=True,
-        # cache_scripts=False,
-        inventory={},
-    )
-
+def test_sleep(instance):
     score, goal, result = instance.eval_with_error("time.sleep(10)", timeout=60)
     assert "10" in result
 
 
-def test_prototype_attribute_error():
-    instance = FactorioInstance(
-        address="localhost",
-        bounding_box=200,
-        tcp_port=27000,
-        fast=True,
-        # cache_scripts=False,
-        inventory={},
-    )
-
+def test_prototype_attribute_error(instance):
     score, goal, result = instance.eval_with_error(
         "print(Prototype.AssemblingMachine)", timeout=60
     )
     assert "AssemblingMachine1" in result
-
-
-if __name__ == "__main__":
-    unittest.main()

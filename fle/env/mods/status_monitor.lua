@@ -9,17 +9,21 @@ local machine_types = {
 
 local function monitor()
     storage.public_status_monitor = storage.public_status_monitor or {
-        entities={}, current={}, ring={}, sequence=0, count=0,
+        entities={}, current={}, ring={}, sequence=0, count=0, order={},
     }
     return storage.public_status_monitor
 end
 
+local status_names = nil
+
 local function status_name(entity)
-    local status = entity.status
-    for name, value in pairs(defines.entity_status) do
-        if value == status then return name end
+    if not status_names then
+        status_names = {}
+        for name, value in pairs(defines.entity_status) do
+            status_names[value] = name
+        end
     end
-    return "unknown"
+    return status_names[entity.status] or "unknown"
 end
 
 local function append(state, sample)
@@ -61,17 +65,36 @@ storage.utils.track_public_status = function(entity)
         or not machine_types[entity.type] then return end
     local state = monitor()
     local id = tostring(entity.surface.index) .. ":" .. tostring(entity.unit_number)
+    if not state.entities[id] then
+        state.order = state.order or {}
+        state.order[#state.order + 1] = id
+    end
     state.entities[id] = entity
     sample_entity(state, id, entity)
 end
 
 storage.utils.sample_public_status = function()
     local state = monitor()
-    -- Sort keys so event order is independent of Lua hash iteration.
-    local ids = {}
-    for id in pairs(state.entities) do ids[#ids+1] = id end
-    table.sort(ids)
-    for _, id in ipairs(ids) do sample_entity(state, id, state.entities[id]) end
+    -- Walk registration order so event order is independent of Lua hash iteration.
+    local order = state.order
+    if not order then
+        order = {}
+        for id in pairs(state.entities) do order[#order + 1] = id end
+        state.order = order
+    end
+    local write = 0
+    for read = 1, #order do
+        local id = order[read]
+        local entity = state.entities[id]
+        if entity then
+            write = write + 1
+            order[write] = id
+            sample_entity(state, id, entity)
+        end
+    end
+    for index = #order, write + 1, -1 do
+        order[index] = nil
+    end
 end
 
 storage.utils.read_public_status = function(force_index, after_sequence)

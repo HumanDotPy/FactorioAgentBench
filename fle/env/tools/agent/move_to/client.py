@@ -120,7 +120,7 @@ class MoveTo(Tool):
         deadline = start_tick + timeout_ticks
         status = {"active": True}
         while status.get("active"):
-            sleep(0.05)
+            sleep(0.1)
             status, _ = self.execute(self.player_index, "__status__", NONE, NONE, 0)
             control = getattr(self.game_state, "_program_runtime", None)
             if control is not None and control.cancelled():
@@ -131,7 +131,10 @@ class MoveTo(Tool):
                 control.boundary()
             if not isinstance(status, dict):
                 raise Exception(f"Cannot read walking status: {status}")
-            if self._game_tick() >= deadline:
+            tick = status.get("tick")
+            if tick is None:
+                tick = self._game_tick()
+            if tick >= deadline:
                 status, _ = self.execute(self.player_index, "__cancel__", NONE, NONE, 0)
                 status["stop_reason"] = "timeout"
             event = str(status.get("event") or "").lower()
@@ -145,7 +148,8 @@ class MoveTo(Tool):
         if reason == "blocked_no_progress":
             raise RuntimeError(
                 f"Movement blocked near ({final.x:.2f}, {final.y:.2f}); "
-                "the requested destination may be occupied. Use a positive "
+                f"could not escape toward ({position.x:.2f}, {position.y:.2f}). "
+                "The requested destination may be occupied; use a positive "
                 "stop_distance or call the intended interaction action directly."
             )
         return final, {

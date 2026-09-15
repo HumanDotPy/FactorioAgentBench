@@ -429,16 +429,6 @@ local function get_entity_direction(entity, direction)
         else
             return defines.direction.east
         end
-    elseif prototype and prototype.type == "inserter" then
-        if direction == defines.direction.north then
-            return defines.direction.south
-        elseif direction == defines.direction.east then
-            return defines.direction.west
-        elseif direction == defines.direction.south then
-            return defines.direction.north
-        else
-            return defines.direction.east
-        end
     elseif prototype.type == "mining-drill" then
         if direction == defines.direction.east then
             return cardinals[2]
@@ -514,56 +504,43 @@ local function get_inverse_entity_direction(entity, factorio_direction)
         end
     end
     --game.print("Getting inverse direction: " .. entity .. " with direction: " .. factorio_direction)
-    if prototype and prototype.type == "inserter" then
-        if factorio_direction == defines.direction.south then
-            return defines.direction.north
-        elseif factorio_direction == defines.direction.west then
-            return defines.direction.east
-        elseif factorio_direction == defines.direction.north then
-            return defines.direction.south
-        elseif factorio_direction == defines.direction.east then
-            return defines.direction.west
-        else
-            return -1
-        end
-    else
-        --game.print("Returning direction: " .. math.floor(factorio_direction / 2) .. ', '.. factorio_direction)
-        -- For other entity types, convert Factorio's direction to 0-3 range
-        return factorio_direction
-    end
+    -- For other entity types, convert Factorio's direction to 0-3 range
+    return factorio_direction
 end
 
 -- Helper function to check if a position is valid (not colliding with water or other impassable tiles)
+local invalid_tiles = {
+    ["water"] = true,
+    ["deepwater"] = true,
+    ["water-green"] = true,
+    ["deepwater-green"] = true,
+    ["water-shallow"] = true,
+    ["water-mud"] = true,
+}
+
 local function is_valid_connection_point(surface, position)
     -- Get the tile at the position
     local tile = surface.get_tile(position.x, position.y)
-
-    -- Check if the tile is water or other impassable tiles
-    local invalid_tiles = {
-        ["water"] = true,
-        ["deepwater"] = true,
-        ["water-green"] = true,
-        ["deepwater-green"] = true,
-        ["water-shallow"] = true,
-        ["water-mud"] = true,
-    }
 
     -- Return false if the tile is invalid, true otherwise
     return not invalid_tiles[tile.name]
 end
 
+local reverse_entity_status = nil
+
 storage.utils.entity_status_names = function(entity_status)
     local s = entity_status
     if not s then return '"normal"' end
 
-    -- try direct lookup
-    local name = defines.entity_status[s]
-    if name then return '"' .. name .. '"' end
-
-    -- fallback reverse lookup
-    for k, v in pairs(defines.entity_status) do
-        if v == s then return '"' .. k .. '"' end
+    if not reverse_entity_status then
+        reverse_entity_status = {}
+        for k, v in pairs(defines.entity_status) do
+            reverse_entity_status[v] = k
+        end
     end
+
+    local name = reverse_entity_status[s]
+    if name then return '"' .. name .. '"' end
 
     return '"normal"'
 end
@@ -635,16 +612,6 @@ storage.utils.serialize_entity = function(entity)
 
 
     --game.print("Serialized direction: ", {skip=defines.print_skip.never})
-    local s = entity.status  -- may be nil for some entities
-    local name = s and defines.entity_status[s]
-    
-    if not name and s then
-      -- robust reverse lookup
-      for k, v in pairs(defines.entity_status) do
-        if v == s then name = k; break end
-      end
-    end
-    
     local serialized = {
         id = entity.unit_number,
         name = "\""..entity.name.."\"",
@@ -1054,7 +1021,6 @@ storage.utils.serialize_entity = function(entity)
 
         -- Add fluid box information
         if entity.fluidbox and #entity.fluidbox > 0 then
-            game.print("There is a fluidbox")
             local fluid = entity.fluidbox[1]
             if fluid then
                 serialized.fluid = string.format("\"%s\"", fluid.name)
@@ -1412,3 +1378,11 @@ storage.utils.serialize_entity = function(entity)
 
     return serialized
 end
+
+script.on_nth_tick(60, function()
+    local handles = storage.entity_handles
+    if not handles then return end
+    for unit_number, entity in pairs(handles) do
+        if not entity.valid then handles[unit_number] = nil end
+    end
+end)
