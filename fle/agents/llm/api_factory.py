@@ -85,6 +85,27 @@ class APIFactory:
             api_key_config_file  # Store for child process reinitialization
         )
         self.api_key_manager = None
+        self._clients = {}
+
+    async def _get_client(self, provider_config: dict, api_key: str) -> AsyncOpenAI:
+        base_url = provider_config["base_url"]
+        cached = self._clients.get(base_url)
+        if cached is not None:
+            cached_key, client = cached
+            if cached_key == api_key and not client.is_closed():
+                return client
+            del self._clients[base_url]
+            try:
+                await client.close()
+            except Exception as e:
+                logging.warning("Failed to close rotated API client: %s", e)
+        client = AsyncOpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            max_retries=0,  # We handle retries ourselves
+        )
+        self._clients[base_url] = (api_key, client)
+        return client
 
     def _get_provider_config(self, model: str) -> dict:
         """Get provider config based on model name
@@ -128,17 +149,19 @@ class APIFactory:
                         if get_api_key_manager_func:
                             self.api_key_manager = get_api_key_manager_func(config_file)
                             logging.info(
-                                f"Reinitialized API key manager in child process: {config_file}"
+                                "Reinitialized API key manager in child process: %s",
+                                config_file,
                             )
                 except Exception as e:
                     logging.warning(
-                        f"Failed to reinitialize API key manager in child process: {e}"
+                        "Failed to reinitialize API key manager in child process: %s",
+                        e,
                     )
 
             if self.api_key_manager:
                 rotated_key = self.api_key_manager.get_key(key_manager_provider)
                 if rotated_key:
-                    logging.debug(f"Using rotated key for {key_manager_provider}")
+                    logging.debug("Using rotated key for %s", key_manager_provider)
                     return rotated_key
 
         # Fallback to environment variable
@@ -146,7 +169,7 @@ class APIFactory:
         env_key = os.getenv(env_var)
 
         if env_key:
-            logging.debug(f"Using environment key from {env_var}")
+            logging.debug("Using environment key from %s", env_var)
             return env_key
 
         # Ollama doesn't require an API key, but the OpenAI client needs something
@@ -209,11 +232,7 @@ class APIFactory:
         api_key = self._get_api_key(provider_config)
 
         # Create client
-        client = AsyncOpenAI(
-            base_url=provider_config["base_url"],
-            api_key=api_key,
-            max_retries=0,  # We handle retries ourselves
-        )
+        client = await self._get_client(provider_config, api_key)
 
         try:
             # Build the API call parameters

@@ -1,31 +1,60 @@
+local patch_renderings = {}
+
+local function render_box(player_index, surface, box)
+    for _, object in ipairs(patch_renderings[player_index] or {}) do
+        if object.valid then
+            object.destroy()
+        end
+    end
+    local left_bottom = {x=box.left_top.x, y=box.right_bottom.y}
+    local right_top = {y=box.left_top.y, x=box.right_bottom.x}
+
+    patch_renderings[player_index] = {
+        rendering.draw_circle{only_in_alt_mode=true, width = 0.5, color = {r = 1, g = 0, b = 0}, surface = surface, radius = 0.5, filled = false, target = box.left_top, time_to_live = 60000},
+        rendering.draw_circle{only_in_alt_mode=true, width = 0.5, color = {r = 0, g = 1, b = 0}, surface = surface, radius = 0.5, filled = false, target = box.right_bottom, time_to_live = 60000},
+        rendering.draw_circle{only_in_alt_mode=true, width = 0.5, color = {r = 1, g = 0, b = 1}, surface = surface, radius = 0.5, filled = false, target = left_bottom, time_to_live = 60000},
+        rendering.draw_circle{only_in_alt_mode=true, width = 0.5, color = {r = 0, g = 1, b = 1}, surface = surface, radius = 0.5, filled = false, target = right_top, time_to_live = 60000},
+    }
+end
+
 storage.actions.get_resource_patch = function(player_index, resource, x, y, radius)
     local player = storage.agent_characters[player_index]
     local position = {x = x, y = y}
     local surface = player.surface
 
-    local function render_box(box)
-        local left_bottom = {x=box.left_top.x, y=box.right_bottom.y}
-        local right_top = {y=box.left_top.y, x=box.right_bottom.x}
-
-        rendering.clear()
-        rendering.draw_circle{only_in_alt_mode=true, width = 0.5, color = {r = 1, g = 0, b = 0}, surface = surface, radius = 0.5, filled = false, target = box.left_top, time_to_live = 60000}
-        rendering.draw_circle{only_in_alt_mode=true, width = 0.5, color = {r = 0, g = 1, b = 0}, surface = surface, radius = 0.5, filled = false, target = box.right_bottom, time_to_live = 60000}
-        rendering.draw_circle{only_in_alt_mode=true, width = 0.5, color = {r = 1, g = 0, b = 1}, surface = surface, radius = 0.5, filled = false, target = left_bottom, time_to_live = 60000}
-        rendering.draw_circle{only_in_alt_mode=true, width = 0.5, color = {r = 0, g = 1, b = 1}, surface = surface, radius = 0.5, filled = false, target = right_top, time_to_live = 60000}
-
-    end
     -- Function to expand bounding box
-    local function expand_bounding_box(box, pos)
-        box.left_top.x = math.min(box.left_top.x, pos.x)
-        box.left_top.y = math.min(box.left_top.y, pos.y)
-        box.right_bottom.x = math.max(box.right_bottom.x, pos.x)
-        box.right_bottom.y = math.max(box.right_bottom.y, pos.y)
-
-
+    local bounding_box = nil
+    local function expand_bounding_box(other)
+        if not other or not other.left_top or not other.right_bottom then
+            return
+        end
+        if not bounding_box then
+            bounding_box = {
+                left_top = {x = other.left_top.x, y = other.left_top.y},
+                right_bottom = {x = other.right_bottom.x, y = other.right_bottom.y},
+            }
+            return
+        end
+        bounding_box.left_top.x = math.min(bounding_box.left_top.x, other.left_top.x)
+        bounding_box.left_top.y = math.min(bounding_box.left_top.y, other.left_top.y)
+        bounding_box.right_bottom.x = math.max(bounding_box.right_bottom.x, other.right_bottom.x)
+        bounding_box.right_bottom.y = math.max(bounding_box.right_bottom.y, other.right_bottom.y)
     end
 
-    -- Initialize bounding box
-    local bounding_box = {left_top = {x = x, y = y}, right_bottom = {x = x, y = y}}
+    local function tile_box(position)
+        return {
+            left_top = {x = position.x - 0.5, y = position.y - 0.5},
+            right_bottom = {x = position.x + 0.5, y = position.y + 0.5},
+        }
+    end
+
+    local function entity_box(entity)
+        local ok, box = pcall(function() return entity.bounding_box end)
+        if ok and box and box.left_top and box.right_bottom then
+            return box
+        end
+        return tile_box(entity.position)
+    end
 
     if resource == "water" then
         local water_tiles = surface.find_tiles_filtered{position = position, name = "water", radius = radius}
@@ -35,14 +64,10 @@ storage.actions.get_resource_patch = function(player_index, resource, x, y, radi
 
         local total_water_tiles = 0
         for _, tile in pairs(water_tiles) do
-            expand_bounding_box(bounding_box, tile.position)
+            expand_bounding_box(tile_box(tile.position))
             total_water_tiles = total_water_tiles + 1
         end
-        bounding_box.left_top.x = bounding_box.left_top.x - 0.5
-        bounding_box.left_top.y = bounding_box.left_top.y - 0.5
-        bounding_box.right_bottom.y = bounding_box.right_bottom.y + 1.5
-        bounding_box.right_bottom.x = bounding_box.right_bottom.x + 1.5
-        render_box(bounding_box)
+        render_box(player_index, surface, bounding_box)
         return {bounding_box = bounding_box, size = total_water_tiles}
     elseif resource == "wood" then
         local trees = surface.find_entities_filtered{
@@ -55,7 +80,7 @@ storage.actions.get_resource_patch = function(player_index, resource, x, y, radi
         end
         local total_wood = 0
         for _, tree in pairs(trees) do
-            expand_bounding_box(bounding_box, tree.position)
+            expand_bounding_box(entity_box(tree))
             -- Estimate wood amount based on tree prototype
             local tree_product = tree.prototype.mineable_properties.products[1]
             if tree_product and tree_product.name == "wood" then
@@ -65,7 +90,7 @@ storage.actions.get_resource_patch = function(player_index, resource, x, y, radi
                 total_wood = total_wood + 1
             end
         end
-        render_box(bounding_box)
+        render_box(player_index, surface, bounding_box)
         return {bounding_box = bounding_box, size = total_wood}
     else
         local resource_entities = surface.find_entities_filtered{position = position, name = resource, radius = radius}
@@ -73,33 +98,62 @@ storage.actions.get_resource_patch = function(player_index, resource, x, y, radi
             error("\"No resource of type " .. resource .. " at the specified location.\"")
         end
 
-        -- Recursive function to explore all connected resource entities
-        local function explore_resource_patch(entity, visited)
-            local key = entity.position.x .. "," .. entity.position.y
-            if visited[key] then
-                return 0
-            end
-            visited[key] = true
-            expand_bounding_box(bounding_box, entity.position)
-            local resource_count = entity.amount
-
-            local neighbors = surface.find_entities_filtered{
-                area = {{entity.position.x - 1, entity.position.y - 1}, {entity.position.x + 1, entity.position.y + 1}},
-                type = "resource",
-                name = resource
+        -- Query a growing area once per size and flood fill in memory. The
+        -- recursive per-tile engine query is no longer needed.
+        local seed = resource_entities[1]
+        local search_radius = radius
+        local total_resource = 0
+        while true do
+            local entities = surface.find_entities_filtered{
+                position = position, name = resource, radius = search_radius
             }
-            for _, neighbor in pairs(neighbors) do
-                if neighbor ~= entity then
-                    resource_count = resource_count + explore_resource_patch(neighbor, visited)
+            local index = {}
+            for _, entity in ipairs(entities) do
+                index[entity.position.x .. "," .. entity.position.y] = entity
+            end
+            index[seed.position.x .. "," .. seed.position.y] = seed
+
+            local visited = {}
+            local queue = {seed}
+            local head = 1
+            local touches_boundary = false
+            visited[seed.position.x .. "," .. seed.position.y] = true
+            total_resource = 0
+
+            while head <= #queue do
+                local entity = queue[head]
+                head = head + 1
+                total_resource = total_resource + entity.amount
+                expand_bounding_box(entity_box(entity))
+
+                local ex, ey = entity.position.x, entity.position.y
+                if math.abs(ex - position.x) >= search_radius - 1
+                    or math.abs(ey - position.y) >= search_radius - 1
+                then
+                    touches_boundary = true
+                end
+
+                for dx = -1, 1 do
+                    for dy = -1, 1 do
+                        if dx ~= 0 or dy ~= 0 then
+                            local key = (ex + dx) .. "," .. (ey + dy)
+                            local neighbor = index[key]
+                            if neighbor and not visited[key] then
+                                visited[key] = true
+                                queue[#queue + 1] = neighbor
+                            end
+                        end
+                    end
                 end
             end
-            return resource_count
+
+            if not touches_boundary then
+                break
+            end
+            search_radius = search_radius > 0 and search_radius * 2 or 1
         end
 
-        local visited = {}
-        local total_resource = explore_resource_patch(resource_entities[1], visited)
-
-        render_box(bounding_box)
+        render_box(player_index, surface, bounding_box)
         return {bounding_box = bounding_box, size = total_resource}
     end
 end

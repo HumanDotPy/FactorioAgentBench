@@ -39,9 +39,11 @@ CLAUDE.md
 api_keys.json
 /log/
 /runtime/
+/.runtime/
 *.log
 *.trace
 *.jsonl
+!data/recipes/recipes.jsonl
 
 # Database
 .fle/

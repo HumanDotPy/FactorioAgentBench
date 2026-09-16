@@ -8,6 +8,22 @@ from fle.env.tools.admin.render.utils.colour_manager import ColourManager
 from fle.env.tools.admin.render.utils.entity_categoriser import EntityCategoriser
 from fle.env.tools.admin.render.utils.shape_renderer import ShapeRenderer
 
+_FONT_CACHE: Dict[int, ImageFont.ImageFont] = {}
+
+
+def _get_cached_font(size: int) -> ImageFont.ImageFont:
+    font = _FONT_CACHE.get(size)
+    if font is None:
+        try:
+            font = ImageFont.truetype("arial.ttf", size=size)
+        except IOError:
+            try:
+                font = ImageFont.truetype("DejaVuSans.ttf", size=size)
+            except IOError:
+                font = ImageFont.load_default()
+        _FONT_CACHE[size] = font
+    return font
+
 
 class LegendRenderer:
     """Renders legends for Factorio entities visualization"""
@@ -94,13 +110,7 @@ class LegendRenderer:
 
         # Try to load a font for text measurement - use consistent font size for legend
         legend_font_size = self.config.style.get("legend_font_size", 10)
-        try:
-            font = ImageFont.truetype("arial.ttf", size=legend_font_size)
-        except IOError:
-            try:
-                font = ImageFont.truetype("DejaVuSans.ttf", size=legend_font_size)
-            except IOError:
-                font = ImageFont.load_default()
+        font = _get_cached_font(legend_font_size)
 
         # Settings were already loaded above - no need to redefine
         category_spacing = item_spacing * 2
@@ -379,6 +389,7 @@ class LegendRenderer:
         natural_elements_present: Optional[Set[str]] = None,
         statuses_present: Optional[Set[EntityStatus]] = None,
         electricity_networks: Optional[Dict[int, tuple]] = None,
+        dimensions: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Draw a combined legend showing entity types with their actual shapes and colors"""
         if not self.config.style["legend_enabled"]:
@@ -390,15 +401,16 @@ class LegendRenderer:
         item_spacing = self.config.style["legend_item_spacing"]
         category_spacing = item_spacing * 2
 
-        # Calculate legend dimensions
-        dimensions = self.calculate_legend_dimensions(
-            img_width,
-            img_height,
-            resources_present,
-            natural_elements_present,
-            statuses_present,
-            electricity_networks,
-        )
+        # Calculate legend dimensions unless the caller already did
+        if dimensions is None:
+            dimensions = self.calculate_legend_dimensions(
+                img_width,
+                img_height,
+                resources_present,
+                natural_elements_present,
+                statuses_present,
+                electricity_networks,
+            )
         legend_width = dimensions["width"]
         legend_height = dimensions["height"]
         num_columns = dimensions["num_columns"]

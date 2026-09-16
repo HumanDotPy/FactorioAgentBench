@@ -33,7 +33,8 @@ def fle_cluster(args):
     if command == "start":
         manager.start(
             num_instances=getattr(args, "n", None) or 1,
-            scenario=getattr(args, "s", None) or "default_lab_scenario",
+            scenario=getattr(args, "s", None) or "open_world",
+            map_gen_seed=getattr(args, "map_seed", None) or 44340,
         )
     elif command == "stop":
         manager.stop()
@@ -44,8 +45,23 @@ def fle_cluster(args):
     elif command == "help":
         print(
             "Usage: fle cluster [start|stop|restart|logs|help] "
-            "[SERVICE] [-n N] [-s SCENARIO]"
+            "[SERVICE] [-n N] [-s SCENARIO] [--map-seed SEED]"
         )
+
+
+def fle_watch(args):
+    """Validate or launch the read-only graphical observer client."""
+    from fle.cluster.watch import watch
+
+    try:
+        watch(
+            instance=args.instance,
+            factorio_exe=args.factorio_exe,
+            check_only=args.check,
+        )
+    except RuntimeError as exc:
+        print(f"Observer preflight failed: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
 
 
 def fle_eval(args):
@@ -280,6 +296,7 @@ def fle_inspect_eval(args):
             print("Checking Factorio server availability...")
             import socket
             import time as _time
+            from concurrent.futures import ThreadPoolExecutor
 
             def check_port(host, port, timeout=2):
                 try:
@@ -292,11 +309,12 @@ def fle_inspect_eval(args):
                     return False
 
             def _count_reachable(n):
-                found = []
-                for i in range(n):
-                    if check_port("localhost", 27000 + i, timeout=1):
-                        found.append(f"factorio_{i}")
-                return found
+                def probe(i):
+                    return i, check_port("localhost", 27000 + i, timeout=1)
+
+                with ThreadPoolExecutor(max_workers=n) as executor:
+                    results = list(executor.map(probe, range(n)))
+                return [f"factorio_{i}" for i, reachable in results if reachable]
 
             # Determine how many servers we need
             needed = min(
@@ -326,7 +344,7 @@ def fle_inspect_eval(args):
                     manager = ClusterManager()
                     manager.start(
                         num_instances=needed,
-                        scenario=getattr(args, "scenario", "default_lab_scenario"),
+                        scenario=getattr(args, "scenario", "open_world"),
                     )
 
                     # Wait for servers to become reachable
@@ -572,6 +590,7 @@ Examples:
   # Other commands
   fle eval --config configs/gym_run_config.json
   fle cluster [start|stop|restart|help] [-n N] [-s SCENARIO]
+  fle watch [--check] [--instance N]
   fle sprites [--force] [--workers N]
         """,
     )
@@ -596,8 +615,26 @@ Examples:
         type=str,
         help="Scenario (open_world or default_lab_scenario)",
     )
+    parser_cluster.add_argument(
+        "--map-seed",
+        type=int,
+        default=44340,
+        help="Factorio map-generation seed (default: 44340)",
+    )
     parser_eval = subparsers.add_parser("eval", help="Run experiment")
     parser_eval.add_argument("--config", required=True, help="Path to run config JSON")
+    parser_watch = subparsers.add_parser(
+        "watch", help="Launch a read-only Factorio spectator client"
+    )
+    parser_watch.add_argument(
+        "--instance", type=int, default=0, help="Cluster instance index (default: 0)"
+    )
+    parser_watch.add_argument(
+        "--factorio-exe", help="Path to factorio.exe (or set FACTORIO_EXE)"
+    )
+    parser_watch.add_argument(
+        "--check", action="store_true", help="Validate compatibility without launching"
+    )
 
     parser_inspect = subparsers.add_parser(
         "inspect-eval", help="Run evaluation using Inspect framework"
@@ -715,8 +752,8 @@ Examples:
     parser_inspect.add_argument(
         "--scenario",
         type=str,
-        default="default_lab_scenario",
-        help="Factorio scenario to load (default: default_lab_scenario)",
+        default="open_world",
+        help="Factorio scenario to load (default: open_world)",
     )
 
     parser_sprites = subparsers.add_parser(
@@ -764,6 +801,8 @@ Examples:
         fle_cluster(args)
     elif args.command == "eval":
         fle_eval(args)
+    elif args.command == "watch":
+        fle_watch(args)
     elif args.command == "inspect-eval":
         fle_inspect_eval(args)
     elif args.command == "sprites":

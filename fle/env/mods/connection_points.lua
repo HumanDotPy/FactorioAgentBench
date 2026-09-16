@@ -1,300 +1,164 @@
--- This is primarily used to get the connection points of entities for the purpose of blocking them during pathing.
--- This is to prevent bad cases where connections are blocked by belts / pipes etc.
-
--- Function to get connection points for storage tanks based on their direction
-storage.utils.get_storage_tank_connection_points = function(entity)
-    local x, y = entity.position.x, entity.position.y
-    local connection_points = {}
-
-    -- Storage tanks have two possible orientations:
-    -- 1. TopRight/BottomLeft connections (direction = 0 or direction = 2)
-    -- 2. TopLeft/BottomRight connections (direction = 1 or direction = 3)
-
-    -- Note: entity.direction is in Factorio's 16-way direction system (0-14)
-    -- We need to handle both orientations (east/south and north/west)
-    -- Factorio 2.0: north=0, east=4, south=8, west=12
-    if entity.direction == defines.direction.east or entity.direction == defines.direction.south then
-        -- TopRight/BottomLeft connections
-        table.insert(connection_points, {x = x + 1, y = y - 2})  -- Top right - Top
-        table.insert(connection_points, {x = x + 2, y = y - 1})  -- Top right - Right
-
-        table.insert(connection_points, {x = x - 1, y = y + 2})  -- Bottom left - Bottom
-        table.insert(connection_points, {x = x - 2, y = y + 1})  -- Bottom left - Left
-    else
-        -- TopLeft/BottomRight connections
-        table.insert(connection_points, {x = x - 1, y = y - 2})  -- Top left - Top
-        table.insert(connection_points, {x = x - 2, y = y - 1})  -- Top left - Left
-
-        table.insert(connection_points, {x = x + 1, y = y + 2})  -- Bottom right - Bottom
-        table.insert(connection_points, {x = x + 2, y = y + 1})  -- Bottom right - Right
-
-    end
-
-    return connection_points
-end
-
-storage.utils.get_chemical_plant_connection_points = function(plant)
+local function offset_positions(x, y, offsets)
     local positions = {}
-    local x, y = plant.position.x, plant.position.y
-
-    if plant.direction == defines.direction.north then
-        -- Input pipes
-        table.insert(positions, {x = x - 1, y = y + 1.5})
-        table.insert(positions, {x = x + 1, y = y + 1.5})
-        -- Output pipes
-        table.insert(positions, {x = x - 1, y = y - 1.5})
-        table.insert(positions, {x = x + 1, y = y - 1.5})
-    elseif plant.direction == defines.direction.south then
-        -- Input pipes
-        table.insert(positions, {x = x - 1, y = y - 1.5})
-        table.insert(positions, {x = x + 1, y = y - 1.5})
-        -- Output pipes
-        table.insert(positions, {x = x - 1, y = y + 1.5})
-        table.insert(positions, {x = x + 1, y = y + 1.5})
-    elseif plant.direction == defines.direction.east then
-        -- Input pipes
-        table.insert(positions, {x = x - 1.5, y = y - 1})
-        table.insert(positions, {x = x - 1.5, y = y + 1})
-        -- Output pipes
-        table.insert(positions, {x = x + 1.5, y = y - 1})
-        table.insert(positions, {x = x + 1.5, y = y + 1})
-    elseif plant.direction == defines.direction.west then
-        -- Input pipes
-        table.insert(positions, {x = x + 1.5, y = y - 1})
-        table.insert(positions, {x = x + 1.5, y = y + 1})
-        -- Output pipes
-        table.insert(positions, {x = x - 1.5, y = y - 1})
-        table.insert(positions, {x = x - 1.5, y = y + 1})
+    for _, offset in ipairs(offsets) do
+        positions[#positions + 1] = {x = x + offset[1], y = y + offset[2]}
     end
-
     return positions
 end
 
-
-storage.utils.get_generator_connection_positions = function(entity)
-    local x, y = entity.position.x, entity.position.y
-    local orientation = entity.orientation
-    local entity_prototype = prototypes.entity[entity.name]
-    local dx, dy = 0, 0
-    local offsetx, offsety = 0, 0
-    if orientation == 0 or orientation == defines.direction.north then
-        dx, dy = 0, -1
-        --offsetx, offsety = 0, 0
-    elseif orientation == 0.25 or orientation == defines.direction.east then
-        dx, dy = 1, 0
-        --offsetx, offsety = -0.5, 0
-    elseif orientation == 0.5 or orientation == defines.direction.south then
-        dx, dy = 0, -1
-        --offsetx, offsety = 0, -0.5
-    elseif orientation == 0.75 or orientation == defines.direction.west then
-        dx, dy = 1, 0
-        --offsetx, offsety = 0, 0
-    else
-        -- Log detailed information about the unexpected orientation
-        local orientation_info = string.format(
-            "Numeric value: %s, Type: %s, Defines values: N=%s, E=%s, S=%s, W=%s",
-            tostring(orientation),
-            type(orientation),
-            tostring(defines.direction.north),
-            tostring(defines.direction.east),
-            tostring(defines.direction.south),
-            tostring(defines.direction.west)
-        )
-        error(string.format(
-            "Unexpected orientation for entity: %s at position: %s. Orientation info: %s",
-            entity.name,
-            serpent.line(entity.position),
-            orientation_info
-        ))
+local function flatten(groups)
+    local positions = {}
+    for _, group in ipairs(groups) do
+        for _, position in ipairs(group) do
+            positions[#positions + 1] = position
+        end
     end
-    local height = entity_prototype.tile_height/2
-    local pipe_positions = {
-        {x = x + (height*dx) + offsetx, y = y + (height*dy) + offsety},
-        {x = x - (height*dx) + offsetx, y = y - (height*dy) + offsety}
-    }
-
-    return pipe_positions
+    return positions
 end
 
-storage.utils.get_pumpjack_connection_points = function(entity)
-    local x, y = entity.position.x, entity.position.y
-    local orientation = entity.orientation
+local storage_tank_offsets = {
+    [defines.direction.north] = {{-2, -1}, {-1, -2}, {1, 2}, {2, 1}},
+    [defines.direction.south] = {{-2, -1}, {-1, -2}, {1, 2}, {2, 1}},
+    [defines.direction.east] = {{-2, 1}, {-1, 2}, {1, -2}, {2, -1}},
+    [defines.direction.west] = {{-2, 1}, {-1, 2}, {1, -2}, {2, -1}},
+}
 
-    local dx, dy
-    if orientation == 0 or orientation == defines.direction.north then
-        dx, dy = 1, -2
-    elseif orientation == 0.25 or orientation == defines.direction.east then
-        dx, dy = 2, -1
-    elseif orientation == 0.5 or orientation == defines.direction.south then
-        dx, dy = -1, 2
-    elseif orientation == 0.75 or orientation == defines.direction.west then
-        dx, dy = -2, 1
-    end
+storage.utils.get_storage_tank_connection_points = function(entity)
+    local offsets = storage_tank_offsets[entity.direction]
+        or storage_tank_offsets[defines.direction.north]
+    return offset_positions(entity.position.x, entity.position.y, offsets)
+end
 
-    local pipe_position = {{x = x + dx, y = y + dy}}
+local chemical_plant_offsets = {
+    [defines.direction.north] = {
+        {{-1, -2}, {1, -2}},
+        {{-1, 2}, {1, 2}},
+    },
+    [defines.direction.east] = {
+        {{2, -1}, {2, 1}},
+        {{-2, -1}, {-2, 1}},
+    },
+    [defines.direction.south] = {
+        {{-1, 2}, {1, 2}},
+        {{-1, -2}, {1, -2}},
+    },
+    [defines.direction.west] = {
+        {{-2, -1}, {-2, 1}},
+        {{2, -1}, {2, 1}},
+    },
+}
 
-    return pipe_position
+storage.utils.get_chemical_plant_connection_points = function(plant)
+    local groups = chemical_plant_offsets[plant.direction]
+        or chemical_plant_offsets[defines.direction.north]
+    return offset_positions(plant.position.x, plant.position.y, flatten(groups))
+end
+
+local boiler_offsets = {
+    [defines.direction.north] = {{-2, 0.5}, {2, 0.5}, {0, -1.5}},
+    [defines.direction.south] = {{-2, -0.5}, {2, -0.5}, {0, 1.5}},
+    [defines.direction.east] = {{-0.5, -2}, {-0.5, 2}, {1.5, 0}},
+    [defines.direction.west] = {{0.5, -2}, {0.5, 2}, {-1.5, 0}},
+}
+
+storage.utils.get_heat_exchanger_connection_points = function(entity)
+    local offsets = boiler_offsets[entity.direction]
+        or boiler_offsets[defines.direction.north]
+    return offset_positions(entity.position.x, entity.position.y, offsets)
 end
 
 storage.utils.get_boiler_connection_points = function(entity)
-    local x, y = entity.position.x, entity.position.y
-    -- Factorio 2.0: orientation is 0, 0.25, 0.5, 0.75 for cardinals
-    -- defines.direction values are 0, 4, 8, 12 (16-direction system)
-    local orientation = entity.orientation * 16
-
-    local dx, dy = 0, 0
-    if orientation == defines.direction.north then
-        dx, dy = 1.5, 0.5
-        local pipe_positions = {
-            --water_inputs = water_inputs,
-            --steam_output = {x = x, y = y - 1*dy}
-            {x = x + 1*dx, y = y + 1*dy},
-            {x = x - 1*dx, y = y + 1*dy},
-            {x = x, y = y - 1*dy}
-        }
-    
-        return pipe_positions
-    elseif orientation == defines.direction.south then
-        dx, dy = -1.5, -0.5
-        local pipe_positions = {
-            --water_inputs = water_inputs,
-            --steam_output = {x = x, y = y - 1*dy}
-            {x = x + 1*dx, y = y + 1*dy},
-            {x = x - 1*dx, y = y + 1*dy},
-            {x = x, y = y - 1*dy}
-        }
-        return pipe_positions
-    elseif orientation == defines.direction.east then
-        dx, dy = 0.5, 1.5
-        local pipe_positions = {
-            --water_inputs = water_inputs,
-            --steam_output = {x = x, y = y - 1*dy}
-            {x = x + 1*dx, y = y + 1*dy},
-            {x = x + 1*dx, y = y - 1*dy},
-            {x = x - 1*dx, y = y}
-        }
-        return pipe_positions
-    elseif orientation == defines.direction.west then
-        dx, dy = -0.5, -1.5
-        local pipe_positions = {
-            --water_inputs = water_inputs,
-            --steam_output = {x = x, y = y - 1*dy}
-            {x = x + 1*dx, y = y + 1*dy},
-            {x = x + 1*dx, y = y - 1*dy},
-            {x = x - 1*dx, y = y}
-        }
-    
-        return pipe_positions
-    end
-    --local water_inputs = {}
-    --water_inputs[1] = {x = x + 1*dx, y = y + 1*dy}
-    --water_inputs[2] = {x = x - 1*dx, y = y - 1*dy}
-
-    --local pipe_positions = {
-    --    --water_inputs = water_inputs,
-    --    --steam_output = {x = x, y = y - 1*dy}
-    --    {x = x + 1*dx, y = y + 1*dy},
-    --    {x = x - 1*dx, y = y + 1*dy},
-    --    {x = x, y = y - 1*dy}
-    --}
-    --return pipe_positions
+    local offsets = boiler_offsets[entity.direction]
+        or boiler_offsets[defines.direction.north]
+    return offset_positions(entity.position.x, entity.position.y, offsets)
 end
+
+local generator_axis_offsets = {
+    [defines.direction.north] = {{0, -3}, {0, 3}},
+    [defines.direction.south] = {{0, -3}, {0, 3}},
+    [defines.direction.east] = {{-3, 0}, {3, 0}},
+    [defines.direction.west] = {{-3, 0}, {3, 0}},
+}
+
+storage.utils.get_generator_connection_positions = function(entity)
+    local offsets = generator_axis_offsets[entity.direction]
+        or generator_axis_offsets[defines.direction.north]
+    return offset_positions(entity.position.x, entity.position.y, offsets)
+end
+
+local pumpjack_offsets = {
+    [defines.direction.north] = {{1, -2}},
+    [defines.direction.east] = {{2, -1}},
+    [defines.direction.south] = {{-1, 2}},
+    [defines.direction.west] = {{-2, 1}},
+}
+
+storage.utils.get_pumpjack_connection_points = function(entity)
+    local offsets = pumpjack_offsets[entity.direction]
+        or pumpjack_offsets[defines.direction.north]
+    return offset_positions(entity.position.x, entity.position.y, offsets)
+end
+
+local offshore_pump_output_offsets = {
+    [defines.direction.north] = {{0, 1}},
+    [defines.direction.south] = {{0, -1}},
+    [defines.direction.east] = {{-1, 0}},
+    [defines.direction.west] = {{1, 0}},
+}
 
 storage.utils.get_offshore_pump_connection_points = function(entity)
-    local x, y = entity.position.x, entity.position.y
-    -- Factorio 2.0: orientation is 0, 0.25, 0.5, 0.75 for cardinals
-    -- defines.direction values are 0, 4, 8, 12 (16-direction system)
-    local orientation = entity.orientation * 16
-
-    local dx, dy
-    if orientation == defines.direction.north then
-        dx, dy = 0, 1
-    elseif orientation == defines.direction.south then
-        dx, dy = 0, -1
-    elseif orientation == defines.direction.east then
-        dx, dy = -1, 0
-    elseif orientation == defines.direction.west then
-        dx, dy = 1, 0
-    end
-
-    if dy == nil then
-        return { {x = x, y = y - 1} }
-    end
-
-    return { {x = x + dx, y = y + dy} }
+    local offsets = offshore_pump_output_offsets[entity.direction]
+        or offshore_pump_output_offsets[defines.direction.north]
+    return offset_positions(entity.position.x, entity.position.y, offsets)
 end
 
+local refinery_offsets = {
+    [defines.direction.north] = {
+        {{-1, 3}, {1, 3}},
+        {{-2, -3}, {0, -3}, {2, -3}},
+    },
+    [defines.direction.south] = {
+        {{-1, -3}, {1, -3}},
+        {{-2, 3}, {0, 3}, {2, 3}},
+    },
+    [defines.direction.east] = {
+        {{-3, -1}, {-3, 1}},
+        {{3, -2}, {3, 0}, {3, 2}},
+    },
+    [defines.direction.west] = {
+        {{3, -1}, {3, 1}},
+        {{-3, -2}, {-3, 0}, {-3, 2}},
+    },
+}
+
 storage.utils.get_refinery_connection_points = function(refinery)
-    -- Block the middle input point also
-    local positions = {}
-    local x, y = refinery.position.x, refinery.position.y
+    local groups = refinery_offsets[refinery.direction]
+        or refinery_offsets[defines.direction.north]
+    return offset_positions(refinery.position.x, refinery.position.y, flatten(groups))
+end
 
-    if refinery.direction == defines.direction.north then
-        -- Crude oil input
-        table.insert(positions, {x = x+1, y = y + 3})
-        --table.insert(positions, {x = x+1, y = y + 4}) -- additional clearance
-        table.insert(positions, {x = x-1, y = y + 3})
-        --table.insert(positions, {x = x-1, y = y + 4}) -- additional clearance
+local pipe_to_ground_offsets = {
+    [defines.direction.north] = {{0, -1}},
+    [defines.direction.south] = {{0, 1}},
+    [defines.direction.east] = {{1, 0}},
+    [defines.direction.west] = {{-1, 0}},
+}
 
-        table.insert(positions, {x = x, y = y + 3})
+storage.utils.get_pipe_to_ground_connection_points = function(entity)
+    local offsets = pipe_to_ground_offsets[entity.direction]
+        or pipe_to_ground_offsets[defines.direction.north]
+    return offset_positions(entity.position.x, entity.position.y, offsets)
+end
 
-        -- Outputs (petroleum, light oil, heavy oil)
-        table.insert(positions, {x = x - 2, y = y - 3})
-        --table.insert(positions, {x = x - 2, y = y - 4}) -- additional clearance
+local pump_offsets = {
+    [defines.direction.north] = {{0, -1.5}, {0, 1.5}},
+    [defines.direction.south] = {{0, -1.5}, {0, 1.5}},
+    [defines.direction.east] = {{-1.5, 0}, {1.5, 0}},
+    [defines.direction.west] = {{-1.5, 0}, {1.5, 0}},
+}
 
-        table.insert(positions, {x = x - 1, y = y - 3})
-
-        table.insert(positions, {x = x, y = y - 3})
-        --table.insert(positions, {x = x, y = y - 4}) -- additional clearance
-
-        table.insert(positions, {x = x + 1, y = y - 3})
-
-        table.insert(positions, {x = x + 2, y = y - 3})
-        --table.insert(positions, {x = x + 2, y = y - 4}) -- additional clearance
-    elseif refinery.direction == defines.direction.south then
-        -- Crude oil input
-        table.insert(positions, {x = x+1, y = y - 3})
-        --table.insert(positions, {x = x+1, y = y - 4}) -- additional clearance
-
-        table.insert(positions, {x = x, y = y - 3})
-        table.insert(positions, {x = x-1, y = y - 3})
-        --table.insert(positions, {x = x-1, y = y - 4}) -- additional clearance
-
-        -- Outputs
-        table.insert(positions, {x = x - 2, y = y + 3})
-        --table.insert(positions, {x = x - 2, y = y + 4}) -- additional clearance
-
-        table.insert(positions, {x = x - 1, y = y + 3})
-        table.insert(positions, {x = x, y = y + 3})
-        --table.insert(positions, {x = x, y = y + 4}) -- additional clearance
-        table.insert(positions, {x = x + 2, y = y + 3})
-        --table.insert(positions, {x = x + 2, y = y + 4}) -- additional clearance
-        table.insert(positions, {x = x + 1, y = y + 3})
-    elseif refinery.direction == defines.direction.east then
-        -- Crude oil input
-        table.insert(positions, {x = x - 3, y = y+1})
-        table.insert(positions, {x = x - 4, y = y+1})
-        table.insert(positions, {x = x - 3, y = y})
-        table.insert(positions, {x = x - 3, y = y-1})
-        table.insert(positions, {x = x - 4, y = y-1})
-        -- Outputs
-        table.insert(positions, {x = x + 3, y = y - 2})
-        table.insert(positions, {x = x + 3, y = y - 1})
-        table.insert(positions, {x = x + 3, y = y})
-        table.insert(positions, {x = x + 3, y = y + 1})
-        table.insert(positions, {x = x + 3, y = y + 2})
-    elseif refinery.direction == defines.direction.west then
-        -- Crude oil input
-        table.insert(positions, {x = x + 3, y = y+1})
-        table.insert(positions, {x = x + 3, y = y})
-        table.insert(positions, {x = x + 3, y = y-1})
-        -- Outputs
-        table.insert(positions, {x = x - 3, y = y - 2})
-        table.insert(positions, {x = x - 3, y = y - 1})
-        table.insert(positions, {x = x - 3, y = y})
-        table.insert(positions, {x = x - 3, y = y + 1})
-        table.insert(positions, {x = x - 3, y = y + 2})
-    end
-
-    return positions
+storage.utils.get_pump_connection_points = function(entity)
+    local offsets = pump_offsets[entity.direction]
+        or pump_offsets[defines.direction.north]
+    return offset_positions(entity.position.x, entity.position.y, offsets)
 end

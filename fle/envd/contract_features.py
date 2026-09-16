@@ -231,7 +231,7 @@ class NamespaceRecipeDataSource(RecipeDataSource):
     telemetry cache.
     """
 
-    def __init__(self, namespace: Any, game_version: str = "2.0.73"):
+    def __init__(self, namespace: Any, game_version: str = "2.0.77"):
         super().__init__(game_version=game_version)
         self._namespace = namespace
         self._research_state = None
@@ -259,11 +259,15 @@ class NamespaceRecipeDataSource(RecipeDataSource):
             category=_clean_name(raw.get("category", "crafting")),
             energy_seconds=_num(raw.get("energy"), 0.5),
             ingredients=tuple(
-                sorted((_clean_name(i["name"]), _num(i["amount"])) for i in ingredients)
+                sorted(
+                    (_clean_name(i["name"]), _num(i.get("amount", i.get("count"))))
+                    for i in ingredients
+                )
             ),
             products=tuple(
                 sorted(
-                    (_clean_name(p["name"]), _num(p["amount"], 1.0)) for p in products
+                    (_clean_name(p["name"]), _num(p.get("amount", p.get("count")), 1.0))
+                    for p in products
                 )
             ),
             enabled=(
@@ -338,6 +342,8 @@ class ProductCatalog:
         self._tech_closure: dict[str, frozenset[str]] = {}
         self._intermediates: dict[str, frozenset[str]] = {}
         self._chain_seconds: dict[str, float] = {}
+        self._unit_requirements: dict[str, dict[str, float]] = {}
+        self._reachable: dict[str, frozenset[str]] = {}
 
     @property
     def game_version(self) -> str:
@@ -356,6 +362,77 @@ class ProductCatalog:
                 f"(version {self.game_version})"
             )
         return facts
+
+    def supply_chain_requirements(self, product_id: str) -> dict[str, float]:
+        """Return recursive ingredient units required per unit of ``product_id``.
+
+        Every intermediate and raw input is retained in the result. This makes
+        the mapping suitable for an autonomous closure certificate: producing
+        only the final item from a finite upstream stock cannot satisfy it.
+        Cyclic catalyst edges are ignored conservatively.
+        """
+
+        requirements = dict(self._unit_requirements_for(product_id, frozenset()))
+        requirements.pop(product_id, None)
+        return requirements
+
+    def _unit_requirements_for(
+        self, item: str, stack: frozenset[str]
+    ) -> dict[str, float]:
+        """Transitive ingredient units for one unit of ``item``.
+
+        A cached map is reused only when no stack entry is reachable from the
+        item, which guarantees the stack cannot change the traversal.
+        """
+
+        if item in stack:
+            return {}
+        reachable = self._reachable_items(item)
+        cacheable = not (reachable & stack)
+        if cacheable:
+            cached = self._unit_requirements.get(item)
+            if cached is not None:
+                return cached
+        recipe = self._source.recipe(item)
+        if recipe is None:
+            return {}
+        product_yield = max(
+            (amount for name, amount in recipe.products if name == item),
+            default=1.0,
+        )
+        yield_factor = max(product_yield, 1e-9)
+        next_stack = stack | {item}
+        result: dict[str, float] = {}
+        for ingredient, amount in recipe.ingredients:
+            factor = amount / yield_factor
+            result[ingredient] = result.get(ingredient, 0.0) + factor
+            if ingredient in next_stack:
+                continue
+            for name, units in self._unit_requirements_for(
+                ingredient, next_stack
+            ).items():
+                result[name] = result.get(name, 0.0) + factor * units
+        if cacheable:
+            self._unit_requirements[item] = result
+        return result
+
+    def _reachable_items(self, item: str) -> frozenset[str]:
+        cached = self._reachable.get(item)
+        if cached is not None:
+            return cached
+        seen: set[str] = set()
+        frontier = [item]
+        while frontier:
+            current = frontier.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            recipe = self._source.recipe(current)
+            if recipe is not None:
+                frontier.extend(name for name, _ in recipe.ingredients)
+        result = frozenset(seen)
+        self._reachable[item] = result
+        return result
 
     def _derive(self, product_id: str) -> ProductFacts | None:
         recipe = self._source.recipe(product_id)
@@ -647,7 +724,7 @@ def capture_context_snapshot(
     epoch_index: int,
     captured_tick: int,
     map_seed_hash: str,
-    game_version: str = "2.0.73",
+    game_version: str = "2.0.77",
     prior_watermark: tuple[str, int, int, str] | None = None,
     flow_history: list[tuple[int, dict[str, float]]] | None = None,
     observed_unlocked_recipes: Iterable[str] = (),
@@ -742,9 +819,7 @@ def capture_context_snapshot(
         "delivery_rates_300s": (
             dict(delivery.raw_rates_300s) if delivery is not None else {}
         ),
-        "delivery_totals": (
-            dict(delivery.raw_totals) if delivery is not None else {}
-        ),
+        "delivery_totals": (dict(delivery.raw_totals) if delivery is not None else {}),
     }
 
     # Construct a digest-free probe to classify the actual factory state. The
@@ -903,7 +978,11 @@ def _window_rate(
     """Per-minute production deltas between now and now-window."""
     if len(history) < 2:
         return {}
-    ordered = sorted(history, key=lambda sample: sample[0])
+    ordered = history
+    for index in range(1, len(history)):
+        if history[index - 1][0] > history[index][0]:
+            ordered = sorted(history, key=lambda sample: sample[0])
+            break
     now_tick, now_counts = ordered[-1]
     cutoff = now_tick - window_ticks
     base_counts: dict[str, float] | None = None
@@ -961,7 +1040,7 @@ def _logistic_network_count(namespace: Any) -> int:
 # ---------------------------------------------------------------------------
 
 BAND_NAMES = {
-    0: "bootstrap",
+    0: "foundation_automation",
     1: "early_automation",
     2: "scaling",
     3: "advanced_industry",
@@ -973,7 +1052,7 @@ BAND_NAMES = {
 # threshold fires on technology presence OR physical infrastructure; inventory
 # deliberately plays no role so consumption cannot demote a session.
 _BAND_TESTS: tuple[tuple[int, tuple[str, ...], tuple[str, ...]], ...] = (
-    (1, ("electricity",), ("assembling-machine-1", "small-electric-pole")),
+    (1, ("steam-power",), ("assembling-machine-1", "small-electric-pole")),
     (
         2,
         ("oil-processing", "railway", "steel-processing", "concrete"),
@@ -1071,7 +1150,9 @@ def extract_difficulty_features(
 
     deadline_minutes = deadline_ticks / TICKS_PER_MINUTE
     required_rate = quantity / deadline_minutes
-    existing_rate = max(rates.get(product_id, 0.0), automated_rates_60(snapshot, product_id))
+    existing_rate = max(
+        rates.get(product_id, 0.0), automated_rates_60(snapshot, product_id)
+    )
     existing_delivery_rate = max(
         snapshot.delivery_rates_60s.get(product_id, 0.0),
         snapshot.delivery_rates_300s.get(product_id, 0.0),

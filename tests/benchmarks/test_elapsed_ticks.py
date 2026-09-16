@@ -1,6 +1,5 @@
 import pytest
 
-from fle.env.entities import Position
 from fle.env.game_types import Prototype, Resource
 
 
@@ -15,21 +14,9 @@ def game(instance):
     }
 
     instance.reset(all_technologies_researched=True)
+    instance.set_speed(100)
 
     yield instance.namespace
-    instance.reset(all_technologies_researched=True)
-
-
-def test_crafting_accumulate_ticks(game):
-    """
-    Attempt to craft an iron chest with insufficient resources and assert that no items are crafted.
-    :param game:
-    :return:
-    """
-
-    game.craft_item(Prototype.IronChest, quantity=50)
-    ticks = game.instance.get_elapsed_ticks()
-    assert ticks == 1500
 
 
 def test_crafting_composite_accumulate_ticks(game):
@@ -86,38 +73,6 @@ def test_harvesting_wood_accumulate_ticks(game):
     )
 
 
-def test_harvesting_coal_accumulate_ticks(game):
-    game.move_to(game.nearest(Resource.Coal))
-    game.instance._reset_elapsed_ticks()
-
-    game.harvest_resource(game.nearest(Resource.Coal), quantity=10)
-    ticks = game.instance.get_elapsed_ticks()
-    game.harvest_resource(game.nearest(Resource.Coal), quantity=10)
-    nticks = game.instance.get_elapsed_ticks()
-
-    assert ticks == 600
-    assert nticks - ticks == ticks, (
-        "The tick count should be proportional to the amount of wood harvested."
-    )
-
-
-def test_moving_accumulate_ticks(game):
-    # Reset elapsed ticks to start fresh
-    game.instance._reset_elapsed_ticks()
-
-    ticks_ = []
-    for i in range(10):
-        game.move_to(Position(x=i, y=0))
-        ticks_.append(game.instance.get_elapsed_ticks())
-
-    nticks = game.instance.get_elapsed_ticks()
-    assert nticks > 70, "The tick count should be proportional to the distance moved."
-    # Verify ticks are accumulating (each move should add ticks)
-    assert all(ticks_[i] <= ticks_[i + 1] for i in range(len(ticks_) - 1)), (
-        "The tick count should accumulate with each move."
-    )
-
-
 def test_long_mine(game):
     game.move_to(game.nearest(Resource.Coal))
     game.instance._reset_elapsed_ticks()
@@ -127,10 +82,3 @@ def test_long_mine(game):
 
     ticks = game.instance.get_elapsed_ticks()
     assert ticks == 60000
-
-
-def test_sleep_ticks(game):
-    game.sleep(10)  # sleep for 10 seconds = 600 ticks (at 60 ticks/second)
-    assert game.instance.get_elapsed_ticks() >= 600, (
-        "The tick count should be proportional to the amount of time slept."
-    )

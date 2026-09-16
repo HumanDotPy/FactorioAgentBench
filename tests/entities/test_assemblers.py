@@ -6,7 +6,7 @@ from fle.env.game_types import Prototype, RecipeName, Resource
 
 @pytest.fixture()
 def game(configure_game):
-    return configure_game(
+    game = configure_game(
         inventory={
             "solar-panel": 3,
             "accumulator": 3,
@@ -25,6 +25,8 @@ def game(configure_game):
         persist_inventory=True,
         reset_position=True,
     )
+    game.instance.set_speed(100)
+    return game
 
 
 def test_solar_panel_charge_accumulator(game):

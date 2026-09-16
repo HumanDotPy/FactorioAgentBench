@@ -20,7 +20,7 @@ import os
 import re
 import sqlite3
 import threading
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -95,10 +95,9 @@ def _now() -> str:
 
 
 def _validate_name(name: str) -> str:
-    if not isinstance(name, str) or not _NAME_PATTERN.match(name):
+    if not isinstance(name, str) or not _NAME_PATTERN.fullmatch(name):
         raise BlueprintInvalid(
-            f"Invalid blueprint name {name!r}: use 1-64 chars of "
-            "[A-Za-z0-9_.-]"
+            f"Invalid blueprint name {name!r}: use 1-64 chars of [A-Za-z0-9_.-]"
         )
     return name
 
@@ -107,9 +106,7 @@ def _validate_content(content: str) -> tuple[str, str]:
     if not isinstance(content, str) or not content:
         raise BlueprintInvalid("Blueprint content must be a non-empty string")
     if len(content) > MAX_BLUEPRINT_BYTES:
-        raise BlueprintInvalid(
-            f"Blueprint exceeds {MAX_BLUEPRINT_BYTES} byte limit"
-        )
+        raise BlueprintInvalid(f"Blueprint exceeds {MAX_BLUEPRINT_BYTES} byte limit")
     # Vanilla exchange strings are '0' + base64 payload (+ optional crc).
     if not content.startswith("0"):
         raise BlueprintInvalid("Content is not a Factorio blueprint string")
@@ -134,6 +131,7 @@ class BlueprintStore:
         self.scope = scope
         self.max_per_scope = max(1, max_per_scope)
         self._lock = threading.Lock()
+        self._local = threading.local()
         if scope is None:
             self._db_path = None
             self._memory: dict[str, BlueprintRecord] = {}
@@ -147,8 +145,11 @@ class BlueprintStore:
     # -- plumbing -----------------------------------------------------------
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._db_path, timeout=5.0)
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(self._db_path, timeout=5.0)
+            conn.execute("PRAGMA journal_mode=WAL")
+            self._local.conn = conn
         return conn
 
     @property
@@ -171,13 +172,14 @@ class BlueprintStore:
         _validate_name(name)
         content, digest = _validate_content(content)
         with self._lock:
-            count = self.count()
             existing = self._get(name)
-            if existing is None and count >= self.max_per_scope:
-                raise BlueprintQuotaExceeded(
-                    f"Scope {self.scope!r} holds {count} blueprints "
-                    f"(limit {self.max_per_scope}); prune or reuse a name"
-                )
+            if existing is None:
+                count = self.count()
+                if count >= self.max_per_scope:
+                    raise BlueprintQuotaExceeded(
+                        f"Scope {self.scope!r} holds {count} blueprints "
+                        f"(limit {self.max_per_scope}); prune or reuse a name"
+                    )
             record = BlueprintRecord(
                 name=name,
                 content=content,
@@ -188,9 +190,7 @@ class BlueprintStore:
                 created_tick=created_tick,
                 created_at=_now(),
                 times_placed=(existing.times_placed if existing else 0),
-                last_used_tick=(
-                    existing.last_used_tick if existing else None
-                ),
+                last_used_tick=(existing.last_used_tick if existing else None),
                 scope=self.scope,
             )
             if self.persistent:
@@ -205,6 +205,7 @@ class BlueprintStore:
                         ON CONFLICT(scope, name) DO UPDATE SET
                             content = excluded.content,
                             content_sha256 = excluded.content_sha256,
+                            source = excluded.source,
                             entity_count = excluded.entity_count,
                             center_x = excluded.center_x,
                             center_y = excluded.center_y,
@@ -265,9 +266,7 @@ class BlueprintStore:
                 }
                 for row in rows
             ]
-        return [record.summary() for record in sorted(
-            records, key=lambda r: r.name
-        )]
+        return [record.summary() for record in sorted(records, key=lambda r: r.name)]
 
     def count(self) -> int:
         if not self.persistent:
@@ -279,7 +278,9 @@ class BlueprintStore:
             ).fetchone()
         return int(row[0]) if row else 0
 
-    def record_use(self, name: str, tick: int | None, lease_id: str | None = None) -> None:
+    def record_use(
+        self, name: str, tick: int | None, lease_id: str | None = None
+    ) -> None:
         with self._lock:
             if not self.persistent:
                 record = self._memory.get(name)
@@ -328,6 +329,43 @@ class BlueprintStore:
 
     # -- lifecycle management ----------------------------------------------
 
+    def delete(self, name: str) -> bool:
+        _validate_name(name)
+        with self._lock:
+            if not self.persistent:
+                return self._memory.pop(name, None) is not None
+            with self._connect() as conn:
+                return (
+                    conn.execute(
+                        "DELETE FROM blueprints WHERE scope = ? AND name = ?",
+                        (self.scope, name),
+                    ).rowcount
+                    > 0
+                )
+
+    def export_state(self) -> list[dict] | None:
+        """Only ephemeral libraries rewind; a lineage library is shared durable state."""
+        if self.persistent:
+            return None
+        with self._lock:
+            return [asdict(record) for record in self._memory.values()]
+
+    def restore_state(self, records: list[dict]) -> None:
+        if self.persistent:
+            return
+        restored = {}
+        for value in records:
+            record = BlueprintRecord(**value)
+            _validate_name(record.name)
+            _, digest = _validate_content(record.content)
+            if digest != record.content_sha256:
+                raise BlueprintInvalid("Checkpoint blueprint digest mismatch")
+            restored[record.name] = record
+        if len(restored) > self.max_per_scope:
+            raise BlueprintQuotaExceeded("Checkpoint exceeds blueprint quota")
+        with self._lock:
+            self._memory = restored
+
     def drop_scope(self) -> int:
         """Delete every blueprint in this scope (generation retirement)."""
         with self._lock:
@@ -353,7 +391,8 @@ class BlueprintStore:
         Ranking keeps the most-placed blueprints first, then the newest.
         ``keep_newest`` retains that many top-ranked entries regardless of
         usage; ``min_times_placed`` protects anything used at least that
-        many times.
+        many times; ``keep_unused`` protects blueprints that were never
+        placed.
         """
 
         def _rank(record: BlueprintRecord) -> tuple[int, str]:
@@ -400,6 +439,8 @@ class BlueprintStore:
             removed: list[str] = []
             for record in records:
                 if record.name in survivors:
+                    continue
+                if keep_unused and record.times_placed == 0:
                     continue
                 if min_times_placed is not None and (
                     record.times_placed >= min_times_placed

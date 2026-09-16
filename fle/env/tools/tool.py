@@ -1,11 +1,34 @@
+import math
+from functools import wraps
 from typing import Tuple, Union
 
 from fle.env.entities import Position, Entity
 from fle.env.namespace import FactorioNamespace
 from fle.env.tools.controller import Controller
+from fle.commons.profiling import timed
 
 
 class Tool(Controller):
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if "__call__" in cls.__dict__:
+            implementation = cls.__call__
+
+            @wraps(implementation)
+            def invoke(self, *args, **kwargs):
+                control = getattr(
+                    getattr(self, "game_state", None), "_program_runtime", None
+                )
+                action = getattr(self, "name", type(self).__name__)
+                if control is not None and action != "score":
+                    control.boundary()
+                result = implementation(self, *args, **kwargs)
+                if control is not None:
+                    control.action_result(action, result)
+                return result
+
+            cls.__call__ = timed("tool." + cls.__name__)(invoke)
+
     def __init__(
         self,
         lua_script_manager: "FactorioLuaScriptManager",  # noqa
@@ -29,17 +52,38 @@ class Tool(Controller):
         return x, y
 
     def get_error_message(self, response):
-        try:
-            msg = (
-                response.split(":")[-1]
-                .replace('"', "")
-                .strip()
-                .replace("\\'", "")
-                .replace("'", "")
-            )
-            return msg
-        except Exception:
-            return response
+        # Colons separate useful diagnostics too (for example, a missing
+        # technology and its recipe). Never discard that causal context.
+        return response.strip() if isinstance(response, str) else response
+
+    def refresh_player_location(self):
+        """Refresh the cached player position from the live character."""
+
+        controllers = getattr(
+            getattr(self.game_state, "instance", None), "controllers", None
+        )
+        move_to = controllers.get("move_to") if isinstance(controllers, dict) else None
+        refresh = getattr(move_to, "refresh_player_location", None)
+        if move_to is not self and callable(refresh):
+            return refresh()
+        return self.game_state.player_location
+
+    def ensure_reachable(self, target, stop_distance: float = 5.5):
+        """Walk into interaction range in live mode without choosing a new target."""
+
+        if self.game_state.instance.fast:
+            return self.game_state.player_location
+        position = target.position if isinstance(target, Entity) else target
+        x, y = self.get_position(position)
+        current = self.refresh_player_location()
+        if math.hypot(x - current.x, y - current.y) <= stop_distance:
+            return current
+        # Lazy import avoids a module cycle: MoveTo itself derives from Tool.
+        from fle.env.tools.agent.move_to.client import MoveTo
+
+        return MoveTo(self.connection, self.game_state)(
+            Position(x=x, y=y), stop_distance=stop_distance
+        )
 
     def load(self):
         # self.lua_script_manager.load_action_into_game(self.name)

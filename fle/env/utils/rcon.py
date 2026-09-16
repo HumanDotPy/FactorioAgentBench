@@ -97,25 +97,68 @@ def _load_initialisation_scripts():
     return _load_scripts(_get_lib_names())
 
 
-def _remove_numerical_keys(dictionary):
-    pruned = {}
-    if not isinstance(dictionary, dict):
-        return dictionary
-    parts = []
-    for key, value in dictionary.items():
-        if isinstance(key, int):
-            if isinstance(value, dict):
-                parts.append(_remove_numerical_keys(value))
-            elif isinstance(value, str):
-                parts.append(value.replace("!!", '"').strip())
-            else:
-                parts.append(value)
-        else:
-            pruned[key] = value
+def _dequote_legacy(value):
+    """Decode the historical ``!!`` quote convention without mangling data.
 
+    Values written by older Lua serializers straddle a ``!!`` boundary and can
+    contain both literal exclamation marks and double quotes. Only rewrite a
+    balanced pair sequence; otherwise keep the original text so a reader can
+    see the raw payload instead of silently corrupting it.
+    """
+    if not isinstance(value, str) or value.count("!!") == 0:
+        return value
+    if value.count("!!") % 2:
+        return value
+    return value.replace("!!", '"')
+
+
+def _positional_key(key):
+    if isinstance(key, bool):
+        return None
+    if isinstance(key, int):
+        return key
+    if isinstance(key, str):
+        text = key.strip()
+        if text.isdigit() or (len(text) > 1 and text[0] in "+-" and text[1:].isdigit()):
+            return int(text)
+    return None
+
+
+def _remove_numerical_keys(value):
+    """Rebuild Lua arrays from positional tables at any nesting depth.
+
+    A table with only positional keys becomes a list. A table mixing positional
+    and named keys cannot be represented faithfully in Python, so raise instead
+    of silently discarding the named entries. Named values are recursed into so
+    arrays nested under string keys are converted too.
+    """
+    if isinstance(value, list):
+        return [_remove_numerical_keys(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    parts = []
+    named = {}
+    for key, item in value.items():
+        positional = _positional_key(key) is not None
+        if isinstance(item, (dict, list)):
+            converted = _remove_numerical_keys(item)
+        elif positional:
+            converted = _dequote_legacy(item)
+        else:
+            converted = item
+        if positional:
+            parts.append(converted)
+        else:
+            named[key] = converted
+
+    if parts and named:
+        raise LuaConversionError(
+            "Lua table mixes positional and named keys; refusing to drop data "
+            f"(named keys: {sorted(str(key) for key in named)})"
+        )
     if parts:
-        pruned = parts
-    return pruned
+        return parts
+    return named
 
 
 class LuaConversionError(Exception):
@@ -141,33 +184,73 @@ def _check_output_for_errors(command, response, output):
             )
 
 
-def _lua2python(command, response, *parameters, trace=False, start=0):
-    stdout = io.StringIO()
+def _try_lua_decode(text):
+    """Decode one Lua table when *text* holds a complete one, else None."""
+    if not text or not isinstance(text, str):
+        return None
+    stripped = text.strip()
+    if not stripped.startswith("{"):
+        return None
+    end = stripped.rfind("}")
+    if end < 0:
+        return None
+    candidate = stripped[: end + 1]
+    try:
+        return lua.decode(candidate)
+    except Exception:
+        return None
 
-    with contextlib.redirect_stdout(stdout):
+
+def _lua2python(command, response, *parameters, trace=False, start=0):
+    if trace:
+        stdout = io.StringIO()
+        redirect = contextlib.redirect_stdout(stdout)
+    else:
+        redirect = contextlib.nullcontext()
+
+    with redirect:
         if not response:
             return None, (timer() - start)
 
-        try:
-            # Handle the case where response is a complete table
-            if response.strip().startswith("{") and response.strip().endswith("}"):
-                output = lua.decode(response)
-            else:
-                # Handle the case where we need to extract the last line
-                splitted = response.split("\n")[-1]
-                if "[string" in splitted:
-                    splitted = re.sub(r"\[string[^\]]*\]", "", splitted)
-                output = lua.decode(splitted)
+        output = _try_lua_decode(response)
+        if output is None:
+            # A plain command (or a response with trailing console noise)
+            # returns its payload on the last non-empty line. Preserve the
+            # whole construct instead of discarding everything before it.
+            lines = [line.strip() for line in response.splitlines() if line.strip()]
+            line = lines[-1] if lines else ""
+            if "[string" in line:
+                line = re.sub(r"\[string[^\]]*\]", "", line)
+            if line:
+                for start_index in _table_start_positions(line):
+                    output = _try_lua_decode(line[start_index:])
+                    if output is not None:
+                        break
 
+        if output is None:
+            if trace:
+                print(f"Parsing error: no Lua value in response {response!r}")
+            return None, (timer() - start)
+
+        try:
             if isinstance(output, dict) and "b" in output:
                 output["b"] = _remove_numerical_keys(output["b"])
-
             return output, (timer() - start)
-
         except Exception as e:
             if trace:
                 print(f"Parsing error: {str(e)}")
             return None, (timer() - start)
+
+
+def _table_start_positions(line):
+    """Yield candidate start offsets for a Lua table embedded in a line."""
+    search_from = 0
+    while True:
+        index = line.find("{", search_from)
+        if index < 0:
+            return
+        yield index
+        search_from = index + 1
 
 
 @deprecated("Doesn't handle nested structures that well")

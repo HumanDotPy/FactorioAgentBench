@@ -50,7 +50,7 @@ StoneWall = "stone-wall", Entity
 
 Notes on the api
 
-- You need inserters to add items from a belt to a furnace or a chest. To connect a drill to a furnace or a chest you first need to add a inserter to the furnace or chest, rotate the inserter and then connect the inserter pickup position to drills drop position
+- Agent-facing inserter directions name the DROP side. To add items from a belt to a furnace or a chest, use insert_between(source, target); or place the inserter with place_entity_next_to(furnace.position, direction=...) and rotate its drop side toward the furnace, then connect the inserter pickup position to the drill drop position with transport belts
 - If you input coal to a furnace, the way to check it is furnace.fuel.get('Prototype.Coal') as the coal is fuel in the furnace. In a chest coal can be checked directly from the normal inspect_inventory()
 - You do not need inserters for drills as you can directly use the drill.drop_position as the start of the transport belts. This only works with drills
 - When you check the inventory of something you need to refresh the entity with inspect_entity

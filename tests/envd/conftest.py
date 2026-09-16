@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import base64
 
 import pytest
 
@@ -11,6 +12,7 @@ from fle.envd.models import (
     RewardVector,
     VerificationSnapshot,
 )
+from fle.envd.templates import ProgramTemplateStore, expand_template
 
 
 class FakeWorker(FactorioWorker):
@@ -19,13 +21,22 @@ class FakeWorker(FactorioWorker):
         self.active_task = None
         self.release_count = 0
         self.score = 0.0
+        self.template_store = ProgramTemplateStore(scope=None)
+        self.realtime_enabled = False
+        self.realtime_speed = 10.0
 
     def start_task(self, task: FactorioTaskSpec) -> str:
         self.active_task = task
         self.score = 0.0
         return f"initial-{task.fingerprint[:12]}"
 
-    def execute(self, lease_id: str, code: str, sequence: int) -> ExecutionResult:
+    def execute(
+        self,
+        lease_id: str,
+        code: str,
+        sequence: int,
+        template: str | None = None,
+    ) -> ExecutionResult:
         self.score += 1.0
         event = ActionEvent(
             sequence=sequence,
@@ -35,6 +46,7 @@ class FakeWorker(FactorioWorker):
             reward_delta=1.0,
             result=f"executed: {code}",
             ticks=sequence * 60,
+            template=template,
         )
         return ExecutionResult(
             lease_id=lease_id,
@@ -53,6 +65,54 @@ class FakeWorker(FactorioWorker):
             automated_production_score=self.score,
             state_hash=f"state-{int(self.score)}",
         )
+
+    def set_realtime(self, lease_id, *, enabled, speed=None):
+        del lease_id
+        if speed is not None:
+            if not 1.0 <= float(speed) <= 10.0:
+                raise ValueError("Realtime speed must be between 1x and 10x")
+            self.realtime_speed = float(speed)
+        self.realtime_enabled = bool(enabled)
+        return {
+            "enabled": self.realtime_enabled,
+            "speed": self.realtime_speed,
+            "paused": not self.realtime_enabled,
+        }
+
+    def run_template(self, lease_id, name, arguments=None):
+        del lease_id
+        record = self.template_store.get(name)
+        expanded = expand_template(record.code, record.parameters, arguments)
+        tick = int(self.score * 60)
+        self.template_store.record_run(name, tick)
+        return expanded, tick
+
+    def render_factory(
+        self,
+        lease_id: str,
+        *,
+        center_x=None,
+        center_y=None,
+        radius=32,
+        include_status=True,
+    ):
+        del lease_id, center_x, center_y
+        png = b"\x89PNG\r\n\x1a\nfixture"
+        return {
+            "schema_version": "factorio-factory-render-v1",
+            "media_type": "image/png",
+            "image_base64": base64.b64encode(png).decode("ascii"),
+            "image_sha256": "fixture",
+            "image_bytes": len(png),
+            "ticks": int(self.score * 60),
+            "include_status": include_status,
+            "viewport": {
+                "center_x": 0,
+                "center_y": 0,
+                "width_tiles": radius * 2,
+                "height_tiles": radius * 2,
+            },
+        }
 
     def finalize(self, lease_id, task, events):
         return VerificationSnapshot(

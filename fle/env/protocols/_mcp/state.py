@@ -1,4 +1,5 @@
 import json
+import os
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -36,6 +37,17 @@ class FactorioMCPState:
         self.vcs_repos: Dict[
             int, "FactorioMCPRepository"
         ] = {}  # instance_id -> VCS repo
+        self.gym_env = None
+
+    def ensure_gym_env(self):
+        """Create the fallback gym environment lazily.
+
+        Construction must never connect to Factorio: this state object is built
+        at import time by the MCP server and by test collection.
+        """
+
+        if self.gym_env is not None:
+            return self.gym_env
 
         try:
             env_ids = list_available_environments()
@@ -50,7 +62,7 @@ class FactorioMCPState:
                     print(f"DEBUG: Using open environment: {id}")
                     self.gym_env = gym.make(id, run_idx=0)
                     self.gym_env.reset()
-                    return
+                    return self.gym_env
 
             # print(f"DEBUG: No open environment found, using first available: {env_ids[0]}")
             self.gym_env = gym.make(env_ids[0], run_idx=0)
@@ -65,19 +77,20 @@ class FactorioMCPState:
             # )
             #
         except IndexError as e:
-            print(f"IndexError in __init__: {e}")
+            print(f"IndexError in ensure_gym_env: {e}")
             print(
                 f"env_ids length: {len(env_ids) if 'env_ids' in locals() else 'Not available'}"
             )
             print("Falling back to steel_plate_throughput environment")
             self.gym_env = gym.make("steel_plate_throughput", run_idx=0)
         except Exception as e:
-            print(f"Error in __init__: {e}")
+            print(f"Error in ensure_gym_env: {e}")
             print(f"Error type: {type(e)}")
             print("Falling back to steel_plate_throughput environment")
             self.gym_env = gym.make("steel_plate_throughput", run_idx=0)
 
         self.gym_env.reset()
+        return self.gym_env
 
     def create_factorio_instance(self, instance_id: int) -> FactorioInstance:
         """Create a single Factorio instance"""
@@ -110,7 +123,9 @@ class FactorioMCPState:
             # Ensure agent characters exist (removed one-time associate command)
             # Check if agent characters exist, if not create them
             char_check = instance.rcon_client.send_command(
-                "/c rcon.print(storage.agent_characters and #storage.agent_characters or 0)"
+                "/c rcon.print(remote.interfaces['fle_runtime'] and "
+                "remote.call('fle_runtime', 'dispatch', '__agent_character_count') "
+                "or (storage.agent_characters and #storage.agent_characters or 0))"
             )
 
             if int(char_check) == 0:
@@ -256,15 +271,17 @@ class FactorioMCPState:
         if self.recipes_loaded:
             return self.recipes
 
-        recipes_path = (
-            Path(__file__).parent.parent / "data" / "recipes" / "recipes.jsonl"
-        )
+        candidates = []
+        override = os.environ.get("FLE_RECIPES_PATH")
+        if override:
+            candidates.append(Path(override))
+        here = Path(__file__).resolve()
+        for parent in here.parents:
+            candidates.append(parent / "data" / "recipes" / "recipes.jsonl")
 
-        if not recipes_path.exists():
-            # Fall back to absolute path if relative path fails
-            recipes_path = Path(
-                "/Users/jackhopkins/PycharmProjects/PaperclipMaximiser/data/recipes/recipes.jsonl"
-            )
+        recipes_path = next(
+            (path for path in candidates if path.exists()), candidates[0]
+        )
 
         try:
             recipes = {}

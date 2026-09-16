@@ -50,8 +50,7 @@ class SaveResearchState(Tool):
                     research_unit_energy=tech["research_unit_energy"],
                     prerequisites=[x for x in tech["prerequisites"].values()],
                     ingredients=[
-                        {x["name"]: x["amount"]}
-                        for x in tech["ingredients"].values()
+                        {x["name"]: x["amount"]} for x in tech["ingredients"].values()
                     ],
                 )
                 for name, tech in technologies.items()

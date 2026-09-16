@@ -13,7 +13,7 @@ Methods:
 {schema}
 Important notes:
 - To put items into entities (for instance a chest or a furnace) automatically you need to add an inserter. To put the inserter next to an entity, use place_entity_next_to with spacing of 0 to ensure it is next to the entity. Then for instance if you need to connect a drill to a chest for instance, you need to connect the inserter (not the chest) with the drill as you cannot directly send items to a chest with connections.
-- You need to rotate the inserter to put items into an entity as by default it takes from the entity. When you rotate it, you need to update the python variable with the rotation command, for example inserter = rotate_entity(inserter, Direction.UP). You don't need to assert and check the rotation success as that will always work using the game api
+- Agent-facing inserter directions name the DROP side, not the pickup side: to put items into an entity, rotate the drop side toward it (for example inserter = rotate_entity(inserter, Direction.DOWN)) or use insert_between(source, target). Keep the returned variable with the rotation command. Rotation always succeeds using the game api
 - Use pickup and drop positions where possible to connect entities.
 - When you need to place an entity to a position with place_entity or extract items from an entity, first move near to that position as the player can only access entities within 10 coordinate radius of themselves
 - When you're harvesting ingredients, always harvest a bit more than needed to account for inefficiencies. For isntance if recipe calls for 26, harvest 35.

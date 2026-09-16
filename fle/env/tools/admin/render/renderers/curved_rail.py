@@ -27,7 +27,7 @@ def get_key(entity: Dict, grid) -> str:
 def get_size(entity: Dict) -> Tuple[float, float]:
     """Get curved rail size based on direction"""
     direction = entity.get("direction", 0)
-    if direction in [0, 1, 4, 5]:
+    if direction in [0, 2, 8, 10]:
         return (5, 9)
     else:
         return (9, 4.5)

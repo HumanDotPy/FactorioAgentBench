@@ -19,8 +19,6 @@ def game(instance):
     instance.reset(all_technologies_researched=True)
     instance.set_speed(10)
     yield instance.namespace
-    instance.reset(all_technologies_researched=True)
-    instance.set_speed(1)
 
 
 def test_defence(game):

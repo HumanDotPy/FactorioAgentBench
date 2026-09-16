@@ -11,6 +11,11 @@ def test_can_place(game):
     can_place = game.can_place_entity(Prototype.Pipe, position=(5, 0))
     assert can_place
 
+    can_place = game.can_place_entity(
+        Prototype.Pipe, direction=Direction.UP, position=(5, 0)
+    )
+    assert can_place
+
     # attempt to place a pipe beyond the reach of the player
     can_place = game.can_place_entity(Prototype.Pipe, position=(100, 0))
     assert not can_place

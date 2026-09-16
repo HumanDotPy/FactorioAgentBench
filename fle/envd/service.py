@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import re
+import json
 import threading
 import time
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from typing import Any
 
+from fle.commons.profiling import ProfileStore, profiled_lock, timed
 from fle.envd.backend import FactorioWorker
 from fle.envd.errors import (
     CapacityExhausted,
@@ -16,10 +20,9 @@ from fle.envd.errors import (
     InterventionLimitReached,
     LeaseFinalized,
     LeaseNotFound,
-    MemoryConflict,
-    MemoryLimitExceeded,
-    MemoryNotFound,
 )
+from fle.envd.lifecycle import CheckpointPool
+from fle.envd.memory import SessionMemory
 from fle.envd.models import (
     ActionEvent,
     ActiveContractState,
@@ -33,11 +36,14 @@ from fle.envd.models import (
     HealthStatus,
     Lease,
     Observation,
+    RuntimeCheckpoint,
+    ThroughputCheckResult,
     VerificationSnapshot,
     VerifierEvent,
 )
-from fle.envd.memory import SessionMemory
 from fle.envd.program_policy import ProgramPolicyViolation, validate_program
+from fle.envd.templates import expand_template, validate_parameters
+from fle.envd.program_runtime import ProgramRuntime
 
 
 @dataclass
@@ -52,6 +58,7 @@ class _LeaseRecord:
     execute_request_cache: dict[str, tuple[str, ExecutionResult]] = field(
         default_factory=dict
     )
+    scored_interventions: int = 0
     # Adaptive contract session bookkeeping (section 14).  Idempotency caches
     # replay identical requests without re-touching the simulation.
     active_commitment_hash: str | None = None
@@ -60,6 +67,20 @@ class _LeaseRecord:
     # Model-managed memory is lease-scoped so it survives MCP subprocess
     # restarts while remaining isolated from every other evaluation session.
     memory: SessionMemory = field(default_factory=SessionMemory)
+    profiling: ProfileStore = field(default_factory=ProfileStore)
+    programs: ProgramRuntime | None = None
+    programs_restore: dict[str, Any] | None = None
+    reference_requests: dict[str, tuple[str, dict]] = field(default_factory=dict)
+    reference_restore: dict | None = None
+
+
+def _template_view(record: Any) -> dict[str, Any]:
+    """Full template projection for save/get responses."""
+
+    view = record.summary()
+    view["code"] = record.code
+    view["parameter_specs"] = record.parameters or []
+    return view
 
 
 class EnvironmentService:
@@ -71,6 +92,7 @@ class EnvironmentService:
         lease_ttl_seconds: int = 900,
         capabilities: CapabilityManifest | None = None,
         audit_workers: list[FactorioWorker] | None = None,
+        reference_worlds=None,
     ):
         if not workers:
             raise ValueError("EnvironmentService requires at least one worker")
@@ -87,9 +109,8 @@ class EnvironmentService:
             raise ValueError("Lease and audit worker ids must be disjoint")
 
         self._workers = {worker.worker_id: worker for worker in workers}
-        self._audit_workers = {
-            worker.worker_id: worker for worker in audit_workers
-        }
+        self._reference_worlds = reference_worlds
+        self._audit_workers = {worker.worker_id: worker for worker in audit_workers}
         self._busy_audit_workers: set[str] = set()
         self._leases: dict[str, _LeaseRecord] = {}
         self._busy_workers: set[str] = set()
@@ -97,6 +118,18 @@ class EnvironmentService:
         self._lock = threading.RLock()
         self._audit_condition = threading.Condition(self._lock)
         self.capabilities = capabilities or CapabilityManifest()
+        checkpoint_capable = all(
+            type(worker).export_game_state is not FactorioWorker.export_game_state
+            and type(worker).export_resume_state
+            is not FactorioWorker.export_resume_state
+            for worker in workers
+        )
+        features = dict(self.capabilities.features)
+        features["checkpoints"] = checkpoint_capable
+        features["runtime_profiling"] = True
+        features["creative_reference_worlds"] = reference_worlds is not None
+        features["async_programs"] = checkpoint_capable
+        self.capabilities = self.capabilities.model_copy(update={"features": features})
         if audit_workers:
             features = dict(self.capabilities.features)
             features.update(
@@ -206,9 +239,203 @@ class EnvironmentService:
             expires_at=created + self._lease_ttl,
             tool_error_retry_budget=tool_error_retry_budget,
         )
+        record = _LeaseRecord(lease=lease, worker=worker)
+        if task.checkpoint_id.startswith("lifecycle:"):
+            payload = CheckpointPool().get_payload(task.checkpoint_id)
+            quality = payload.get("quality") if isinstance(payload, dict) else None
+            service_state = (
+                quality.get("service_state") if isinstance(quality, dict) else None
+            )
+            if isinstance(service_state, dict):
+                self._restore_service_state(record, service_state)
         with self._lock:
-            self._leases[lease.lease_id] = _LeaseRecord(lease=lease, worker=worker)
+            self._leases[lease.lease_id] = record
+        if task.execution_mode == "realtime":
+            try:
+                if not self.capabilities.features.get("async_programs"):
+                    raise ValueError(
+                        "Realtime programs require a checkpoint-capable local worker"
+                    )
+                record.programs = ProgramRuntime(
+                    CheckpointPool().root,
+                    lambda code, key, template: self.execute(
+                        lease.lease_id,
+                        code,
+                        request_id=key,
+                        template=template,
+                        _scheduled=True,
+                    ),
+                    lambda: self.checkpoint(
+                        lease.lease_id, name=f"runner-active-{lease.lease_id}"
+                    ),
+                    getattr(worker, "program_read_context", nullcontext),
+                    state=record.programs_restore,
+                    execution_context=lambda: record.lock,
+                    poll_events=getattr(worker, "poll_program_events", None),
+                )
+                worker.program_runtime = record.programs
+                # Establish a durable world boundary before accepting work.
+                initial = self.checkpoint(
+                    lease.lease_id, name=f"runner-active-{lease.lease_id}"
+                )
+                record.programs.publish_checkpoint(initial)
+                worker.set_realtime(lease.lease_id, enabled=True, speed=1)
+                record.programs.start()
+            except Exception:
+                self.release(lease.lease_id)
+                raise
         return lease
+
+    @staticmethod
+    def _restore_service_state(record: _LeaseRecord, state: dict[str, Any]) -> None:
+        if state.get("schema_version") != "envd-service-resume-v1":
+            raise ValueError("unsupported envd service resume state")
+        record.events = [
+            ActionEvent.model_validate(value) for value in state.get("events", [])
+        ]
+        record.scored_interventions = sum(
+            not event.evaluation_retry for event in record.events
+        )
+        record.terminal_reason = state.get("terminal_reason")
+        record.active_commitment_hash = state.get("active_commitment_hash")
+        record.programs_restore = state.get("programs")
+        record.reference_restore = state.get("reference_world")
+        record.reference_requests = {
+            entry["request_id"]: (entry["fingerprint"], entry["result"])
+            for entry in state.get("reference_requests", [])
+        }
+        record.lease.tool_error_retries_used = int(
+            state.get("tool_error_retries_used", 0)
+        )
+        memory_state = state.get("memory")
+        if isinstance(memory_state, dict):
+            record.memory = SessionMemory.from_state(memory_state)
+        for entry in state.get("execute_request_cache", []):
+            cached_result = ExecutionResult.model_validate(entry["result"])
+            record.execute_request_cache[str(entry["request_id"])] = (
+                str(entry["code_sha256"]),
+                cached_result.model_copy(update={"lease_id": record.lease.lease_id}),
+            )
+        for entry in state.get("epoch_request_cache", []):
+            method = str(entry["method"])
+            value = entry.get("result")
+            if method == "begin":
+                restored = ActiveContractState.model_validate(value)
+            elif method == "finalize":
+                restored = ContractEpochOutcome.model_validate(value)
+            else:
+                restored = ThroughputCheckResult.model_validate(value)
+            if hasattr(restored, "lease_id"):
+                restored = restored.model_copy(
+                    update={"lease_id": record.lease.lease_id}
+                )
+            record.epoch_request_cache[(method, str(entry["request_id"]))] = restored
+
+    @staticmethod
+    def _service_resume_state(record: _LeaseRecord) -> dict[str, Any]:
+        return {
+            "schema_version": "envd-service-resume-v1",
+            "programs": record.programs.export() if record.programs else None,
+            "events": [event.model_dump(mode="json") for event in record.events],
+            "terminal_reason": record.terminal_reason,
+            "active_commitment_hash": record.active_commitment_hash,
+            "tool_error_retries_used": record.lease.tool_error_retries_used,
+            "memory": record.memory.export_state(),
+            "reference_requests": [
+                {"request_id": key, "fingerprint": fingerprint, "result": result}
+                for key, (fingerprint, result) in record.reference_requests.items()
+            ],
+            "execute_request_cache": [
+                {
+                    "request_id": request_id,
+                    "code_sha256": code_sha256,
+                    "result": (
+                        payload.model_dump(mode="json")
+                        if hasattr(payload, "model_dump")
+                        else payload
+                    ),
+                }
+                for request_id, (
+                    code_sha256,
+                    payload,
+                ) in record.execute_request_cache.items()
+            ],
+            "epoch_request_cache": [
+                {
+                    "method": method,
+                    "request_id": request_id,
+                    "result": (
+                        result.model_dump(mode="json")
+                        if hasattr(result, "model_dump")
+                        else result
+                    ),
+                }
+                for (method, request_id), result in record.epoch_request_cache.items()
+            ],
+        }
+
+    @timed("service.checkpoint")
+    def checkpoint(self, lease_id: str, name: str | None = None) -> RuntimeCheckpoint:
+        record = self._live_record(lease_id)
+        context = (
+            getattr(record.worker, "program_checkpoint_context", nullcontext)
+            if record.programs
+            else nullcontext
+        )
+        with profiled_lock(record.lock), context():
+            raw_state = record.worker.export_game_state()
+            if raw_state is None:
+                raise RuntimeError("Factorio worker could not export game state")
+            safe_name = re.sub(r"[^A-Za-z0-9_-]+", "-", name or lease_id).strip("-")
+            lineage = f"lifecycle:{safe_name or lease_id}"
+            episode = time.time_ns()
+            checkpoint_pool = CheckpointPool()
+            checkpoint_id = checkpoint_pool.save(
+                lineage,
+                episode,
+                raw_state,
+                quality_summary={
+                    "schema_version": "factorio-resume-checkpoint-v1",
+                    "worker_state": record.worker.export_resume_state(),
+                    "service_state": {
+                        **self._service_resume_state(record),
+                        "reference_world": (
+                            self._reference_worlds.checkpoint(lease_id)
+                            if self._reference_worlds is not None
+                            else None
+                        )
+                        or record.reference_restore,
+                    },
+                },
+            )
+            if safe_name.startswith(
+                (
+                    "mcp-active-",
+                    "native-active-",
+                    "runner-active-",
+                    "runner-boundary-",
+                )
+            ):
+                checkpoint_pool.prune(lineage, keep=2)
+            get_session_state = getattr(
+                record.worker, "get_contract_session_state", None
+            )
+            session_state = get_session_state() if get_session_state else None
+            self._renew(record)
+            return RuntimeCheckpoint(
+                lease_id=lease_id,
+                checkpoint_id=checkpoint_id,
+                runtime_backend="local-fle",
+                metadata={
+                    "program_runtime_id": record.programs.runtime_id
+                    if record.programs
+                    else None,
+                    "active_epoch_index": getattr(
+                        session_state, "active_epoch_index", None
+                    ),
+                    "event_sequence": len(record.events),
+                },
+            )
 
     def _record(self, lease_id: str) -> _LeaseRecord:
         self.reap_expired()
@@ -221,18 +448,60 @@ class EnvironmentService:
     def _renew(self, record: _LeaseRecord) -> None:
         record.lease.expires_at = self._now() + self._lease_ttl
 
+    def profiling(self, lease_id: str) -> ProfileStore:
+        """Operator diagnostics; excluded from observations and resume state."""
+        # Do not reap expired workers here: reaping can wait on a world lock.
+        with self._lock:
+            record = self._leases.get(lease_id)
+        if record is None:
+            raise LeaseNotFound(f"Unknown lease: {lease_id}")
+        return record.profiling
+
+    def programs(self, lease_id: str) -> ProgramRuntime:
+        # Admission/status never wait for another lease's expiry cleanup.
+        with self._lock:
+            record = self._leases.get(lease_id)
+        if record is None or record.released:
+            raise LeaseNotFound(f"Unknown lease: {lease_id}")
+        if record.programs is None:
+            raise ValueError("This lease uses turn-based execution")
+        self._renew(record)
+        return record.programs
+
+    @timed("service.program_admission")
+    def submit_program(
+        self, lease_id: str, code: str, request_id: str, *, template=None
+    ):
+        runtime = self.programs(lease_id)
+        record = self._leases[lease_id]
+        if (
+            record.snapshot or record.terminal_reason
+        ) and request_id not in runtime.requests:
+            raise LeaseFinalized("Episode has ended")
+        if not code.strip() or len(code) > 100_000:
+            raise ValueError("Program must contain between 1 and 100000 characters")
+        validate_program(code, action_profile=record.lease.task.action_profile)
+        return runtime.submit(
+            code, request_id, sha256(code.encode()).hexdigest(), template
+        )
+
+    @timed("service.execute")
     def execute(
         self,
         lease_id: str,
         code: str,
         *,
         request_id: str | None = None,
+        template: str | None = None,
+        _scheduled: bool = False,
     ) -> ExecutionResult:
         if not code.strip():
             raise ValueError("code must not be empty")
         code_sha256 = sha256(code.encode("utf-8")).hexdigest()
         record = self._record(lease_id)
-        with record.lock:
+        if record.programs and not _scheduled:
+            raise ValueError("Realtime episodes accept programs through /programs")
+        with profiled_lock(record.lock):
             if record.released:
                 raise LeaseNotFound(f"Released lease: {lease_id}")
             if request_id is not None:
@@ -245,7 +514,9 @@ class EnvironmentService:
                             "for a different program"
                         )
                     self._renew(record)
-                    return cached_result.model_copy(deep=True)
+                    return cached_result.model_copy(
+                        update={"lease_id": lease_id}, deep=True
+                    )
             if record.snapshot is not None:
                 raise LeaseFinalized(f"Lease is already finalized: {lease_id}")
             if record.terminal_reason is not None:
@@ -253,9 +524,7 @@ class EnvironmentService:
                     "Lease reached terminal environment state: "
                     f"{record.terminal_reason}"
                 )
-            scored_interventions = sum(
-                not event.evaluation_retry for event in record.events
-            )
+            scored_interventions = record.scored_interventions
             intervention_limit = record.lease.task.max_interventions
             if (
                 intervention_limit is not None
@@ -268,7 +537,7 @@ class EnvironmentService:
                 )
             sequence = len(record.events) + 1
             try:
-                validate_program(code)
+                validate_program(code, action_profile=record.lease.task.action_profile)
             except ProgramPolicyViolation as exc:
                 # Policy rejections are evaluation outcomes, not malformed HTTP
                 # requests. Preserve them in the trajectory so retry budgets,
@@ -286,6 +555,7 @@ class EnvironmentService:
                     result=f"ProgramPolicyViolation: {violation}",
                     ticks=observation.ticks,
                     policy_violations=[violation],
+                    template=template,
                 )
                 result = ExecutionResult(
                     lease_id=lease_id,
@@ -309,7 +579,9 @@ class EnvironmentService:
                     ],
                 )
             else:
-                result = record.worker.execute(lease_id, code, sequence=sequence)
+                result = record.worker.execute(
+                    lease_id, code, sequence=sequence, template=template
+                )
                 candidate = record.worker.pop_throughput_audit_candidate()
                 if candidate is not None:
                     try:
@@ -340,6 +612,26 @@ class EnvironmentService:
                                         "event": "throughput_audit_passed"
                                         if audit.passed
                                         else "throughput_audit_failed",
+                                        "failure_reasons": list(audit.failure_reasons),
+                                        "line_scores": dict(audit.line_scores),
+                                        "production_rates_per_minute": dict(
+                                            audit.production_rates_per_minute
+                                        ),
+                                        "depot_rates_per_minute": dict(
+                                            audit.depot_rates_per_minute
+                                        ),
+                                        "minimum_production_subwindow_rates": {
+                                            product: min(rates or [0.0])
+                                            for product, rates in (
+                                                audit.production_subwindow_rates.items()
+                                            )
+                                        },
+                                        "minimum_depot_subwindow_rates": {
+                                            product: min(rates or [0.0])
+                                            for product, rates in (
+                                                audit.depot_subwindow_rates.items()
+                                            )
+                                        },
                                     },
                                 )
                             )
@@ -355,6 +647,8 @@ class EnvironmentService:
                 record.lease.tool_error_retries_used += 1
             record.events.append(result.event)
             record.terminal_reason = result.terminal_reason
+            if not result.event.evaluation_retry:
+                record.scored_interventions += 1
             if request_id is not None:
                 record.execute_request_cache[request_id] = (
                     code_sha256,
@@ -363,6 +657,7 @@ class EnvironmentService:
             self._renew(record)
             return result
 
+    @timed("service.observe")
     def observe(
         self,
         lease_id: str,
@@ -371,7 +666,19 @@ class EnvironmentService:
         force_keyframe: bool = False,
     ) -> Observation:
         record = self._record(lease_id)
-        with record.lock:
+        if record.programs:
+            self._renew(record)
+            return record.programs.read(
+                lambda: record.worker.observe(
+                    lease_id,
+                    **(
+                        {"cursor": cursor, "force_keyframe": force_keyframe}
+                        if cursor is not None or force_keyframe
+                        else {}
+                    ),
+                )
+            )
+        with profiled_lock(record.lock):
             if record.released:
                 raise LeaseNotFound(f"Released lease: {lease_id}")
             if cursor is None and not force_keyframe:
@@ -388,6 +695,7 @@ class EnvironmentService:
             self._renew(record)
             return observation
 
+    @timed("service.query_state")
     def query_state(
         self,
         lease_id: str,
@@ -404,10 +712,27 @@ class EnvironmentService:
         """Return bounded public state history from the leased worker."""
 
         record = self._live_record(lease_id)
-        with record.lock:
+        if record.programs:
+            self._renew(record)
+            return record.programs.read(
+                lambda: record.worker.query_state(
+                    lease_id,
+                    kind=kind,
+                    item=item,
+                    window_seconds=window_seconds,
+                    since_revision=since_revision,
+                    entity_type=entity_type,
+                    area=area,
+                    changed_since=changed_since,
+                    limit=limit,
+                )
+            )
+        with profiled_lock(record.lock):
             query = getattr(record.worker, "query_state", None)
             if query is None:
-                raise NotImplementedError("state history is unavailable for this worker")
+                raise NotImplementedError(
+                    "state history is unavailable for this worker"
+                )
             result = query(
                 lease_id,
                 kind=kind,
@@ -418,6 +743,181 @@ class EnvironmentService:
                 area=area,
                 changed_since=changed_since,
                 limit=limit,
+            )
+            self._renew(record)
+            return result
+
+    def craft_plan(
+        self, lease_id: str, *, product: str, quantity: int = 1, depth: int = 2
+    ) -> dict[str, Any]:
+        record = self._live_record(lease_id)
+        if record.programs:
+            return record.programs.read(
+                lambda: record.worker.craft_plan(
+                    lease_id, product=product, quantity=quantity, depth=depth
+                )
+            )
+        with profiled_lock(record.lock):
+            result = record.worker.craft_plan(
+                lease_id, product=product, quantity=quantity, depth=depth
+            )
+            self._renew(record)
+            return result
+
+    # -- pacing and program templates --------------------------------------
+
+    def set_realtime(
+        self,
+        lease_id: str,
+        *,
+        enabled: bool,
+        speed: float | None = None,
+    ) -> dict[str, Any]:
+        """Toggle autonomous simulation between agent interventions."""
+
+        record = self._live_record(lease_id)
+        if record.programs:
+            if not enabled or speed not in (None, 1, 1.0):
+                raise ValueError("This episode requires continuous 1x pacing")
+            return {"enabled": True, "speed": 1.0, "paused": False}
+        with profiled_lock(record.lock):
+            result = record.worker.set_realtime(lease_id, enabled=enabled, speed=speed)
+            self._renew(record)
+            return result
+
+    def list_templates(self, lease_id: str) -> dict[str, Any]:
+        record = self._live_record(lease_id)
+        with nullcontext() if record.programs else profiled_lock(record.lock):
+            summaries = record.worker.template_store.list_summaries()
+            self._renew(record)
+            return {"templates": summaries}
+
+    def get_template(self, lease_id: str, name: str) -> dict[str, Any]:
+        record = self._live_record(lease_id)
+        with nullcontext() if record.programs else profiled_lock(record.lock):
+            stored = record.worker.template_store.get(name)
+            self._renew(record)
+            return _template_view(stored)
+
+    def save_template(
+        self,
+        lease_id: str,
+        name: str,
+        *,
+        code: str,
+        description: str = "",
+        parameters: Any = None,
+    ) -> dict[str, Any]:
+        """Validate and store a program template.
+
+        The template is expanded with its own defaults and run through the
+        canonical program policy before it is stored, so only templates that
+        would execute as a legal program can enter the library.
+        """
+
+        record = self._live_record(lease_id)
+        with nullcontext() if record.programs else profiled_lock(record.lock):
+            normalized = validate_parameters(parameters)
+            expanded = expand_template(code, normalized, None)
+            validate_program(expanded, action_profile=record.lease.task.action_profile)
+            stored = record.worker.template_store.save(
+                name,
+                code,
+                description=description,
+                parameters=normalized,
+            )
+            self._renew(record)
+            return _template_view(stored)
+
+    def delete_template(self, lease_id: str, name: str) -> dict[str, Any]:
+        record = self._live_record(lease_id)
+        with nullcontext() if record.programs else profiled_lock(record.lock):
+            deleted = record.worker.template_store.delete(name)
+            self._renew(record)
+            return {"deleted": bool(deleted), "name": name}
+
+    def run_template(
+        self,
+        lease_id: str,
+        name: str,
+        *,
+        arguments: dict[str, Any] | None = None,
+        request_id: str | None = None,
+    ) -> ExecutionResult | dict[str, Any]:
+        """Expand a stored template and execute or admit one intervention."""
+
+        record = self._live_record(lease_id)
+        if record.programs:
+            stored = record.worker.template_store.get(name)
+            expanded = expand_template(stored.code, stored.parameters, arguments)
+            with record.programs.condition:
+                key = request_id or str(uuid.uuid4())
+                repeated = key in record.programs.requests
+                receipt = self.submit_program(lease_id, expanded, key, template=name)
+                if not repeated:
+                    record.worker.template_store.record_run(name, None)
+                return receipt
+        with profiled_lock(record.lock):
+            expanded, _tick = record.worker.run_template(lease_id, name, arguments)
+            return self.execute(
+                lease_id,
+                expanded,
+                request_id=request_id,
+                template=name,
+            )
+
+    @timed("service.camera")
+    def camera(
+        self,
+        lease_id: str,
+        *,
+        settings: dict[str, Any] | None = None,
+        include_image: bool = True,
+    ) -> dict[str, Any]:
+        record = self._live_record(lease_id)
+        if record.programs:
+            return record.programs.read(
+                lambda: record.worker.camera(
+                    lease_id, settings=settings, include_image=include_image
+                )
+            )
+        with profiled_lock(record.lock):
+            result = record.worker.camera(
+                lease_id, settings=settings, include_image=include_image
+            )
+            self._renew(record)
+            return result
+
+    @timed("service.render_factory")
+    def render_factory(
+        self,
+        lease_id: str,
+        *,
+        center_x: float | None = None,
+        center_y: float | None = None,
+        radius: int = 32,
+        include_status: bool = True,
+    ) -> dict[str, Any]:
+        """Render one lease under the same lock as other live-state reads."""
+
+        record = self._live_record(lease_id)
+        if record.programs:
+            return record.programs.read(
+                lambda: record.worker.render_factory(
+                    lease_id,
+                    center_x=center_x,
+                    center_y=center_y,
+                    radius=radius,
+                    include_status=include_status,
+                )
+            )
+        with profiled_lock(record.lock):
+            result = record.worker.render_factory(
+                lease_id,
+                center_x=center_x,
+                center_y=center_y,
+                radius=radius,
+                include_status=include_status,
             )
             self._renew(record)
             return result
@@ -433,7 +933,7 @@ class EnvironmentService:
 
         record = self._live_record(lease_id)
         method = "qualify-throughput" if authoritative else "check-throughput"
-        with record.lock:
+        with profiled_lock(record.lock):
             cached_hit, cached = self._replay(record, method, request_id)
             if cached_hit:
                 self._renew(record)
@@ -457,13 +957,13 @@ class EnvironmentService:
         cursor: str | int | None = None,
     ):
         record = self._live_record(lease_id)
-        with record.lock:
+        with nullcontext() if record.programs else profiled_lock(record.lock):
             self._renew(record)
             return record.memory.list(prefix=prefix, limit=limit, cursor=cursor)
 
     def memory_read(self, lease_id: str, key: str):
         record = self._live_record(lease_id)
-        with record.lock:
+        with nullcontext() if record.programs else profiled_lock(record.lock):
             self._renew(record)
             return record.memory.read(key)
 
@@ -476,7 +976,7 @@ class EnvironmentService:
         expected_revision: int | None = None,
     ):
         record = self._live_record(lease_id)
-        with record.lock:
+        with nullcontext() if record.programs else profiled_lock(record.lock):
             result = record.memory.write(
                 key,
                 content,
@@ -493,7 +993,7 @@ class EnvironmentService:
         expected_revision: int | None = None,
     ):
         record = self._live_record(lease_id)
-        with record.lock:
+        with nullcontext() if record.programs else profiled_lock(record.lock):
             result = record.memory.delete(
                 key,
                 expected_revision=expected_revision,
@@ -510,7 +1010,7 @@ class EnvironmentService:
         cursor: str | int | None = None,
     ):
         record = self._live_record(lease_id)
-        with record.lock:
+        with nullcontext() if record.programs else profiled_lock(record.lock):
             self._renew(record)
             return record.memory.search(query, limit=limit, cursor=cursor)
 
@@ -522,13 +1022,15 @@ class EnvironmentService:
         cursor: str | int | None = None,
     ):
         record = self._live_record(lease_id)
-        with record.lock:
+        with nullcontext() if record.programs else profiled_lock(record.lock):
             self._renew(record)
             return record.memory.trace(limit=limit, cursor=cursor)
 
     def finalize(self, lease_id: str) -> VerificationSnapshot:
         record = self._record(lease_id)
-        with record.lock:
+        if record.programs:
+            record.programs.close()
+        with profiled_lock(record.lock):
             if record.released:
                 raise LeaseNotFound(f"Released lease: {lease_id}")
             if record.snapshot is not None:
@@ -575,13 +1077,27 @@ class EnvironmentService:
                     if cached_hit:
                         return cached
         record = self._live_record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             if record.snapshot is not None:
                 raise LeaseFinalized(f"Lease is already finalized: {lease_id}")
             state = record.worker.begin_contract_epoch(spec)
+            if record.programs:
+                record.programs.episode_terminal = False
+                record.programs.terminal_program_id = None
+                record.programs.terminal_event = None
+                record.worker.set_realtime(lease_id, enabled=True, speed=1)
+            # A throughput audit terminates the current epoch, not the
+            # persistent adaptive-session lease. Once the runner has finalized
+            # that epoch and successfully opened the next one, mutations must
+            # be accepted again.
+            record.terminal_reason = None
             record.active_commitment_hash = spec.commitment_hash
             if request_id:
                 record.epoch_request_cache[("begin", request_id)] = state
+            if record.programs:
+                record.programs.publish_checkpoint(
+                    self.checkpoint(lease_id, name=f"runner-active-{lease_id}")
+                )
             return state
 
     def finalize_contract_epoch(
@@ -603,7 +1119,23 @@ class EnvironmentService:
                     if cached_hit and not abandon:
                         return cached
         record = self._live_record(lease_id)
-        with record.lock:
+        if record.programs:
+            if (
+                record.active_commitment_hash is not None
+                and record.active_commitment_hash != commitment_hash
+            ):
+                raise CommitmentMismatch(
+                    "Finalization commitment does not match the committed "
+                    "epoch specification"
+                )
+            record.programs.stop_epoch()
+        with profiled_lock(record.lock):
+            # A retry can arrive while the first finalize is still running.
+            # Recheck after acquiring the worker lock, not only before it.
+            if request_id and not abandon:
+                cached_hit, cached = self._replay(record, "finalize", request_id)
+                if cached_hit:
+                    return cached
             stored_hash = record.active_commitment_hash
             if stored_hash is not None and stored_hash != commitment_hash:
                 raise CommitmentMismatch(
@@ -629,12 +1161,12 @@ class EnvironmentService:
     ):
         """Passive context snapshot for selection; privileged HTTP only."""
         record = self._live_record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             return record.worker.capture_contract_context(session_id, epoch_index)
 
     def get_contract_session_state(self, lease_id: str) -> ContractSessionState:
         record = self._record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             if record.released:
                 raise LeaseNotFound(f"Released lease: {lease_id}")
             state = record.worker.get_contract_session_state()
@@ -652,25 +1184,142 @@ class EnvironmentService:
         request_id: str | None = None,
     ) -> ContractSessionSummary:
         record = self._live_record(lease_id)
-        with record.lock:
+        with profiled_lock(record.lock):
             if record.session_summary is not None:
                 return record.session_summary
             summary = record.worker.finalize_contract_session()
             record.session_summary = summary
             return summary
 
+    def reference_world(
+        self, lease_id: str, action: str, arguments: dict, request_id: str
+    ) -> dict:
+        """Operate a separate creative process; only exchange documents cross back."""
+        from fle.envd.blueprint_exchange import (
+            decode_exchange,
+            encode_exchange,
+            select_blueprint,
+        )
+
+        record = self._live_record(lease_id)
+        if self._reference_worlds is None:
+            raise ValueError("This envd backend does not support reference worlds")
+        fingerprint = sha256(
+            json.dumps([action, arguments], sort_keys=True, allow_nan=False).encode()
+        ).hexdigest()
+        with profiled_lock(record.lock):
+            if record.released:
+                raise LeaseNotFound(lease_id)
+            cached = record.reference_requests.get(request_id)
+            if cached:
+                if cached[0] != fingerprint:
+                    raise IdempotencyConflict(
+                        "Reference request_id reused with different arguments"
+                    )
+                return cached[1]
+            if action == "create":
+                result = self._reference_worlds.create(
+                    lease_id, record.reference_restore
+                )
+                record.reference_restore = None
+            elif action == "destroy":
+                result = self._reference_worlds.release(lease_id)
+                record.reference_restore = None
+            else:
+                if record.reference_restore is not None:
+                    self._reference_worlds.create(lease_id, record.reference_restore)
+                    record.reference_restore = None
+                world = self._reference_worlds.get(lease_id)
+                with world.lock:
+                    if action == "status":
+                        result = world.status()
+                    elif action == "execute":
+                        result = world.execute(arguments.get("code", ""))
+                    elif action == "run":
+                        result = world.run(
+                            arguments.get("ticks"), arguments.get("speed", 10)
+                        )
+                    elif action in {"capture", "place"}:
+                        store = record.worker.blueprint_store
+                        if action == "capture":
+                            from fle.envd.blueprints import _validate_name
+
+                            name = _validate_name(arguments.get("name"))
+                            area = arguments.get("area")
+                            if not isinstance(area, list) or len(area) != 2:
+                                raise ValueError(
+                                    "capture requires area=[[left,top],[right,bottom]]"
+                                )
+                            # JSON is decoded by Factorio, never interpolated as Lua source.
+                            literal = json.dumps(json.dumps(area, allow_nan=False))
+                            result = world.execute(
+                                f"return blueprint.capture(helpers.json_to_table({literal}))",
+                                internal=True,
+                            )
+                            if not result.get("error"):
+                                captured = result["result"]
+                                decode_exchange(captured["content"])
+                                saved = store.save(
+                                    name,
+                                    captured["content"],
+                                    entity_count=captured["entity_count"],
+                                    source="reference",
+                                )
+                                result = {
+                                    **world.status(),
+                                    "saved": saved.summary(),
+                                    "tile_count": captured["tile_count"],
+                                }
+                        else:
+                            source = arguments.get("source", "")
+                            stored = store.try_get(source)
+                            content = stored.content if stored else source
+                            content = encode_exchange(
+                                select_blueprint(
+                                    decode_exchange(content), arguments.get("book_path")
+                                )
+                            )
+                            position = json.dumps(
+                                json.dumps(
+                                    arguments.get("position", [0, 0]), allow_nan=False
+                                )
+                            )
+                            options = json.dumps(
+                                json.dumps(
+                                    arguments.get("options", {}), allow_nan=False
+                                )
+                            )
+                            result = world.execute(
+                                f"return blueprint.place({json.dumps(content)}, helpers.json_to_table({position}), helpers.json_to_table({options}))",
+                                internal=True,
+                            )
+                    else:
+                        raise ValueError(f"Unknown reference action: {action}")
+            record.reference_requests[request_id] = (fingerprint, result)
+            self._renew(record)
+            return result
+
     def release(self, lease_id: str) -> bool:
         with self._lock:
-            record = self._leases.pop(lease_id, None)
+            record = self._leases.get(lease_id)
             if record is None:
                 return False
-        with record.lock:
+        if record.programs:
+            record.programs.close()
+        with profiled_lock(record.lock):
+            if record.released:
+                return False
             record.released = True
             try:
-                record.worker.release()
+                try:
+                    if self._reference_worlds is not None:
+                        self._reference_worlds.release(lease_id)
+                finally:
+                    record.worker.release()
             finally:
                 with self._lock:
                     self._busy_workers.discard(record.worker.worker_id)
+                    self._leases.pop(lease_id, None)
         return True
 
     def close(self) -> None:

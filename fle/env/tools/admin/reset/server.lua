@@ -25,6 +25,48 @@ storage.actions.reset = function(inventories_json, reset_position, all_technolog
 	storage.actions.reset_production_stats()
 	storage.elapsed_ticks = 0
 
+	storage.score_episode_baseline = nil
+	storage.initial_score = nil
+	storage.initial_harvested_value = nil
+	storage.initial_crafted_net_value = nil
+	storage.manual_production_events = {}
+	storage.crafting_queue = {}
+	storage.native_crafting = {}
+	storage.harvest_queues = {}
+	storage.harvest_last_products = {}
+	storage.walking_queues = {}
+	storage.paths = {}
+	storage.path_requests = {}
+	storage.entity_handles = {}
+	storage.public_waits = {}
+	storage.public_status_monitor = nil
+	storage.semantic_events = {}
+	storage.semantic_craft_sequence = nil
+	storage.camera = nil
+	if clear_entities then
+		storage.clearance_entities = {}
+	end
+	if storage.objective_telemetry then
+		storage.objective_telemetry.deaths = {}
+		storage.objective_telemetry.death_count = 0
+		storage.objective_telemetry.respawn_count = 0
+		storage.objective_telemetry.last_respawn_tick = nil
+		storage.objective_telemetry.resource_depletions = {}
+		storage.objective_telemetry.last_death_tick_by_agent = {}
+	end
+	if storage.customer then
+		storage.customer.delivered_total = {}
+		storage.customer.manual_delivered_total = {}
+		storage.customer.manual_pending = {}
+		storage.customer.delta_log = {}
+		storage.customer.delta_index = {}
+		storage.customer.tamper_events = {}
+		storage.customer.tamper_reported = {}
+		storage.customer.retained_contents = {}
+		storage.customer.active_products = {}
+		storage.customer.last_error = nil
+	end
+
 	local inventories = safe_json_to_table(inventories_json)
 
 	-- Re-generate resources per agent (mirrors instance _reset)

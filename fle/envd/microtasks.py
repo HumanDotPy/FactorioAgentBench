@@ -131,8 +131,9 @@ def place_adjacent_pole_task() -> FactorioTaskSpec:
     return _task(
         task_id="micro_place_entity_next_to_v1",
         goal=(
-            "Place the lab, then use place_entity_next_to to place a small "
-            "electric pole adjacent to it without overlapping either footprint."
+            "Place the lab, then probe the free tile directly next to it with "
+            "plan_placement and place a small electric pole there with "
+            "place_entity at the exact position."
         ),
         objectives=[
             ObjectiveSpec(
@@ -158,8 +159,8 @@ def place_adjacent_pole_task() -> FactorioTaskSpec:
             ConstraintSpec(
                 constraint_id="use-adjacent-placement",
                 kind="required_action",
-                description="Use the audited adjacency placement helper.",
-                limit="place_entity_next_to",
+                description="Place the pole with exact placement next to the lab.",
+                limit="place_entity",
             )
         ],
     )
@@ -260,8 +261,9 @@ def connect_water_task() -> FactorioTaskSpec:
     return _task(
         task_id="micro_connect_offshore_pump_v1",
         goal=(
-            "Place the offshore pump on water and use connect_entities to "
-            "connect it to at least one pipe so the pump operates."
+            "Place the supplied offshore pump on water with place_offshore_pump, "
+            "then place at least one pipe against an attach tile reported by its "
+            "fluid port report so the pump operates."
         ),
         objectives=[
             ObjectiveSpec(
@@ -286,10 +288,10 @@ def connect_water_task() -> FactorioTaskSpec:
         max_interventions=5,
         constraints=[
             ConstraintSpec(
-                constraint_id="use-connect-entities",
+                constraint_id="use-offshore-pump-helper",
                 kind="required_action",
-                description="Use the audited connection helper.",
-                limit="connect_entities",
+                description="Place the pump with the audited shoreline helper.",
+                limit="place_offshore_pump",
             )
         ],
     )
@@ -299,8 +301,9 @@ def route_belt_task() -> FactorioTaskSpec:
     return _task(
         task_id="micro_connect_belt_v1",
         goal=(
-            "Place two transport-belt endpoints and use connect_entities to "
-            "construct a continuous belt route containing at least 5 belts."
+            "Lay the supplied transport belts as an exact polyline with "
+            "place_path so a continuous belt route containing at least 5 belts "
+            "exists."
         ),
         objectives=[
             ObjectiveSpec(
@@ -316,10 +319,10 @@ def route_belt_task() -> FactorioTaskSpec:
         max_interventions=4,
         constraints=[
             ConstraintSpec(
-                constraint_id="use-connect-entities",
+                constraint_id="use-place-path",
                 kind="required_action",
-                description="Use the audited connection helper.",
-                limit="connect_entities",
+                description="Build the route with the audited exact polyline tool.",
+                limit="place_path",
             )
         ],
     )

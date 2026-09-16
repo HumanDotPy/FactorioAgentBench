@@ -2,6 +2,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from fle.env.entities import Position
+from fle.env.game_types import Prototype
+from fle.env.tools.agent.get_entities.client import EntityList, GroundItem
 from fle.envd.backend import FLEWorker
 from fle.envd.models import DepotDeliveryTelemetry
 
@@ -15,6 +18,18 @@ class _StateNamespace:
         self.inventory = {"iron-plate": 10}
         self.stats = {"input": {}, "output": {}}
         self.census = {"assembling-machine-1": {"working": 1}}
+        self.stalls = {
+            "by_status": {},
+            "by_product": {},
+            "by_name": {},
+            "buffer_full": 0,
+            "detail": [],
+        }
+        self.ground_items = {}
+        self.ground_item_stacks = 0
+        self.ground_item_positions = []
+        self.missing_drop_targets = []
+        self.missing_drop_target_count = 0
         self.research = {"researched": {"automation": 1}}
 
     def inspect_inventory(self):
@@ -24,11 +39,50 @@ class _StateNamespace:
         return self.stats
 
     def _entity_census(self):
-        return {"census": self.census}
+        return {
+            "census": self.census,
+            "stalls": self.stalls,
+            "ground_items": self.ground_items,
+            "ground_item_stacks": self.ground_item_stacks,
+            "ground_item_positions": self.ground_item_positions,
+            "missing_drop_targets": self.missing_drop_targets,
+            "missing_drop_target_count": self.missing_drop_target_count,
+        }
 
     def _save_research_state(self, *, compact=False):
         assert compact is True
         return self.research
+
+    def get_entities(self, prototype=None, **kwargs):
+        assert prototype is Prototype.AssemblingMachine1
+        assert kwargs == {}
+        return EntityList(
+            [_EntityRecord()],
+            ground_items=[
+                GroundItem(
+                    name="iron-ore",
+                    count=7,
+                    position=Position(x=1.5, y=2.5),
+                )
+            ],
+            ground_item_stacks=1,
+            ground_item_totals={"iron-ore": 7},
+        )
+
+
+class _EntityRecord:
+    def model_dump(self):
+        return {
+            "name": "assembling-machine-1",
+            "prototype": Prototype.AssemblingMachine1,
+            "status": "working",
+            "position": Position(x=4, y=-2),
+            "recipe": "transport-belt",
+            "inventory": {"iron-plate": 10_000},
+            "tile_size": {"width": 3, "height": 3},
+            "snapped_center": {"x": 3.5, "y": -2.5},
+            "center_parity": {"x": 1, "y": 0},
+        }
 
 
 class _StateInstance:
@@ -43,7 +97,9 @@ def _worker():
     namespace = _StateNamespace()
     worker = FLEWorker.__new__(FLEWorker)
     worker.instance = _StateInstance(namespace)
-    worker.task_spec = SimpleNamespace(task_id="state-task")
+    worker.task_spec = SimpleNamespace(
+        task_id="state-task", goal="Inspect factory state", evaluation_mode=None
+    )
     worker._contracts_view = lambda: []
     worker._sync_customer = lambda: []
     worker._sync_active_order = lambda: []
@@ -88,8 +144,6 @@ def test_observe_emits_absolute_inventory_and_revisioned_delta():
     namespace.research = {
         "researched": {"automation": 1, "logistics": 1},
     }
-    worker._research_cache = None
-
     second = worker.observe("lease-1", cursor=first.cursor)
     assert second.cursor == "testnonce.2"
     assert second.is_keyframe is False
@@ -117,9 +171,7 @@ def test_observe_emits_absolute_inventory_and_revisioned_delta():
     assert production_history["samples"][-1]["revision"] == 2
     assert production_history["samples"][-1]["output"] == {"iron-plate": 120}
 
-    research_history = worker.query_state(
-        "lease-1", kind="research", since_revision=1
-    )
+    research_history = worker.query_state("lease-1", kind="research", since_revision=1)
     assert research_history["changes"] == [
         {
             "revision": 2,
@@ -129,13 +181,112 @@ def test_observe_emits_absolute_inventory_and_revisioned_delta():
         }
     ]
 
-    entity_history = worker.query_state(
-        "lease-1", kind="entities", changed_since=1
-    )
+    entity_history = worker.query_state("lease-1", kind="entities", changed_since=1)
     assert entity_history["mutations"][-1]["changed"]["assembling-machine-1"] == {
         "before": 1,
         "after": 2,
     }
+
+
+def test_observation_surfaces_stalls_and_ground_items():
+    worker, namespace = _worker()
+    namespace.stalls = {
+        "by_status": {"waiting_for_space_in_destination": 2},
+        "by_product": {"iron-ore": 2},
+        "by_name": {"electric-mining-drill": {"waiting_for_space_in_destination": 2}},
+        "buffer_full": 2,
+        "detail": [
+            {
+                "name": "electric-mining-drill",
+                "drop_target": None,
+                "tile_size": {"width": 3, "height": 3},
+                "center_parity": {"x": 1, "y": 1},
+            }
+        ],
+    }
+    namespace.ground_items = {"iron-ore": 7}
+    namespace.ground_item_stacks = 3
+    namespace.ground_item_positions = [
+        {"name": "iron-ore", "count": 7, "position": {"x": 1.5, "y": 2.5}}
+    ]
+    namespace.missing_drop_targets = [
+        {"name": "electric-mining-drill", "drop_position": {"x": 2, "y": 2}}
+    ]
+    namespace.missing_drop_target_count = 1
+
+    observation = worker.observe("lease-1")
+
+    assert observation.entities["stalls"]["buffer_full"] == 2
+    assert observation.entities["stalls"]["by_product"] == {"iron-ore": 2}
+    assert observation.entities["stalls"]["detail"][0]["tile_size"] == {
+        "width": 3,
+        "height": 3,
+    }
+    assert observation.entities["stalls"]["detail"][0]["center_parity"] == {
+        "x": 1,
+        "y": 1,
+    }
+    assert observation.entities["ground_items"] == {"iron-ore": 7}
+    assert observation.entities["ground_item_stacks"] == 3
+    assert observation.entities["ground_item_positions"] == [
+        {"name": "iron-ore", "count": 7, "position": {"x": 1.5, "y": 2.5}}
+    ]
+    assert observation.entities["missing_drop_targets"] == [
+        {"name": "electric-mining-drill", "drop_position": {"x": 2, "y": 2}}
+    ]
+    assert observation.entities["missing_drop_target_count"] == 1
+
+
+def test_filtered_entity_query_discloses_totals_and_truncation():
+    worker, _ = _worker()
+    worker.observe("lease-1")
+
+    result = worker.query_state(
+        "lease-1",
+        kind="entities",
+        entity_type="assembling-machine-1",
+        limit=1,
+    )
+
+    assert result["returned"] == 1
+    assert result["total"] == 1
+    assert result["truncated"] is False
+    assert result["mutation_count"] == 0
+
+
+def test_filtered_entity_query_serializes_pydantic_prototype_classes():
+    worker, _ = _worker()
+    worker.observe("lease-1")
+
+    result = worker.query_state(
+        "lease-1",
+        kind="entities",
+        entity_type="assembling-machine-1",
+        limit=4,
+    )
+
+    assert result["returned"] == 1
+    assert result["entities"] == [
+        {
+            "name": "assembling-machine-1",
+            "prototype": "assembling-machine-1",
+            "status": "working",
+            "position": {"x": 4.0, "y": -2.0},
+            "recipe": "transport-belt",
+            "tile_size": {"width": 3, "height": 3},
+            "snapped_center": {"x": 3.5, "y": -2.5},
+            "center_parity": {"x": 1, "y": 0},
+        }
+    ]
+    assert result["ground_items"] == [
+        {
+            "name": "iron-ore",
+            "count": 7,
+            "position": {"x": 1.5, "y": 2.5},
+        }
+    ]
+    assert result["ground_item_count"] == 1
+    assert "error" not in result
 
 
 def test_stale_cursor_falls_back_to_keyframe_and_public_history_is_compact():
@@ -161,11 +312,10 @@ def test_delivery_ledger_is_not_lost_when_recent_observation_projection_is_bound
     worker._delivery_raw_totals = {}
 
     for tick in range(1100):
-        worker._record_delivery_samples(
-            {"tick": tick}, [(tick, {"iron-plate": 1.0})]
-        )
+        worker._record_delivery_samples({"tick": tick}, [(tick, {"iron-plate": 1.0})])
 
-    assert len(worker._delivery_history) == 1100
-    assert worker._delivery_history[0] == (0, {"iron-plate": 1.0})
-    assert worker._delivery_history[-1] == (1099, {"iron-plate": 1.0})
-    assert worker._delivery_raw_totals == {"iron-plate": 1100.0}
+    telemetry = FLEWorker._delivery_telemetry_snapshot(worker)
+    assert telemetry.sample_count == 1100
+    assert telemetry.raw_totals == {"iron-plate": 1100.0}
+    assert len(telemetry.recent_buckets) == 120
+    assert telemetry.recent_buckets[-1]["items"] == {"iron-plate": 1.0}

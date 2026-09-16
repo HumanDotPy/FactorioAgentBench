@@ -7,6 +7,9 @@ from typing import Union
 from fle.env import EntityGroup
 from fle.env import FactorioInstance
 from fle.env.game_types import prototype_by_name
+from fle.agents.data.blueprints_to_policies.direction_semantics import (
+    agent_direction,
+)
 from fle.agents.data.blueprints_to_policies.models.blueprint_entity import (
     BlueprintEntity,
 )
@@ -241,7 +244,7 @@ class BlueprintAnalyzer:
                     "    game.move_to(Position(x=world_x+1, y=world_y))",
                     f"    entity = game.place_entity({self._name_to_prototype_string(pattern['name'])}, "
                     f"position=Position(x=world_x, y=world_y), "
-                    f"direction={self._direction_to_enum(pattern['direction'])}, "
+                    f"direction={self._direction_to_enum(pattern['direction'], pattern['name'])}, "
                     f"exact=True)",
                     f"    {array_name}.append(entity)",
                     "",
@@ -262,7 +265,7 @@ class BlueprintAnalyzer:
                     "    game.move_to(Position(x=world_x, y=world_y+1))",
                     f"    entity = game.place_entity({self._name_to_prototype_string(pattern['name'])}, "
                     f"position=Position(x=world_x, y=world_y), "
-                    f"direction={self._direction_to_enum(pattern['direction'])}, "
+                    f"direction={self._direction_to_enum(pattern['direction'], pattern['name'])}, "
                     f"exact=True)",
                     f"    {array_name}.append(entity)",
                     "",
@@ -284,7 +287,7 @@ class BlueprintAnalyzer:
                     f"{var_name} = game.place_entity({self._name_to_prototype_string(entity.name)}, "
                     f"position=Position(x=origin.x + {entity.position['x']:.1f}, "
                     f"y=origin.y + {entity.position['y']:.1f}), "
-                    f"direction={self._direction_to_enum(entity.direction)}, "
+                    f"direction={self._direction_to_enum(entity.direction, entity.name)}, "
                     f"exact=True)",
                     "",
                 ]
@@ -301,8 +304,9 @@ class BlueprintAnalyzer:
 
         return "\n".join(lines)
 
-    def _direction_to_enum(self, direction: int) -> str:
-        direction_map = {0: "UP", 2: "RIGHT", 4: "DOWN", 6: "LEFT"}
+    def _direction_to_enum(self, direction: int, name: str = None) -> str:
+        direction = agent_direction(name, direction)
+        direction_map = {0: "UP", 4: "RIGHT", 8: "DOWN", 12: "LEFT"}
         return f"Direction.{direction_map.get(direction, 'UP')}"
 
     def _name_to_prototype_string(self, name: str) -> str:
@@ -314,52 +318,57 @@ def analyze_blueprint(blueprint_json: str) -> str:
     return analyzer.generate_program(), analyzer.get_inventory()
 
 
-execution_dir = os.path.dirname(os.path.realpath(__file__)) + "/blueprints/other/"
-filename = "1a. Mining"  # Early Mining"
+def generate_policy_files() -> None:
+    execution_dir = os.path.dirname(os.path.realpath(__file__)) + "/blueprints/other/"
+    filename = "1a. Mining"  # Early Mining"
 
-# iterate over all json files in the directory
-for filename in os.listdir(execution_dir):
-    if filename.endswith(".json"):
-        # skip if the python file exists
-        if os.path.exists(execution_dir + filename.replace(".json", ".py")):
-            continue
-        with open(execution_dir + filename, "r") as f:
-            print(filename)
-            blueprint_json = f.read()
-            blueprint = json.loads(blueprint_json)
-            if len(blueprint["entities"]) > 200:
-                print("Skipping large blueprint")
+    # iterate over all json files in the directory
+    for filename in os.listdir(execution_dir):
+        if filename.endswith(".json"):
+            # skip if the python file exists
+            if os.path.exists(execution_dir + filename.replace(".json", ".py")):
                 continue
-            analyzer = BlueprintAnalyzer(blueprint)
-            code = analyzer.generate_program()
-            inventory = analyzer.get_inventory()
-            instance = FactorioInstance(
-                address="localhost",
-                bounding_box=200,
-                tcp_port=27000,
-                fast=True,
-                cache_scripts=False,
-                inventory=inventory,
-            )
-            try:
-                score, goal, result = instance.eval_with_error(
-                    code.replace("game.", ""), timeout=60
+            with open(execution_dir + filename, "r") as f:
+                print(filename)
+                blueprint_json = f.read()
+                blueprint = json.loads(blueprint_json)
+                if len(blueprint["entities"]) > 200:
+                    print("Skipping large blueprint")
+                    continue
+                analyzer = BlueprintAnalyzer(blueprint)
+                code = analyzer.generate_program()
+                inventory = analyzer.get_inventory()
+                instance = FactorioInstance(
+                    address="localhost",
+                    bounding_box=200,
+                    tcp_port=27000,
+                    fast=True,
+                    cache_scripts=False,
+                    inventory=inventory,
                 )
-                if "error" in result:
-                    raise Exception(result["error"])
-            except Exception as e:
-                print(e)
-                print("Error in blueprint")
-                continue
+                try:
+                    score, goal, result = instance.eval_with_error(
+                        code.replace("game.", ""), timeout=60
+                    )
+                    if "error" in result:
+                        raise Exception(result["error"])
+                except Exception as e:
+                    print(e)
+                    print("Error in blueprint")
+                    continue
 
-            print(code)
-            game_entities = instance.namespace.get_entities()
-            try:
-                analyzer.verify_placement(game_entities)
-            except AssertionError as e:
-                print(e)
-                print("Error in blueprint")
-                continue
-            # Write the code to a python file of the same name
-            with open(execution_dir + filename.replace(".json", ".py"), "w") as f1:
-                f1.write(code)
+                print(code)
+                game_entities = instance.namespace.get_entities()
+                try:
+                    analyzer.verify_placement(game_entities)
+                except AssertionError as e:
+                    print(e)
+                    print("Error in blueprint")
+                    continue
+                # Write the code to a python file of the same name
+                with open(execution_dir + filename.replace(".json", ".py"), "w") as f1:
+                    f1.write(code)
+
+
+if __name__ == "__main__":
+    generate_policy_files()

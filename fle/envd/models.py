@@ -15,9 +15,9 @@ DISRUPTION_GENERATOR_VERSION = "disruption-schedule-v1"
 # calibration manifest version changes independently when only fitted
 # parameters are re-published.
 ADAPTIVE_BENCHMARK_SCHEMA_VERSION = "adaptive-contract-1"
-ADAPTIVE_BENCHMARK_VERSION = "adaptive-contract-benchmark-0.5.0-dev"
+ADAPTIVE_BENCHMARK_VERSION = "adaptive-throughput-benchmark-0.7.0-dev"
 CONTRACT_FEATURES_VERSION = "contract-features-v2"
-CONTRACT_GENERATOR_VERSION = "contract-generator-v3"
+CONTRACT_GENERATOR_VERSION = "contract-generator-v5"
 CONTRACT_SELECTOR_VERSION = "contract-selector-v3"
 CONTRACT_CALIBRATION_VERSION = "uncalibrated"  # replaced by manifests
 CONTRACT_RATER_MODEL_VERSION = "trueskill-continuous-contract-v2"
@@ -25,7 +25,7 @@ PARTICIPANT_IDENTITY_VERSION = "participant-identity-v1"
 TRAINING_BANK_VERSION = "training-bank-v1"
 MEMORY_IMPLEMENTATION_VERSION = "session-memory-v1"
 API_REFERENCE_VERSION = "fle-api-reference-v1"
-GAME_DATA_REFERENCE_VERSION = "factorio-game-data-reference-v1"
+GAME_DATA_REFERENCE_VERSION = "factorio-game-data-reference-v2"
 CAPABILITY_GRAPH_VERSION = "capability-graph-v2"
 CAPABILITY_CERTIFICATE_VERSION = "capability-certificates-v1"
 FOLLOW_UP_POLICY_VERSION = "evidence-driven-customer-v2"
@@ -46,6 +46,19 @@ RatingResult = Literal["win", "draw", "loss"]
 
 class WireModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    _derived_cache_keys = ()
+
+    def model_copy(
+        self,
+        *,
+        update: dict[str, Any] | None = None,
+        deep: bool = False,
+    ) -> "WireModel":
+        copied = super().model_copy(update=update, deep=deep)
+        for key in self._derived_cache_keys:
+            copied.__dict__.pop(key, None)
+        return copied
 
 
 TaskFamily = Literal[
@@ -177,12 +190,14 @@ class ThroughputAuditSpec(WireModel):
     detector_window_seconds: int = Field(default=5, ge=1, le=3600)
     detector_trigger_ratio: float = Field(default=1.05, gt=0.0)
     burn_in_seconds: int = Field(default=20, ge=0, le=3600)
-    holdout_seconds_min: int = Field(default=30, ge=1, le=3600)
-    holdout_seconds_max: int = Field(default=60, ge=1, le=3600)
+    holdout_seconds_min: int = Field(default=120, ge=1, le=3600)
+    holdout_seconds_max: int = Field(default=180, ge=1, le=3600)
     subwindow_seconds: int = Field(default=10, ge=1, le=600)
     subwindow_floor_ratio: float = Field(default=0.8, ge=0.0, le=1.0)
     audit_game_speed: float = Field(default=50.0, gt=0.0, le=1000.0)
     require_depot_service: bool = True
+    require_closed_loop: bool = True
+    closure_min_supply_ratio: float = Field(default=0.5, ge=0.0, le=1.0)
 
     @model_validator(mode="after")
     def validate_windows(self) -> "ThroughputAuditSpec":
@@ -194,9 +209,7 @@ class ThroughputAuditSpec(WireModel):
             self.holdout_seconds_min % self.subwindow_seconds
             or self.holdout_seconds_max % self.subwindow_seconds
         ):
-            raise ValueError(
-                "holdout bounds must be divisible by subwindow_seconds"
-            )
+            raise ValueError("holdout bounds must be divisible by subwindow_seconds")
         return self
 
 
@@ -290,6 +303,8 @@ class CustomerContractSpec(WireModel):
     success_ratio: float = Field(default=1.0, gt=0.0, le=1.0)
     receipt_key_env: str = "FLE_CUSTOMER_RECEIPT_KEY"
 
+    _derived_cache_keys = ("_commitment_cache",)
+
     @model_validator(mode="after")
     def validate_order_ids(self) -> "CustomerContractSpec":
         order_ids = [order.order_id for order in self.orders]
@@ -300,17 +315,22 @@ class CustomerContractSpec(WireModel):
     @computed_field
     @property
     def commitment(self) -> str:
-        payload = json.dumps(
-            [
-                order.model_dump(mode="json")
-                for order in sorted(
-                    self.orders, key=lambda order: (order.issue_tick, order.order_id)
-                )
-            ],
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        return hashlib.sha256(payload.encode()).hexdigest()
+        cached = self.__dict__.get("_commitment_cache")
+        if cached is None:
+            payload = json.dumps(
+                [
+                    order.model_dump(mode="json")
+                    for order in sorted(
+                        self.orders,
+                        key=lambda order: (order.issue_tick, order.order_id),
+                    )
+                ],
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            cached = hashlib.sha256(payload.encode()).hexdigest()
+            self.__dict__["_commitment_cache"] = cached
+        return cached
 
 
 class PerturbationSpec(WireModel):
@@ -358,6 +378,8 @@ class DisruptionScheduleSpec(WireModel):
     recovery_rate_threshold: float = Field(default=0.85, gt=0.0, le=1.0)
     recovery_min_ticks: int = Field(default=600, ge=0)
 
+    _derived_cache_keys = ("_commitment_cache",)
+
     @model_validator(mode="after")
     def validate_perturbation_ids(self) -> "DisruptionScheduleSpec":
         ids = [p.perturbation_id for p in self.perturbations]
@@ -368,15 +390,19 @@ class DisruptionScheduleSpec(WireModel):
     @computed_field
     @property
     def commitment(self) -> str:
-        payload = json.dumps(
-            [
-                p.model_dump(mode="json")
-                for p in sorted(self.perturbations, key=lambda p: p.trigger_tick)
-            ],
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        return hashlib.sha256(payload.encode()).hexdigest()
+        cached = self.__dict__.get("_commitment_cache")
+        if cached is None:
+            payload = json.dumps(
+                [
+                    p.model_dump(mode="json")
+                    for p in sorted(self.perturbations, key=lambda p: p.trigger_tick)
+                ],
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            cached = hashlib.sha256(payload.encode()).hexdigest()
+            self.__dict__["_commitment_cache"] = cached
+        return cached
 
 
 class FactorioTaskSpec(WireModel):
@@ -386,6 +412,7 @@ class FactorioTaskSpec(WireModel):
     backend_task_id: str | None = None
     goal: str
     task_family: TaskFamily = "throughput"
+    evaluation_mode: Literal["technology", "rocket_launch"] | None = None
     adaptive_contract_session: bool = Field(
         default=False,
         description=(
@@ -405,9 +432,19 @@ class FactorioTaskSpec(WireModel):
     blueprint_scope: str | None = Field(
         default=None,
         description=(
-            "Blueprint store scope. None keeps blueprints ephemeral to the "
-            "lease (benchmark default); a lineage id shares saved blueprints "
-            "across a training generation."
+            "Blueprint store scope. None derives the scope from lineage_id "
+            "(artifacts persist for the map lineage) and falls back to "
+            "lease-ephemeral storage when no lineage exists. An explicit value "
+            "overrides the lineage derivation."
+        ),
+    )
+    template_scope: str | None = Field(
+        default=None,
+        description=(
+            "Program template store scope. None derives the scope from "
+            "lineage_id (templates persist for the map lineage) and falls back "
+            "to lease-ephemeral storage when no lineage exists. An explicit "
+            "value overrides the lineage derivation."
         ),
     )
     lineage_id: str | None = Field(
@@ -419,10 +456,20 @@ class FactorioTaskSpec(WireModel):
         description="Training generation this rollout belongs to.",
     )
     seed: int = 0
-    scenario: str = "default_lab_scenario"
-    factorio_version: str = "2.0.73"
-    checkpoint_id: str = "scenario:default_lab_scenario"
-    action_profile: str = "fle-program-v1"
+    scenario: str = "open_world"
+    factorio_version: str = "2.0.77"
+    checkpoint_id: str = "scenario:open_world"
+    action_profile: str = "semantic-motor-v1"
+    execution_mode: Literal["turn_based", "realtime"] = "turn_based"
+    realtime_allowed: bool = Field(
+        default=True,
+        description=(
+            "Whether the agent may enable realtime pacing via "
+            "factorio_set_realtime. Evaluation configs set this to False to "
+            "force paused-while-thinking; the default permits realtime up to "
+            "the execution speed (10x by default)."
+        ),
+    )
     max_interventions: int | None = Field(
         default=8,
         ge=1,
@@ -434,8 +481,42 @@ class FactorioTaskSpec(WireModel):
     )
     holdout_seconds: int = Field(default=60, ge=0)
 
+    _derived_cache_keys = ("_fingerprint_cache",)
+
     @model_validator(mode="after")
     def validate_objectives(self) -> "FactorioTaskSpec":
+        if self.execution_mode == "realtime" and not self.realtime_allowed:
+            raise ValueError("Realtime execution requires realtime_allowed")
+        if self.evaluation_mode:
+            if self.adaptive_contract_session or self.customer is not None:
+                raise ValueError("Progression modes cannot also be customer sessions")
+            if self.verifier.implementation != "objective_engine_v1":
+                raise ValueError(
+                    "Progression modes require the native objective verifier"
+                )
+            required = [
+                objective for objective in self.objectives if objective.required
+            ]
+            required_kind = (
+                "research" if self.evaluation_mode == "technology" else "rocket_launch"
+            )
+            if not required or any(
+                objective.kind != required_kind for objective in required
+            ):
+                raise ValueError(
+                    f"{self.evaluation_mode} requires {required_kind} goals"
+                )
+            if any(
+                objective.kind not in {"research", "rocket_launch"}
+                for objective in self.objectives
+            ):
+                raise ValueError(
+                    "Progression modes accept research and launch objectives"
+                )
+            if any(constraint.kind != "max_ticks" for constraint in self.constraints):
+                raise ValueError("Progression modes accept simulation budgets only")
+            self.max_interventions = None
+            self.holdout_seconds = 0
         objective_ids = [objective.objective_id for objective in self.objectives]
         if len(objective_ids) != len(set(objective_ids)):
             raise ValueError("Factorio objective ids must be unique within a task")
@@ -454,8 +535,12 @@ class FactorioTaskSpec(WireModel):
     @computed_field
     @property
     def fingerprint(self) -> str:
-        payload = self.model_dump_json(exclude={"fingerprint"})
-        return hashlib.sha256(payload.encode()).hexdigest()
+        cached = self.__dict__.get("_fingerprint_cache")
+        if cached is None:
+            payload = self.model_dump_json(exclude={"fingerprint"})
+            cached = hashlib.sha256(payload.encode()).hexdigest()
+            self.__dict__["_fingerprint_cache"] = cached
+        return cached
 
 
 class LifecycleDecision(WireModel):
@@ -503,6 +588,7 @@ class RuntimeCheckpoint(WireModel):
     checkpoint_id: str
     runtime_backend: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ActionEvent(WireModel):
@@ -515,12 +601,14 @@ class ActionEvent(WireModel):
     evaluation_retry: bool = False
     result: str = ""
     ticks: int = 0
+    ticks_elapsed: int = Field(default=0, ge=0)
     executed_tools: list[str] = Field(default_factory=list)
     policy_violations: list[str] = Field(default_factory=list)
+    template: str | None = None
 
 
 class CustomerDepotView(WireModel):
-    """Authoritative student-visible identity for a customer delivery sink."""
+    """Authoritative student-visible identity for a bound delivery chest."""
 
     depot_id: str
     unit_number: int | None = None
@@ -529,6 +617,9 @@ class CustomerDepotView(WireModel):
     surface: str | None = None
     customer_owned: bool = True
     consumes_deliveries: bool = True
+    product: str | None = None
+    acceptance_limit: float | None = Field(default=None, ge=0)
+    accepted: float | None = Field(default=None, ge=0)
 
 
 class DepotDeliveryTelemetry(WireModel):
@@ -559,12 +650,16 @@ class DepotDeliveryTelemetry(WireModel):
 
 
 class DeliveryReceipt(WireModel):
-    """Objective-level feedback for an intervention that inserted items."""
+    """Separate interval contract credit from physical depot traffic."""
 
     credited: dict[str, float] = Field(default_factory=dict)
     remaining: dict[str, float] = Field(default_factory=dict)
     contract_status: ContractStatus | None = None
+    delivery_mode: Literal["none", "inserter_fed"] = "none"
+    throughput_certified: bool = False
+    qualification_pending: bool = False
     customer_depot_ids: list[str] = Field(default_factory=list)
+    observed_depot_totals: dict[str, float] = Field(default_factory=dict)
     message: str
 
 
@@ -631,8 +726,25 @@ class ExecutionResult(WireModel):
     production_score: float
     automated_production_score: float
     state_hash: str
+    research: dict[str, Any] = Field(default_factory=dict)
+    status_changes: dict[str, Any] = Field(default_factory=dict)
+    evaluation_progress: dict[str, Any] | None = None
     events: list["VerifierEvent"] = Field(default_factory=list)
     terminal_reason: str | None = None
+
+
+class RealtimeState(WireModel):
+    """Whether the simulation keeps running between agent interventions.
+
+    This is a pacing control, not a determinism input: simulation accounting
+    always uses authoritative game ticks.  ``enabled`` means the world stays
+    unpaused while the model reasons; ``speed`` is the execution speed used
+    while it runs (1x-10x, never below 1x).
+    """
+
+    enabled: bool = False
+    speed: float = 10.0
+    paused: bool = True
 
 
 class Observation(WireModel):
@@ -657,12 +769,17 @@ class Observation(WireModel):
     inventory_delta: dict[str, int | float] = Field(default_factory=dict)
     delta: dict[str, Any] = Field(default_factory=dict)
     entities: dict[str, Any] = Field(default_factory=dict)
+    status_changes: dict[str, Any] = Field(default_factory=dict)
+    camera_state: dict[str, Any] = Field(default_factory=dict)
     research: dict[str, Any] = Field(default_factory=dict)
+    evaluation_progress: dict[str, Any] | None = None
     errors: dict[str, Any] = Field(default_factory=dict)
     contracts: list["OpenContractView"] = Field(default_factory=list)
     customer_depots: list[CustomerDepotView] = Field(default_factory=list)
     customer_delivery: DepotDeliveryTelemetry | None = None
     blueprints: list["BlueprintSummary"] = Field(default_factory=list)
+    templates: list["ProgramTemplateSummary"] = Field(default_factory=list)
+    realtime: "RealtimeState" = Field(default_factory=RealtimeState)
 
 
 class BlueprintSummary(WireModel):
@@ -672,6 +789,24 @@ class BlueprintSummary(WireModel):
     entity_count: int = 0
     times_placed: int = 0
     content_sha256: str = ""
+
+
+class ProgramTemplateSummary(WireModel):
+    """Student-visible template library entry (body stays server-side)."""
+
+    name: str
+    description: str = ""
+    parameters: list[str] = Field(default_factory=list)
+    version: int = 1
+    body_sha256: str = ""
+    times_run: int = 0
+
+
+class ProgramTemplateView(ProgramTemplateSummary):
+    """Full template view returned by get/save calls."""
+
+    code: str = ""
+    parameter_specs: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class OpenContractView(WireModel):
@@ -684,6 +819,7 @@ class OpenContractView(WireModel):
     order_id: str
     kind: OrderKind
     products: list[ProductDemandSpec]
+    target_rate_per_minute: dict[str, float] = Field(default_factory=dict)
     issued_at_tick: int
     due_tick: int
     grace_ticks: int = 0
@@ -691,6 +827,8 @@ class OpenContractView(WireModel):
     fulfilled: dict[str, float] = Field(default_factory=dict)
     remaining: dict[str, float] = Field(default_factory=dict)
     completion_ratio: float | None = Field(default=None, ge=0.0, le=1.0)
+    service_completion_ratio: float | None = Field(default=None, ge=0.0, le=1.0)
+    throughput_certified: bool = False
 
 
 class RewardVector(WireModel):
@@ -945,8 +1083,10 @@ class VerificationSnapshot(WireModel):
 
 class CapabilityManifest(WireModel):
     protocol_version: str = PROTOCOL_VERSION
-    factorio_version: str = "2.0.73"
-    action_profiles: list[str] = Field(default_factory=lambda: ["fle-program-v1"])
+    factorio_version: str = "2.0.77"
+    action_profiles: list[str] = Field(
+        default_factory=lambda: ["semantic-motor-v1", "planner-assisted-v1"]
+    )
     api_reference_id: str = API_REFERENCE_VERSION
     game_data_reference_id: str = GAME_DATA_REFERENCE_VERSION
     memory_implementation_version: str = MEMORY_IMPLEMENTATION_VERSION
@@ -955,10 +1095,13 @@ class CapabilityManifest(WireModel):
             "leases": True,
             "execute_program": True,
             "observations": True,
+            "factory_rendering": True,
+            "multimodal_tool_results": True,
             "holdout_verification": True,
             "general_task_specs": True,
             "typed_verifier_events": True,
             "objective_engine_v1": True,
+            "progression_evaluations": True,
             "privileged_diagnostics": True,
             "state_quality_snapshots": True,
             "state_dominance_comparator": True,
@@ -977,6 +1120,11 @@ class CapabilityManifest(WireModel):
             "per_lease_serial_execution": True,
             "parallel_world_mutations": False,
             "programmatic_action_composition": True,
+            "turn_based_execution": True,
+            "native_tick_actions": True,
+            "semantic_motor_options": True,
+            "configurable_execution_speed": True,
+            "planner_assisted_ablation": True,
             "provider_native_programmatic_tool_calling": False,
             "idempotent_execute_retries": True,
             "process_isolation": False,
@@ -991,6 +1139,7 @@ class CapabilityManifest(WireModel):
             "capability_graph_evidence": True,
             "adaptive_follow_up_policy": True,
             "autonomous_throughput_checks": True,
+            "agent_designated_delivery": True,
         }
     )
 
@@ -1193,7 +1342,9 @@ class CapabilityCertificate(WireModel):
     captured_tick: int = Field(default=0, ge=0)
     certified_at_tick: int | None = Field(default=None, ge=0)
     status: CapabilityEvidenceStatus = "commissioned"
-    evidence_source: Literal["snapshot", "contract", "qualification", "stress"] = "snapshot"
+    evidence_source: Literal["snapshot", "contract", "qualification", "stress"] = (
+        "snapshot"
+    )
     demand_vector: dict[str, float] = Field(default_factory=dict)
     target_rate_per_minute: dict[str, float] = Field(default_factory=dict)
     observed_rate_per_minute: dict[str, float] = Field(default_factory=dict)
@@ -1210,7 +1361,9 @@ class CapabilityCertificate(WireModel):
     @model_validator(mode="after")
     def validate_claim(self) -> "CapabilityCertificate":
         if not self.demand_vector:
-            raise ValueError("capability certificates require a non-empty demand_vector")
+            raise ValueError(
+                "capability certificates require a non-empty demand_vector"
+            )
         if any(float(rate) < 0 for rate in self.demand_vector.values()):
             raise ValueError("demand_vector rates cannot be negative")
         if any(float(rate) < 0 for rate in self.target_rate_per_minute.values()):
@@ -1219,19 +1372,31 @@ class CapabilityCertificate(WireModel):
             raise ValueError("observed rates cannot be negative")
         if self.status in {"observed_sustained", "sustained", "autonomous", "robust"}:
             if self.sustained_window_ticks <= 0:
-                raise ValueError("sustained evidence requires a positive sustained_window_ticks")
+                raise ValueError(
+                    "sustained evidence requires a positive sustained_window_ticks"
+                )
         if self.status in {"autonomous", "robust"}:
             if self.evidence_source not in {"qualification", "stress"}:
-                raise ValueError("autonomous evidence must come from a qualification or stress window")
+                raise ValueError(
+                    "autonomous evidence must come from a qualification or stress window"
+                )
             if not self.autonomous_validation:
-                raise ValueError("autonomous evidence requires autonomous_validation=True")
+                raise ValueError(
+                    "autonomous evidence requires autonomous_validation=True"
+                )
             if self.qualification_window_ticks <= 0:
-                raise ValueError("autonomous evidence requires a positive qualification window")
+                raise ValueError(
+                    "autonomous evidence requires a positive qualification window"
+                )
             if self.interventions_during_window != 0:
-                raise ValueError("autonomous evidence requires zero interventions during qualification")
+                raise ValueError(
+                    "autonomous evidence requires zero interventions during qualification"
+                )
         if self.status == "robust":
             if self.evidence_source != "stress" or self.robustness_checks <= 0:
-                raise ValueError("robust evidence requires at least one stress/perturbation check")
+                raise ValueError(
+                    "robust evidence requires at least one stress/perturbation check"
+                )
         if self.capability_id is None:
             object.__setattr__(self, "capability_id", self.derived_capability_id())
         return self
@@ -1252,7 +1417,12 @@ class CapabilityCertificate(WireModel):
 
     @property
     def is_sustainable(self) -> bool:
-        return self.status in {"observed_sustained", "sustained", "autonomous", "robust"}
+        return self.status in {
+            "observed_sustained",
+            "sustained",
+            "autonomous",
+            "robust",
+        }
 
     @property
     def is_autonomous(self) -> bool:
@@ -1308,17 +1478,26 @@ class CapabilityLedger(WireModel):
 
     def record(self, certificate: CapabilityCertificate) -> CapabilityCertificate:
         """Append evidence and refresh current/best progress projections."""
-        if self.session_id and certificate.session_id and certificate.session_id != self.session_id:
+        if (
+            self.session_id
+            and certificate.session_id
+            and certificate.session_id != self.session_id
+        ):
             raise ValueError("certificate session_id does not match ledger session_id")
         if not self.session_id and certificate.session_id:
             self.session_id = certificate.session_id
         self.certificates.append(certificate)
-        current = self.compute_progress(captured_tick=certificate.certified_at_tick or certificate.captured_tick)
+        current = self.compute_progress(
+            captured_tick=certificate.certified_at_tick or certificate.captured_tick
+        )
         # Keep the stored watermark finite. ``current_progress`` adds the
         # serialized best vector when it is requested for reporting.
         current.best_watermark = {}
         self.progress_history.append(current)
-        if self.best_progress is None or current.order_key() > self.best_progress.order_key():
+        if (
+            self.best_progress is None
+            or current.order_key() > self.best_progress.order_key()
+        ):
             self.best_progress = current
         return certificate
 
@@ -1328,21 +1507,35 @@ class CapabilityLedger(WireModel):
         """Return the projection without changing the ledger."""
         return self.compute_progress()
 
-    def compute_progress(self, *, captured_tick: int | None = None) -> FactoryProgressVector:
+    def compute_progress(
+        self, *, captured_tick: int | None = None
+    ) -> FactoryProgressVector:
         latest: dict[str, CapabilityCertificate] = {}
         for certificate in self.certificates:
             key = certificate.capability_id or certificate.derived_capability_id()
             prior = latest.get(key)
-            if prior is None or (certificate.certified_at_tick or certificate.captured_tick) >= (prior.certified_at_tick or prior.captured_tick):
+            if prior is None or (
+                certificate.certified_at_tick or certificate.captured_tick
+            ) >= (prior.certified_at_tick or prior.captured_tick):
                 latest[key] = certificate
-        sustainable = [certificate for certificate in latest.values() if certificate.is_sustainable]
-        sustainable_ids = {certificate.capability_id or certificate.derived_capability_id() for certificate in sustainable}
+        sustainable = [
+            certificate for certificate in latest.values() if certificate.is_sustainable
+        ]
+        sustainable_ids = {
+            certificate.capability_id or certificate.derived_capability_id()
+            for certificate in sustainable
+        }
         closed = [
             certificate
             for certificate in sustainable
-            if all(prerequisite in sustainable_ids for prerequisite in certificate.prerequisite_capability_ids)
+            if all(
+                prerequisite in sustainable_ids
+                for prerequisite in certificate.prerequisite_capability_ids
+            )
         ]
-        autonomous = [certificate for certificate in sustainable if certificate.is_autonomous]
+        autonomous = [
+            certificate for certificate in sustainable if certificate.is_autonomous
+        ]
         if sustainable:
             closure_ratio = len(closed) / len(sustainable)
             reliability = sum(c.reliability for c in sustainable) / len(sustainable)
@@ -1353,7 +1546,9 @@ class CapabilityLedger(WireModel):
             autonomy = len(autonomous) / len(sustainable)
         else:
             autonomy = 0.0
-        products = {product for certificate in sustainable for product in certificate.products}
+        products = {
+            product for certificate in sustainable for product in certificate.products
+        }
         observed_joint = max(
             (
                 sum(
@@ -1374,7 +1569,13 @@ class CapabilityLedger(WireModel):
         joint = 0.0
         for certificate in autonomous:
             if len(certificate.products) > 1:
-                joint = max(joint, sum(certificate.observed_rate_per_minute.get(product, 0.0) for product in certificate.products))
+                joint = max(
+                    joint,
+                    sum(
+                        certificate.observed_rate_per_minute.get(product, 0.0)
+                        for product in certificate.products
+                    ),
+                )
         if joint == 0.0:
             joint = sum(
                 certificate.observed_rate_per_minute.get(product, 0.0)
@@ -1383,12 +1584,27 @@ class CapabilityLedger(WireModel):
             )
         vector = FactoryProgressVector(
             session_id=self.session_id,
-            captured_tick=(captured_tick if captured_tick is not None else (self.progress_history[-1].captured_tick if self.progress_history else 0)),
+            captured_tick=(
+                captured_tick
+                if captured_tick is not None
+                else (
+                    self.progress_history[-1].captured_tick
+                    if self.progress_history
+                    else 0
+                )
+            ),
             highest_observed_band=max(
                 (certificate.capability_band for certificate in closed),
                 default=0,
             ),
-            highest_certified_band=max((certificate.capability_band for certificate in closed if certificate.is_autonomous), default=0),
+            highest_certified_band=max(
+                (
+                    certificate.capability_band
+                    for certificate in closed
+                    if certificate.is_autonomous
+                ),
+                default=0,
+            ),
             closure_ratio=closure_ratio,
             breadth=len(products),
             joint_sustained_throughput=joint,
@@ -1506,9 +1722,9 @@ class ContractEpochSpec(WireModel):
         if fields.get("factory_band") is None and context is not None:
             fields["factory_band"] = getattr(context, "factory_band", None)
         if fields.get("target_band") is None and features is not None:
-            fields["target_band"] = getattr(
-                features, "target_band", None
-            ) or getattr(features, "stage_band", None)
+            fields["target_band"] = getattr(features, "target_band", None) or getattr(
+                features, "stage_band", None
+            )
         provisional = cls.model_construct(**fields)
         return cls(
             **fields,
@@ -1566,7 +1782,7 @@ class ThroughputCheckResult(WireModel):
 class ThroughputAuditResult(WireModel):
     """Privileged evidence from an intervention-free cloned simulation."""
 
-    schema_version: str = "autonomous-throughput-audit-v1"
+    schema_version: str = "autonomous-throughput-audit-v2"
     lease_id: str
     session_id: str
     epoch_index: int = Field(ge=1)
@@ -1585,6 +1801,9 @@ class ThroughputAuditResult(WireModel):
     depot_rates_per_minute: dict[str, float] = Field(default_factory=dict)
     production_subwindow_rates: dict[str, list[float]] = Field(default_factory=dict)
     depot_subwindow_rates: dict[str, list[float]] = Field(default_factory=dict)
+    supply_chain_rates_per_minute: dict[str, float] = Field(default_factory=dict)
+    supply_chain_targets_per_minute: dict[str, float] = Field(default_factory=dict)
+    supply_chain_scores: dict[str, float] = Field(default_factory=dict)
     line_scores: dict[str, float] = Field(default_factory=dict)
     passed: bool = False
     failure_reasons: list[str] = Field(default_factory=list)
@@ -1618,9 +1837,7 @@ class ContractEpochOutcome(WireModel):
     delivery_telemetry: dict[str, Any] = Field(default_factory=dict)
     autonomous_throughput: ThroughputCheckResult | None = None
     throughput_audit: ThroughputAuditResult | None = None
-    throughput_audit_attempts: list[ThroughputAuditResult] = Field(
-        default_factory=list
-    )
+    throughput_audit_attempts: list[ThroughputAuditResult] = Field(default_factory=list)
 
 
 class CapabilityRating(WireModel):

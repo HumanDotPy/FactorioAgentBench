@@ -151,9 +151,7 @@ def research_state_identity(state: ResearchState | Mapping[str, Any] | None) -> 
 
     return {
         "schema_version": RESEARCH_STATE_IDENTITY_VERSION,
-        "researched": {
-            name: researched[name] for name in sorted(researched)
-        },
+        "researched": {name: researched[name] for name in sorted(researched)},
         "disabled": sorted(disabled),
         "current_research": current_name,
         "research_progress": _research_number(

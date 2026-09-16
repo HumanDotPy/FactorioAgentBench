@@ -13,7 +13,7 @@ import json
 import logging
 import uuid
 from urllib.parse import urlencode
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
@@ -260,6 +260,7 @@ class _AgentEnvLeaseRecord:
     inner_lease_id: str
     lock: asyncio.Lock
     paused: bool = False
+    refreshed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class AgentEnvEnvironmentGateway:
@@ -342,10 +343,13 @@ class AgentEnvEnvironmentGateway:
         return expired
 
     async def _touch(self, record: _AgentEnvLeaseRecord) -> None:
+        now = datetime.now(timezone.utc)
+        record.lease.expires_at = now + timedelta(seconds=self.config.lease_ttl_seconds)
+        interval = self.config.sandbox_timeout_seconds * 0.5
+        if (now - record.refreshed_at).total_seconds() < interval:
+            return
         await self.control.refresh_sandbox(record.sandbox_id)
-        record.lease.expires_at = datetime.now(timezone.utc) + timedelta(
-            seconds=self.config.lease_ttl_seconds
-        )
+        record.refreshed_at = now
 
     async def health(self) -> HealthStatus:
         await self.reap_expired()
@@ -367,6 +371,10 @@ class AgentEnvEnvironmentGateway:
         *,
         tool_error_retry_budget: int = 0,
     ) -> Lease:
+        if task.execution_mode == "realtime":
+            raise ValueError(
+                "Realtime program scheduling requires the local envd backend"
+            )
         await self.reap_expired()
         await self._reserve_capacity()
         sandbox_id: str | None = None
@@ -502,9 +510,80 @@ class AgentEnvEnvironmentGateway:
             await self._touch(record)
             return dict(result)
 
+    async def craft_plan(
+        self, lease_id: str, *, product: str, quantity: int = 1, depth: int = 2
+    ) -> dict[str, Any]:
+        record = await self._record(lease_id)
+        async with record.lock:
+            query = urlencode(
+                {"product": product, "quantity": quantity, "depth": depth}
+            )
+            result = await self.control.guest_request(
+                record.sandbox_id,
+                "GET",
+                f"/v1/leases/{record.inner_lease_id}/craft-plan?{query}",
+            )
+            await self._touch(record)
+            return dict(result)
+
+    async def camera(
+        self,
+        lease_id: str,
+        *,
+        settings: dict[str, Any] | None = None,
+        include_image: bool = True,
+    ) -> dict[str, Any]:
+        record = await self._record(lease_id)
+        async with record.lock:
+            result = await self.control.guest_request(
+                record.sandbox_id,
+                "POST" if settings is not None else "GET",
+                f"/v1/leases/{record.inner_lease_id}/camera?include_image={str(include_image).lower()}",
+                **({"json": settings} if settings is not None else {}),
+            )
+            await self._touch(record)
+            return dict(result)
+
+    async def render_factory(
+        self,
+        lease_id: str,
+        *,
+        center_x: float | None = None,
+        center_y: float | None = None,
+        radius: int = 32,
+        include_status: bool = True,
+    ) -> dict[str, Any]:
+        record = await self._record(lease_id)
+        async with record.lock:
+            params = {
+                key: value
+                for key, value in {
+                    "center_x": center_x,
+                    "center_y": center_y,
+                    "radius": radius,
+                    "include_status": str(include_status).lower(),
+                }.items()
+                if value is not None
+            }
+            query = "?" + urlencode(params) if params else ""
+            result = await self.control.guest_request(
+                record.sandbox_id,
+                "GET",
+                f"/v1/leases/{record.inner_lease_id}/render{query}",
+            )
+            await self._touch(record)
+            return dict(result)
+
     # Memory remains authoritative in the guest envd; forwarding these calls
     # keeps the AgentENV gateway identical to the local evaluation surface.
-    async def memory_list(self, lease_id: str, *, prefix: str = "", limit: int = 50, cursor: str | None = None) -> MemoryListResponse:
+    async def memory_list(
+        self,
+        lease_id: str,
+        *,
+        prefix: str = "",
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> MemoryListResponse:
         record = await self._record(lease_id)
         async with record.lock:
             params = "?" + urlencode(
@@ -537,14 +616,20 @@ class AgentEnvEnvironmentGateway:
                     record.sandbox_id,
                     "GET",
                     "/v1/leases/"
-                    f"{record.inner_lease_id}/memory/read?"
-                    + urlencode({"key": key}),
+                    f"{record.inner_lease_id}/memory/read?" + urlencode({"key": key}),
                 )
             )
             await self._touch(record)
             return result
 
-    async def memory_write(self, lease_id: str, key: str, content: str, *, expected_revision: int | None = None) -> MemoryMutationResponse:
+    async def memory_write(
+        self,
+        lease_id: str,
+        key: str,
+        content: str,
+        *,
+        expected_revision: int | None = None,
+    ) -> MemoryMutationResponse:
         record = await self._record(lease_id)
         async with record.lock:
             result = MemoryMutationResponse.model_validate(
@@ -552,13 +637,19 @@ class AgentEnvEnvironmentGateway:
                     record.sandbox_id,
                     "POST",
                     f"/v1/leases/{record.inner_lease_id}/memory/write",
-                    json={"key": key, "content": content, "expected_revision": expected_revision},
+                    json={
+                        "key": key,
+                        "content": content,
+                        "expected_revision": expected_revision,
+                    },
                 )
             )
             await self._touch(record)
             return result
 
-    async def memory_delete(self, lease_id: str, key: str, *, expected_revision: int | None = None) -> MemoryMutationResponse:
+    async def memory_delete(
+        self, lease_id: str, key: str, *, expected_revision: int | None = None
+    ) -> MemoryMutationResponse:
         record = await self._record(lease_id)
         async with record.lock:
             result = MemoryMutationResponse.model_validate(
@@ -572,7 +663,9 @@ class AgentEnvEnvironmentGateway:
             await self._touch(record)
             return result
 
-    async def memory_search(self, lease_id: str, query: str, *, limit: int = 20, cursor: str | None = None) -> MemorySearchResponse:
+    async def memory_search(
+        self, lease_id: str, query: str, *, limit: int = 20, cursor: str | None = None
+    ) -> MemorySearchResponse:
         record = await self._record(lease_id)
         async with record.lock:
             params = "?" + urlencode(
@@ -597,7 +690,9 @@ class AgentEnvEnvironmentGateway:
             await self._touch(record)
             return result
 
-    async def memory_trace(self, lease_id: str, *, limit: int = 100, cursor: str | None = None) -> MemoryTraceResponse:
+    async def memory_trace(
+        self, lease_id: str, *, limit: int = 100, cursor: str | None = None
+    ) -> MemoryTraceResponse:
         record = await self._record(lease_id)
         async with record.lock:
             params = "?" + urlencode(
@@ -701,6 +796,7 @@ class AgentEnvEnvironmentGateway:
             await self.control.resume_sandbox(record.sandbox_id)
             await self.control.wait_guest_health(record.sandbox_id)
             record.paused = False
+            record.refreshed_at = datetime.now(timezone.utc)
             record.lease.expires_at = datetime.now(timezone.utc) + timedelta(
                 seconds=self.config.lease_ttl_seconds
             )

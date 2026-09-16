@@ -47,10 +47,9 @@ def test_generated_perturbations_are_sorted_and_valid():
     assert all(p.trigger_tick >= config.warmup_ticks for p in spec.perturbations)
     for perturbation in spec.perturbations:
         if perturbation.kind == "entity_destruction":
-            assert (
-                perturbation.parameters.get("entity_types")
-                or perturbation.parameters.get("entity_names")
-            )
+            assert perturbation.parameters.get(
+                "entity_types"
+            ) or perturbation.parameters.get("entity_names")
             assert perturbation.parameters["count"] >= 1
         elif perturbation.kind == "resource_depletion":
             assert perturbation.parameters["radius"] > 0
@@ -163,7 +162,7 @@ def test_recovery_measured_from_baseline_after_shock():
     def fire(command, params):
         return {"destroyed": {"transport-belt": 2}, "total": 2}
 
-    engine.sync(1000, _stats(6000), fire)   # no interval yet
+    engine.sync(1000, _stats(6000), fire)  # no interval yet
     engine.sync(2000, _stats(12000), fire)  # rate 6.0 -> baseline
     engine.sync(3000, _stats(17000), fire)  # fires; post rate 5.0 measured later
     engine.sync(4000, _stats(18000), fire)  # post rate 1.0: still broken
@@ -231,8 +230,8 @@ def test_recovery_gated_on_affected_product_not_decoy_flood():
         return {"output": {"iron-gear-wheel": gear, "cheap-decoy": decoy}}
 
     engine.sync(1000, stats(6000, 0), fire)
-    engine.sync(2000, stats(12000, 0), fire)   # gear baseline rate 6.0
-    engine.sync(3000, stats(17000, 0), fire)   # shock applies
+    engine.sync(2000, stats(12000, 0), fire)  # gear baseline rate 6.0
+    engine.sync(3000, stats(17000, 0), fire)  # shock applies
     # Decoy floods massively while the gear line stays near-dead
     # (+10 items over 1000 ticks = 0.01/tick, far under threshold).
     events = engine.sync(4000, stats(17010, 40000), fire)

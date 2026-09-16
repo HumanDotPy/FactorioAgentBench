@@ -58,6 +58,7 @@ class SerializableFunction:
         # These won't be pickled
         self._instance = instance
         self._cached_func = None
+        self._cached_keys = None
 
     def __getstate__(self):
         """Control which attributes are pickled"""
@@ -85,6 +86,7 @@ class SerializableFunction:
             self.return_annotation = state["return_annotation"]
         self._instance = None
         self._cached_func = None
+        self._cached_keys = None
 
     def __str__(self):
         """Return a string representation with function signature and docstring"""
@@ -120,14 +122,21 @@ class SerializableFunction:
         """Bind this function to an instance after unpickling"""
         self._instance = instance
         self._cached_func = None
+        self._cached_keys = None
         return self
 
     def __call__(self, *args, **kwargs):
         """Make the serialized function directly callable"""
-        # Always reconstruct to get fresh globals - this ensures global statements work correctly
         if self._instance is None:
             raise RuntimeError("Function must be bound to an instance before calling")
-        self._cached_func = self.reconstruct(self._instance, self)
+        persistent_vars = getattr(self._instance, "persistent_vars", None)
+        if persistent_vars:
+            keys = tuple((name, id(value)) for name, value in persistent_vars.items())
+        else:
+            keys = ()
+        if self._cached_func is None or self._cached_keys != keys:
+            self._cached_func = self.reconstruct(self._instance, self)
+            self._cached_keys = keys
         return self._cached_func(*args, **kwargs)
 
     @staticmethod

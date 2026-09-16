@@ -1,7 +1,10 @@
+import json
+
 from fle.env.entities import Position, Entity
-from fle.env import DirectionInternal
+from fle.env import DirectionInternal, Direction
 from fle.env.game_types import Prototype
 from fle.env.tools import Tool
+from fle.env.tools.spatial import normalize_spatial
 
 
 class PlaceEntityNextTo(Tool):
@@ -26,6 +29,10 @@ class PlaceEntityNextTo(Tool):
         :example: place_entity_next_to(Prototype.WoodenChest, Position(x=0, y=0), direction=Direction.UP, spacing=1)
         :return: Entity placed
         """
+        if not isinstance(direction, (Direction, DirectionInternal)):
+            raise ValueError(
+                "direction must be a Direction member, such as Direction.RIGHT"
+            )
         try:
             name, metaclass = entity.value
 
@@ -48,6 +55,15 @@ class PlaceEntityNextTo(Tool):
                 msg = self.get_error_message(str(response))
                 raise Exception(
                     f"Could not place {name} next to {reference_position} with spacing {spacing} and direction {direction}. {msg}"
+                )
+
+            if response.get("error"):
+                diagnostics = normalize_spatial(response.get("diagnostics") or {})
+                detail = json.dumps(diagnostics, sort_keys=True) if diagnostics else ""
+                raise Exception(
+                    f"Could not place {name} next to {reference_position} with spacing {spacing} "
+                    f"and direction {direction}: {response.get('reason', 'placement_rejected')} "
+                    f"at {response.get('position')}. {detail}"
                 )
 
             cleaned_response = self.clean_response(response)

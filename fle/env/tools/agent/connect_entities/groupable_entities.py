@@ -89,12 +89,11 @@ def _construct_group(
         entities[0], Pipe
     ):
         entities = _deduplicate_entities(entities)
-        if any([pipe.contents > 0 and pipe.flow_rate > 0 for pipe in entities]):
+        contents = [pipe.contents or 0 for pipe in entities]
+        if any([value > 0 for value in contents]):
             status = EntityStatus.WORKING
-        elif all([pipe.contents == 0 for pipe in entities]):
+        else:
             status = EntityStatus.EMPTY
-        elif all([pipe.flow_rate == 0 for pipe in entities]):
-            status = EntityStatus.FULL_OUTPUT
 
         return PipeGroup(pipes=entities, id=id, status=status, position=position)
     elif prototype in (
@@ -133,6 +132,10 @@ def consolidate_underground_belts(belt_groups):
         underground_pairs = {}
         new_belts = []
         removed_indices = set()
+        belt_indices = {}
+        for i, belt in enumerate(group.belts):
+            if belt not in belt_indices:
+                belt_indices[belt] = i
 
         # First pass: identify underground belt pairs
         for i, belt in enumerate(group.belts):
@@ -224,7 +227,7 @@ def consolidate_underground_belts(belt_groups):
                         pass
 
                     # Mark both entrance and exit for removal
-                    exit_idx = group.belts.index(exit)
+                    exit_idx = belt_indices[exit]
                     removed_indices.add(i)
                     removed_indices.add(exit_idx)
                 # continue
@@ -340,12 +343,22 @@ def construct_belt_groups(
 
         return closest_exit
 
+    exit_for_entrance = {}
+    for entrance_pos, direction in underground_entrances:
+        exit_for_entrance[entrance_pos] = find_matching_exit(entrance_pos, direction)
+
+    entrance_for_exit = {}
+    for entrance_pos, _ in underground_entrances:
+        exit_pos = exit_for_entrance[entrance_pos]
+        if exit_pos is not None and exit_pos not in entrance_for_exit:
+            entrance_for_exit[exit_pos] = entrance_pos
+
     def get_next_belt_position(belt):
         pos = _round_pos(belt.position.x, belt.position.y)
 
         # If this is an underground entrance, find its matching exit
         if isinstance(belt, UndergroundBelt) and belt.is_input:
-            exit_pos = find_matching_exit(pos, belt.direction)
+            exit_pos = exit_for_entrance.get(pos)
             if exit_pos:
                 return exit_pos
 
@@ -358,9 +371,9 @@ def construct_belt_groups(
 
         # If this is an underground exit, find its matching entrance
         if isinstance(belt, UndergroundBelt) and not belt.is_input:
-            for entrance_pos, direction in underground_entrances:
-                if find_matching_exit(entrance_pos, direction) == pos:
-                    return entrance_pos
+            entrance_pos = entrance_for_exit.get(pos)
+            if entrance_pos is not None:
+                return entrance_pos
 
         # Otherwise use normal input position
         input = belt.input_position
@@ -463,25 +476,28 @@ def construct_belt_groups(
 
     # Merge overlapping groups
     final_groups = []
+    final_group_positions = []
 
     for group in initial_groups:
         merged = False
-        for final_group in final_groups:
+        for index, final_group in enumerate(final_groups):
             # Check if this group should be merged with an existing group
+            positions = final_group_positions[index]
             if any(
-                (belt.output_position.x, belt.output_position.y)
-                in {(b.position.x, b.position.y) for b in final_group}
+                (belt.output_position.x, belt.output_position.y) in positions
                 for belt in group
             ):
                 # Merge groups
                 for belt in group:
                     if belt not in final_group:
                         final_group.append(belt)
+                        positions.add((belt.position.x, belt.position.y))
                 merged = True
                 break
 
         if not merged:
             final_groups.append(group)
+            final_group_positions.append({(b.position.x, b.position.y) for b in group})
 
     groups = [
         _construct_group(

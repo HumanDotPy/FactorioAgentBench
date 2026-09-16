@@ -611,9 +611,7 @@ def test_customer_objective_gates_success_and_exposes_order_counts():
         ),
     )
 
-    result = verify_native(
-        instance, task, [], initial, customer_result=customer_result
-    )
+    result = verify_native(instance, task, [], initial, customer_result=customer_result)
 
     assert result.success is False
     assert result.scalar_reward == 0.0
@@ -625,9 +623,7 @@ def test_customer_objective_gates_success_and_exposes_order_counts():
         [DeliveryBucket(start_tick=0, items={"iron-plate": 10})],
     )
     fulfilled = engine.evaluate(10, signing_key=b"test-key")
-    result = verify_native(
-        instance, task, [], initial, customer_result=fulfilled
-    )
+    result = verify_native(instance, task, [], initial, customer_result=fulfilled)
 
     assert result.success is True
     assert result.metrics["customer_orders_fulfilled"] == 1.0

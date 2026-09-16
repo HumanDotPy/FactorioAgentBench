@@ -168,8 +168,7 @@ def product_interval_rates(
         products = set(previous.totals) | set(current.totals)
         deltas = {
             product: (
-                current.totals.get(product, 0.0)
-                - previous.totals.get(product, 0.0)
+                current.totals.get(product, 0.0) - previous.totals.get(product, 0.0)
             )
             / ticks
             for product in products
@@ -186,7 +185,12 @@ def interval_rates(samples: list[RateSample]) -> list[tuple[int, float]]:
         ticks = current.tick - previous.tick
         if ticks <= 0:
             continue
-        rates.append((current.tick, (current.cumulative_output - previous.cumulative_output) / ticks))
+        rates.append(
+            (
+                current.tick,
+                (current.cumulative_output - previous.cumulative_output) / ticks,
+            )
+        )
     return rates
 
 
@@ -276,7 +280,13 @@ class PerturbationEngine:
                 key: value
                 for key, value in perturbation.parameters.items()
                 if key
-                in {"count", "entity_types", "entity_names", "search_radius", "position"}
+                in {
+                    "count",
+                    "entity_types",
+                    "entity_names",
+                    "search_radius",
+                    "position",
+                }
             }
             return "destroy_entities", params
         if perturbation.kind == "enemy_wave":
@@ -353,14 +363,10 @@ class PerturbationEngine:
                     # No recipe-derived network available (pure logistics
                     # damage): gate on the largest pre-shock products so
                     # cheap-item flooding cannot fake restoration.
-                    top = sorted(
-                        baselines.items(), key=lambda kv: -kv[1]
-                    )[:_FALLBACK_TOP_PRODUCTS]
-                    tracked = {
-                        product: rate
-                        for product, rate in top
-                        if rate > 1e-9
-                    }
+                    top = sorted(baselines.items(), key=lambda kv: -kv[1])[
+                        :_FALLBACK_TOP_PRODUCTS
+                    ]
+                    tracked = {product: rate for product, rate in top if rate > 1e-9}
 
             record = {
                 "event": "perturbation_applied",
@@ -396,15 +402,11 @@ class PerturbationEngine:
                 product: {
                     "baseline_rate": baseline,
                     "recovered_rate": latest.get(product, 0.0),
-                    "restored": (
-                        latest.get(product, 0.0) >= threshold * baseline
-                    ),
+                    "restored": (latest.get(product, 0.0) >= threshold * baseline),
                 }
                 for product, baseline in sorted(tracker.tracked.items())
             }
-            all_restored = all(
-                detail["restored"] for detail in details.values()
-            )
+            all_restored = all(detail["restored"] for detail in details.values())
             if elapsed >= self.spec.recovery_min_ticks and all_restored:
                 tracker.recovered_tick = current_tick
                 events.append(
@@ -438,9 +440,7 @@ class PerturbationEngine:
             "applied": sum(
                 1 for record in self._applied if record["status"] == "applied"
             ),
-            "no_op": sum(
-                1 for record in self._applied if record["status"] == "no_op"
-            ),
+            "no_op": sum(1 for record in self._applied if record["status"] == "no_op"),
             "failed": sum(
                 1 for record in self._applied if record["status"] == "failed"
             ),

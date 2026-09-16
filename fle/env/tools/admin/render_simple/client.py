@@ -139,8 +139,13 @@ class RenderSimple(Tool):
                 self.player_index, "radius", position.x, position.y, radius
             )
 
-        # Get entities within radius of position
-        entities = self.get_entities(position=position, radius=radius)
+        if bounding_box:
+            entities = self.get_entities(
+                position=bounding_box.center,
+                radius=math.hypot(bounding_box.width() / 2, bounding_box.height() / 2),
+            )
+        else:
+            entities = self.get_entities(position=position, radius=radius)
 
         base_entities = []
 

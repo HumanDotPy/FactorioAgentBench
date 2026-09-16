@@ -330,28 +330,27 @@ production_score.get_production_scores = function(_price_list)
   return scores
 end
 
-function dump(o)
-  if type(o) == 'table' then
-     local s = '{ '
-     for k,v in pairs(o) do
-        if type(k) ~= 'number' then k = '"'..k..'"' end
-        s = s .. '['..k..'] = ' .. dump(v) .. ','
-     end
-     return s .. '} '
-  else
-     return tostring(o)
-  end
+
+local function get_cached_price_list()
+    if not storage.price_list_cache then
+        storage.price_list_cache = production_score.generate_price_list()
+    end
+    return storage.price_list_cache
 end
 
-storage.goal = nil
-
-local scores = production_score.get_production_scores()
-if scores then
-    storage.initial_score = scores
+local function ensure_episode_baseline(price_list)
+    if storage.score_episode_baseline then
+        return
+    end
+    local scores = production_score.get_production_scores(price_list)
+    storage.initial_score = scores or {player = 0}
+    storage.score_episode_baseline = true
 end
 
 storage.actions.score = function()
-    local prod_score = production_score.get_production_scores()
+    local price_list = get_cached_price_list()
+    ensure_episode_baseline(price_list)
+    local prod_score = production_score.get_production_scores(price_list)
     prod_score["player"] = prod_score["player"] - storage.initial_score["player"]
     
     -- Try to get goal description from first player if available, otherwise skip
@@ -366,7 +365,7 @@ storage.actions.score = function()
       --if goal_description ~= nil and #goal_description > 1 then
         --production_score["goal"] = goal_description[1]:gsub("-", "_")
       --end
-      return dump(prod_score)
+      return prod_score
     end
-    return dump(prod_score)
+    return prod_score
 end

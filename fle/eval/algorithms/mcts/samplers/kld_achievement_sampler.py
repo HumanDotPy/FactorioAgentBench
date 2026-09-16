@@ -128,6 +128,58 @@ class KLDiversityAchievementSampler(DBSampler):
 
         return kld
 
+    @staticmethod
+    def _build_frequency_matrix(
+        programs: List[Tuple[int, Counter]],
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        keys: Dict[str, int] = {}
+        for _, frequencies in programs:
+            for key in frequencies:
+                if key not in keys:
+                    keys[key] = len(keys)
+
+        matrix = np.zeros((len(programs), len(keys)), dtype=np.float64)
+        present = np.zeros((len(programs), len(keys)), dtype=bool)
+        for row, (_, frequencies) in enumerate(programs):
+            for key, value in frequencies.items():
+                column = keys[key]
+                matrix[row, column] = value
+                present[row, column] = True
+        return matrix, present
+
+    @staticmethod
+    def _pairwise_kl_divergences(
+        matrix: np.ndarray, present: np.ndarray = None
+    ) -> np.ndarray:
+        num_programs, num_keys = matrix.shape
+        if num_keys == 0:
+            return np.zeros(num_programs)
+
+        if present is None:
+            present = matrix != 0
+
+        epsilon = 1e-10
+        smoothed = matrix + epsilon
+        log_smoothed = np.log(smoothed)
+        own_terms = (smoothed * log_smoothed).sum(axis=1)
+        cross_terms = smoothed @ log_smoothed.T
+
+        presence = present.astype(np.float64)
+        support_sizes = presence.sum(axis=1)
+        intersections = presence @ presence.T
+        union_sizes = support_sizes[:, None] + support_sizes[None, :] - intersections
+
+        safe_union = np.where(union_sizes == 0, 1.0, union_sizes)
+        row_sums = matrix.sum(axis=1)
+        p_totals = row_sums[:, None] + epsilon * safe_union
+        q_totals = row_sums[None, :] + epsilon * safe_union
+
+        divergences = (own_terms[:, None] - cross_terms) / p_totals
+        divergences += np.log(q_totals) - np.log(p_totals)
+        divergences = np.where(union_sizes == 0, 0.0, divergences)
+        np.fill_diagonal(divergences, 0.0)
+        return divergences.sum(axis=1)
+
     @tenacity.retry(
         retry=retry_if_exception_type(
             (psycopg2.OperationalError, psycopg2.InterfaceError)
@@ -181,18 +233,8 @@ class KLDiversityAchievementSampler(DBSampler):
                         program_id = programs[0][0]
                     else:
                         # Compute pairwise KL divergences
-                        diversity_scores = []
-                        for i, (prog_id, freq1) in enumerate(programs):
-                            # Sum of KL divergences against all other programs
-                            total_kld = sum(
-                                self._compute_kl_divergence(freq1, freq2)
-                                for j, (_, freq2) in enumerate(programs)
-                                if i != j
-                            )
-                            diversity_scores.append((prog_id, total_kld))
-
-                        # Apply softmax to diversity scores
-                        scores = np.array([score for _, score in diversity_scores])
+                        matrix, present = self._build_frequency_matrix(programs)
+                        scores = self._pairwise_kl_divergences(matrix, present)
                         normalized_scores = self._normalize_scores(scores)
 
                         normalized_scores = (
@@ -204,7 +246,7 @@ class KLDiversityAchievementSampler(DBSampler):
                         softmax_probs = softmax_probs / softmax_probs.sum()
 
                         # Sample program ID based on softmax probabilities
-                        program_ids = [prog_id for prog_id, _ in diversity_scores]
+                        program_ids = [prog_id for prog_id, _ in programs]
                         program_id = np.random.choice(program_ids, p=softmax_probs)
 
                     # Fetch the selected program

@@ -2,7 +2,7 @@ import math
 
 import pytest
 
-from fle.env import Direction, EntityStatus
+from fle.env import DirectionInternal, EntityStatus
 from fle.env.game_types import Resource, Prototype
 
 
@@ -30,23 +30,19 @@ def game(configure_game):
 def test_connected_pump_is_working(game):
     game.move_to(game.nearest(Resource.Water))
 
-    offshore_pump = game.place_entity(
-        Prototype.OffshorePump,
-        position=game.nearest(Resource.Water),
-        direction=Direction.DOWN,
-        exact=False,
-    )
+    offshore_pump = game.place_offshore_pump(game.nearest(Resource.Water))
     assert offshore_pump.status == EntityStatus.NOT_CONNECTED
 
+    output_direction = DirectionInternal.opposite(offshore_pump.direction)
     boiler = game.place_entity_next_to(
         Prototype.Boiler,
         reference_position=offshore_pump.position,
-        direction=offshore_pump.direction,
+        direction=output_direction,
         spacing=5,
     )
     assert boiler.status == EntityStatus.NOT_CONNECTED
 
-    assert boiler.direction.value == offshore_pump.direction.value
+    assert boiler.direction.value == output_direction.value
     water_pipes = game.connect_entities(
         boiler, offshore_pump, connection_type=Prototype.Pipe
     )
@@ -77,10 +73,5 @@ def test_connected_pump_is_working(game):
 def test_not_connected_pump_is_not_connected(game):
     game.move_to(game.nearest(Resource.Water))
 
-    offshore_pump = game.place_entity(
-        Prototype.OffshorePump,
-        position=game.nearest(Resource.Water),
-        direction=Direction.DOWN,
-        exact=False,
-    )
+    offshore_pump = game.place_offshore_pump(game.nearest(Resource.Water))
     assert offshore_pump.status == EntityStatus.NOT_CONNECTED

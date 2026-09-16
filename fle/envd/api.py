@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import inspect
+import re
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from fle.commons.profiling import activate
 from fle.envd.errors import (
     CapacityExhausted,
     CommitmentMismatch,
@@ -23,7 +26,14 @@ from fle.envd.models import (
     ContractEpochSpec,
     FactorioTaskSpec,
 )
+from fle.envd.program_policy import ProgramPolicyViolation
+from fle.envd.blueprints import BlueprintError
 from fle.envd.service import EnvironmentService
+from fle.envd.templates import (
+    TemplateError,
+    TemplateInvalid,
+    TemplateNotFound,
+)
 
 
 class RequestModel(BaseModel):
@@ -38,6 +48,30 @@ class LeaseRequest(RequestModel):
 class ExecuteRequest(RequestModel):
     code: str
     request_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class ReferenceWorldRequest(RequestModel):
+    action: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    request_id: str = Field(min_length=1, max_length=128)
+
+
+class ProgramRequest(RequestModel):
+    code: str = Field(min_length=1, max_length=100_000)
+    request_id: str = Field(min_length=1, max_length=128)
+
+
+class ProfilingRequest(RequestModel):
+    enabled: bool
+    duration_seconds: int = Field(default=300, ge=1, le=3600)
+    sample_every: int = Field(default=1, ge=1, le=1000)
+    clear: bool = False
+
+
+class CameraRequest(RequestModel):
+    enabled: bool | None = None
+    radius: int | None = Field(default=None, ge=8, le=192)
+    entity_limit: int | None = Field(default=None, ge=1, le=128)
 
 
 class ForkRequest(RequestModel):
@@ -67,6 +101,24 @@ class ThroughputCheckRequest(RequestModel):
     request_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
+class RealtimeRequest(RequestModel):
+    """Pacing toggle: run the simulation between interventions, never < 1x."""
+
+    enabled: bool
+    speed: float | None = Field(default=None, ge=1.0, le=10.0)
+
+
+class TemplateSaveRequest(RequestModel):
+    code: str = Field(min_length=1)
+    description: str = ""
+    parameters: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class TemplateRunRequest(RequestModel):
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    request_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
 class MemoryWriteRequest(RequestModel):
     key: str = Field(min_length=1, max_length=256)
     content: str
@@ -79,6 +131,18 @@ class MemoryDeleteRequest(RequestModel):
 
 
 def _register_error_handlers(app: FastAPI) -> None:
+    @app.exception_handler(BlueprintError)
+    async def blueprint_error(_, exc: BlueprintError):
+        return _error(422, str(exc))
+
+    @app.exception_handler(ValueError)
+    async def invalid_input(_, exc: ValueError):
+        return _error(422, str(exc))
+
+    @app.exception_handler(TimeoutError)
+    async def read_timeout(_, exc: TimeoutError):
+        return _error(503, str(exc))
+
     @app.exception_handler(CapacityExhausted)
     async def capacity_error(_, exc: CapacityExhausted):
         return _error(503, str(exc))
@@ -135,9 +199,92 @@ def create_app(service: EnvironmentService) -> FastAPI:
 
     _register_error_handlers(app)
 
+    @app.middleware("http")
+    async def profile_request(request, call_next):
+        # No bodies, query parameters, programs, or verifier values are captured.
+        parts = request.url.path.split("/")
+        sample = None
+        if (
+            len(parts) >= 4
+            and parts[1:3] == ["v1", "leases"]
+            and (len(parts) < 5 or parts[4] != "profiling")
+        ):
+            try:
+                store = service.profiling(parts[3])
+            except LeaseNotFound:
+                pass
+            else:
+                correlation = request.headers.get("X-Factorio-Call-Id", "")
+                sample = store.begin(
+                    request.method,
+                    correlation if re.fullmatch(r"[0-9a-f]{32}", correlation) else None,
+                )
+        if sample is None:
+            return await call_next(request)
+        generation, trace = sample
+        try:
+            with activate(trace):
+                response = await call_next(request)
+                trace.failed = trace.failed or response.status_code >= 400
+                response.headers["X-Factorio-Trace-Id"] = trace.trace_id
+                return response
+        finally:
+            route = request.scope.get("route")
+            trace.operation = f"{request.method} {getattr(route, 'path', 'unmatched')}"
+            store.complete(generation, trace)
+
+    @app.get("/v1/leases/{lease_id}/profiling")
+    async def profiling_report(lease_id: str):
+        return service.profiling(lease_id).report()
+
+    @app.put("/v1/leases/{lease_id}/profiling")
+    async def configure_profiling(lease_id: str, request: ProfilingRequest):
+        return service.profiling(lease_id).configure(**request.model_dump())
+
+    @app.post("/v1/leases/{lease_id}/programs", status_code=202)
+    def submit_program(lease_id: str, request: ProgramRequest):
+        return service.submit_program(lease_id, request.code, request.request_id)
+
+    @app.get("/v1/leases/{lease_id}/programs")
+    def program_status(
+        lease_id: str, program_id: str | None = None, result: bool = False
+    ):
+        try:
+            return service.programs(lease_id).status(program_id, include_result=result)
+        except KeyError:
+            raise HTTPException(404, "Unknown program") from None
+
+    @app.delete("/v1/leases/{lease_id}/programs/{program_id}")
+    def cancel_program(lease_id: str, program_id: str):
+        try:
+            return service.programs(lease_id).cancel(program_id)
+        except KeyError:
+            raise HTTPException(404, "Unknown program") from None
+
+    @app.get("/v1/leases/{lease_id}/program-events")
+    def program_events(
+        lease_id: str,
+        after: int = Query(0, ge=0),
+        timeout: float = Query(0, ge=0, le=30),
+    ):
+        return service.programs(lease_id).wait(after, timeout)
+
     @app.get("/v1/health")
     def health():
         return service.health()
+
+    @app.get("/v1/program-runtimes/{runtime_id}/checkpoint")
+    def latest_program_checkpoint(runtime_id: str):
+        import json
+        import uuid
+        from fle.envd.lifecycle import CheckpointPool
+
+        try:
+            canonical = str(uuid.UUID(runtime_id))
+            path = CheckpointPool().root / "programs" / canonical / "checkpoint.json"
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, FileNotFoundError):
+            raise HTTPException(404, "No committed program checkpoint") from None
 
     @app.post("/v1/leases", status_code=201)
     def lease(request: LeaseRequest):
@@ -215,16 +362,123 @@ def create_app(service: EnvironmentService) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @app.get("/v1/leases/{lease_id}/craft-plan")
+    def craft_plan(
+        lease_id: str,
+        product: str,
+        quantity: int = Query(1, ge=1, le=1000000),
+        depth: int = Query(2, ge=0, le=3),
+    ):
+        return service.craft_plan(
+            lease_id, product=product, quantity=quantity, depth=depth
+        )
+
+    @app.get("/v1/leases/{lease_id}/camera")
+    def camera(lease_id: str, include_image: bool = True):
+        return service.camera(lease_id, include_image=include_image)
+
+    @app.post("/v1/leases/{lease_id}/camera")
+    def configure_camera(
+        lease_id: str, request: CameraRequest, include_image: bool = True
+    ):
+        return service.camera(
+            lease_id,
+            settings=request.model_dump(exclude_none=True),
+            include_image=include_image,
+        )
+
+    @app.get("/v1/leases/{lease_id}/render")
+    def render_factory(
+        lease_id: str,
+        center_x: float | None = None,
+        center_y: float | None = None,
+        radius: int = 32,
+        include_status: bool = True,
+    ):
+        try:
+            return service.render_factory(
+                lease_id,
+                center_x=center_x,
+                center_y=center_y,
+                radius=radius,
+                include_status=include_status,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.post("/v1/leases/{lease_id}/throughput-check")
     def throughput_check(lease_id: str, request: ThroughputCheckRequest):
         return service.check_contract_throughput(
             lease_id, request_id=request.request_id
         ).model_dump(mode="json")
 
+    # -- pacing toggle and program templates --------------------------------
+
+    @app.post("/v1/leases/{lease_id}/reference-world")
+    def reference_world(lease_id: str, request: ReferenceWorldRequest):
+        return service.reference_world(
+            lease_id, request.action, request.arguments, request.request_id
+        )
+
+    @app.post("/v1/leases/{lease_id}/realtime")
+    def set_realtime(lease_id: str, request: RealtimeRequest):
+        try:
+            return service.set_realtime(
+                lease_id, enabled=request.enabled, speed=request.speed
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/v1/leases/{lease_id}/templates")
+    def list_templates(lease_id: str):
+        return service.list_templates(lease_id)
+
+    @app.get("/v1/leases/{lease_id}/templates/{name}")
+    def get_template(lease_id: str, name: str):
+        try:
+            return service.get_template(lease_id, name)
+        except TemplateNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except TemplateInvalid as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.put("/v1/leases/{lease_id}/templates/{name}")
+    def save_template(lease_id: str, name: str, request: TemplateSaveRequest):
+        try:
+            return service.save_template(
+                lease_id,
+                name,
+                code=request.code,
+                description=request.description,
+                parameters=request.parameters,
+            )
+        except (TemplateError, ProgramPolicyViolation) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.delete("/v1/leases/{lease_id}/templates/{name}")
+    def delete_template(lease_id: str, name: str):
+        return service.delete_template(lease_id, name)
+
+    @app.post("/v1/leases/{lease_id}/templates/{name}/run")
+    def run_template(lease_id: str, name: str, request: TemplateRunRequest):
+        try:
+            return service.run_template(
+                lease_id,
+                name,
+                arguments=request.arguments,
+                request_id=request.request_id,
+            ).model_dump(mode="json")
+        except TemplateNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except TemplateInvalid as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     # -- model-managed memory; lease-scoped and never a host filesystem API --
 
     @app.get("/v1/leases/{lease_id}/memory")
-    def memory_list(lease_id: str, prefix: str = "", limit: int = 50, cursor: str | None = None):
+    def memory_list(
+        lease_id: str, prefix: str = "", limit: int = 50, cursor: str | None = None
+    ):
         return service.memory_list(lease_id, prefix=prefix, limit=limit, cursor=cursor)
 
     @app.get("/v1/leases/{lease_id}/memory/read")
@@ -247,7 +501,9 @@ def create_app(service: EnvironmentService) -> FastAPI:
         )
 
     @app.get("/v1/leases/{lease_id}/memory/search")
-    def memory_search(lease_id: str, query: str, limit: int = 20, cursor: str | None = None):
+    def memory_search(
+        lease_id: str, query: str, limit: int = 20, cursor: str | None = None
+    ):
         return service.memory_search(lease_id, query, limit=limit, cursor=cursor)
 
     @app.get("/v1/leases/{lease_id}/memory/trace")
@@ -257,6 +513,10 @@ def create_app(service: EnvironmentService) -> FastAPI:
     @app.post("/v1/leases/{lease_id}/finalize")
     def finalize(lease_id: str):
         return service.finalize(lease_id)
+
+    @app.post("/v1/leases/{lease_id}/checkpoints", status_code=201)
+    def checkpoint(lease_id: str, request: CheckpointRequest):
+        return service.checkpoint(lease_id, request.name)
 
     # -- adaptive contract benchmark (privileged HTTP, never agent tools) --
 
@@ -284,9 +544,7 @@ def create_app(service: EnvironmentService) -> FastAPI:
         ).model_dump(mode="json")
 
     @app.post("/v1/leases/{lease_id}/contract/qualify-throughput")
-    def contract_qualify_throughput(
-        lease_id: str, request: ThroughputCheckRequest
-    ):
+    def contract_qualify_throughput(lease_id: str, request: ThroughputCheckRequest):
         return service.check_contract_throughput(
             lease_id,
             authoritative=True,
@@ -402,9 +660,57 @@ def create_agentenv_app(service) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @app.get("/v1/leases/{lease_id}/craft-plan")
+    async def craft_plan(
+        lease_id: str,
+        product: str,
+        quantity: int = Query(1, ge=1, le=1000000),
+        depth: int = Query(2, ge=0, le=3),
+    ):
+        return await service.craft_plan(
+            lease_id, product=product, quantity=quantity, depth=depth
+        )
+
+    @app.get("/v1/leases/{lease_id}/camera")
+    async def camera(lease_id: str, include_image: bool = True):
+        return await service.camera(lease_id, include_image=include_image)
+
+    @app.post("/v1/leases/{lease_id}/camera")
+    async def configure_camera(
+        lease_id: str, request: CameraRequest, include_image: bool = True
+    ):
+        return await service.camera(
+            lease_id,
+            settings=request.model_dump(exclude_none=True),
+            include_image=include_image,
+        )
+
+    @app.get("/v1/leases/{lease_id}/render")
+    async def render_factory(
+        lease_id: str,
+        center_x: float | None = None,
+        center_y: float | None = None,
+        radius: int = 32,
+        include_status: bool = True,
+    ):
+        try:
+            return await service.render_factory(
+                lease_id,
+                center_x=center_x,
+                center_y=center_y,
+                radius=radius,
+                include_status=include_status,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.get("/v1/leases/{lease_id}/memory")
-    async def memory_list(lease_id: str, prefix: str = "", limit: int = 50, cursor: str | None = None):
-        return await service.memory_list(lease_id, prefix=prefix, limit=limit, cursor=cursor)
+    async def memory_list(
+        lease_id: str, prefix: str = "", limit: int = 50, cursor: str | None = None
+    ):
+        return await service.memory_list(
+            lease_id, prefix=prefix, limit=limit, cursor=cursor
+        )
 
     @app.get("/v1/leases/{lease_id}/memory/read")
     async def memory_read(lease_id: str, key: str):
@@ -426,7 +732,9 @@ def create_agentenv_app(service) -> FastAPI:
         )
 
     @app.get("/v1/leases/{lease_id}/memory/search")
-    async def memory_search(lease_id: str, query: str, limit: int = 20, cursor: str | None = None):
+    async def memory_search(
+        lease_id: str, query: str, limit: int = 20, cursor: str | None = None
+    ):
         return await service.memory_search(lease_id, query, limit=limit, cursor=cursor)
 
     @app.get("/v1/leases/{lease_id}/memory/trace")
@@ -452,7 +760,8 @@ def create_agentenv_app(service) -> FastAPI:
 
     @app.post("/v1/leases/{lease_id}/checkpoints", status_code=201)
     async def checkpoint(lease_id: str, request: CheckpointRequest):
-        return await service.checkpoint(lease_id, request.name)
+        result = service.checkpoint(lease_id, request.name)
+        return await result if inspect.isawaitable(result) else result
 
     return app
 
@@ -468,19 +777,31 @@ def build_live_service(
     address: str = "localhost",
     lease_ttl_seconds: int = 900,
     audit_tcp_ports: list[int] | None = None,
+    execution_game_speed: float = 10,
+    reference_capacity: int | None = None,
 ) -> EnvironmentService:
     from fle.envd.backend import FLEWorker
+    from fle.envd.reference_world import ReferenceWorldPool
+    from fle.cluster.run_envs import resolve_state_dir
 
     workers = [
-        FLEWorker.connect(f"factorio-{index}", port, address)
+        FLEWorker.connect(f"factorio-{index}", port, address, execution_game_speed)
         for index, port in enumerate(tcp_ports)
     ]
     audit_workers = [
-        FLEWorker.connect(f"factorio-audit-{index}", port, address)
+        FLEWorker.connect(
+            f"factorio-audit-{index}", port, address, execution_game_speed
+        )
         for index, port in enumerate(audit_tcp_ports or [])
     ]
     return EnvironmentService(
         workers,
         lease_ttl_seconds=lease_ttl_seconds,
         audit_workers=audit_workers,
+        reference_worlds=ReferenceWorldPool(
+            resolve_state_dir() / "reference-worlds",
+            len(tcp_ports) if reference_capacity is None else reference_capacity,
+        )
+        if reference_capacity != 0 and address in {"localhost", "127.0.0.1"}
+        else None,
     )

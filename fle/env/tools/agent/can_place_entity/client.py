@@ -21,25 +21,31 @@ class CanPlaceEntity(Tool):
         :return: True if entity can be placed at position, else False
         """
 
-        assert isinstance(entity, Prototype)
-        assert isinstance(direction, ent.Direction)
+        if not isinstance(entity, Prototype):
+            raise ValueError("entity must be a Prototype")
+        if not isinstance(direction, ent.Direction):
+            raise ValueError("direction must be a Direction")
 
         # If position is a tuple, cast it to a Position object:
         if isinstance(position, tuple):
             position = ent.Position(x=position[0], y=position[1])
 
-        assert isinstance(position, ent.Position)
+        if not isinstance(position, ent.Position):
+            raise ValueError("position must be a Position or (x, y) tuple")
 
         x, y = self.get_position(position)
         name, metaclass = entity.value
 
-        response, elapsed = self.execute(
-            self.player_index, name, direction.value + 1, x, y
-        )
+        response, elapsed = self.execute(self.player_index, name, direction.value, x, y)
 
-        if not isinstance(response, dict):
-            if isinstance(response, bool):
-                return response
-            if isinstance(response, str):
-                return False
-        return True
+        if isinstance(response, bool):
+            return response
+        if isinstance(response, dict):
+            if response.get("error"):
+                raise ValueError(str(response.get("message") or response.get("error")))
+            if "placeable" in response:
+                return bool(response["placeable"])
+            return False
+        if isinstance(response, str):
+            raise ValueError(response.strip() or "placement probe failed")
+        return False

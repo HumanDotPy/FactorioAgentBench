@@ -1,29 +1,35 @@
 # wait
 
-Advance the live Factorio simulation for up to a specified number of ticks.
-Machines, belts, research, power, and customer deliveries continue normally.
+`wait(ticks, until=None, poll_ticks=30)` waits while native machines, research,
+crafting, and deliveries continue. Conditions are sampled in the engine every
+`poll_ticks` simulation ticks, at the start, and at the deadline. The first
+satisfied sample is retained even if its state changes before the response arrives.
 
 ```python
-wait(ticks: int, until: dict | None = None, poll_ticks: int = 300) -> dict
+wait(1800, until={"inventory": {"entity": furnace, "item": Prototype.IronPlate, "at_least": 5}})
+wait(1800, until={"research": {"technology": Technology.AutomationSciencePack}})
+wait(1800, until={"craft_queue": {"active": False}})
+wait(1800, until={"machine_status": {"entity": furnace, "status": "no_fuel"}})
+wait(1800, until={"delivery": {"item": Prototype.IronPlate, "at_least": 100}})
+wait(1800, until={"production_rate": {"item": Prototype.IronPlate, "at_least": 60, "window_seconds": 60}})
+wait(1800, until={"event": {"type": "research_completed"}})
 ```
 
-An optional inventory condition stops the wait early:
+Inventory without `entity` means the character's inventory. Machine references
+require a stable entity id; removal ends with an error. Delivery means accepted
+items for that product in the currently configured public order. Production rates
+count automated production only; hand-harvested and hand-crafted items are
+subtracted from the native window unless `include_manual_production=True` is set
+on the condition. Supported native windows are 5, 60, 600, and 3600 seconds.
 
-```python
-result = wait(
-    ticks=18000,
-    until={
-        "inventory": {
-            "entity": furnace,
-            "item": Prototype.StoneBrick,
-            "at_least": 100,
-        }
-    },
-    poll_ticks=300,
-)
-print(result)
-```
+Event types are `research_completed`, `under_attack`, and `new_order`. Only events
+after the wait starts count. New orders become visible when the controller
+configures them; waiting does not cause the controller to generate a new order.
 
-The result reports requested and waited ticks, actual simulation advancement,
-charged action ticks, whether the condition was met, and the last observation.
-Contract deadlines continue to apply while waiting.
+The result reports `status`, `start_tick`, `deadline_tick`, `decision_tick`,
+`simulation_ticks_advanced`, `poll_latency_ticks`, `condition_met`, `observed`, and
+`stop_reason`. With no condition, reaching the limit is `completed`; an unmet
+condition is `timeout`. Condition decisions occur no later than the deadline.
+The simulation can advance while Python receives the result; this transport
+latency is reported separately. Changes shorter than the sample interval can be
+missed. The enclosing program's wall-time limit applies and cancels active waits.

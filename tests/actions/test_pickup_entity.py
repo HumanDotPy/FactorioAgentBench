@@ -37,14 +37,8 @@ def test_pickup_item_full_inventory(game):
     game.move_to(placement_position)
     chest = game.place_entity(Prototype.WoodenChest, position=placement_position)
     game._set_inventory({"coal": 10000})
-    try:
-        result = game.pickup_entity(chest)
-        assert False, (
-            f"Expected pickup to fail due to full inventory, but got result: {result}"
-        )
-    except Exception as e:
-        print(e)
-        assert True
+    with pytest.raises(Exception):
+        game.pickup_entity(chest)
 
 
 def test_pickup_ground_item(game):
@@ -121,27 +115,6 @@ def test_pickup_belts(game):
     assert pickup_belts
 
 
-def test_pickup_belts_position(game):
-    belts = game.connect_entities(
-        Position(x=1, y=-1), Position(x=-2, y=0), Prototype.TransportBelt
-    )
-    print(belts)
-    print(belts.belts)
-    game.pickup_entity(Prototype.TransportBelt, Position(x=0.5, y=0.5))
-    pass
-
-
-def test_pickup_pipes(game):
-    pipes = game.connect_entities(
-        Position(x=1, y=-1), Position(x=-2, y=0), Prototype.Pipe
-    )
-    print(pipes)
-    print(pipes.pipes)
-    for belt in pipes.pipes:
-        game.pickup_entity(Prototype.Pipe, belt.position)
-        print(f"Pickup belt at {belt.position}")
-
-
 def test_pickup_belts_that_dont_exist(game):
     belts = game.connect_entities(
         Position(x=0.5, y=0.5), Position(x=0.5, y=8.5), Prototype.TransportBelt
@@ -150,7 +123,5 @@ def test_pickup_belts_that_dont_exist(game):
     nbelts = game.get_entity(Prototype.BeltGroup, belt.position)
     pickup_belts = game.pickup_entity(belt)
     assert pickup_belts
-    try:
+    with pytest.raises(Exception):
         game.pickup_entity(nbelts)
-    except Exception:
-        assert True, "Should not be able to pick up a non-existent belt"

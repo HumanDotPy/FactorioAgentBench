@@ -5,6 +5,7 @@ from fle.envd.api import create_app
 from fle.envd.service import EnvironmentService
 from tests.envd.conftest import FakeWorker
 
+
 pytestmark = pytest.mark.no_factorio
 
 
@@ -40,6 +41,14 @@ def test_http_contract(task_spec):
     assert rejected.json()["event"]["error"] is True
     assert "imports are restricted" in rejected.json()["event"]["result"]
     assert rejected.json()["events"][0]["kind"] == "invalid_action"
+
+    rendered = client.get(
+        f"/v1/leases/{lease['lease_id']}/render",
+        params={"center_x": 4, "center_y": -2, "radius": 24},
+    )
+    assert rendered.status_code == 200
+    assert rendered.json()["media_type"] == "image/png"
+    assert rendered.json()["viewport"]["width_tiles"] == 48
 
     final = client.post(f"/v1/leases/{lease['lease_id']}/finalize")
     assert final.status_code == 200

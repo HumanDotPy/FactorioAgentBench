@@ -35,7 +35,7 @@ IMPORTANT
 
 To create an automatic movement structure that moves items from for instance a drill to a chest or a furnace you need to first put an inserter to the end entity (chest or the furnace) and then connect the inserter with the drills starting position.
 Only exeption is a plate mine, remember that a drill can directly drop onto a furnace at its drop position
-Bring out when using inserters that if the inserter needs to put items into an entity, it needs to be rotated as by default it takes from the entity.
+Bring out when using inserters that the agent-facing Direction names the DROP side, so an inserter that puts items into an entity has that entity on its drop side; use insert_between(source, target).
 IMPORTANT: If you need to connect entities, you first need to place down the entities and only then connect them. FOR THE LOVE OF GOD YOU CANNOT FIRST CONNECT AND PLACE! FIRST PLACE AND THEN CONNECT. Use pickup and drop positions where possible to connect entities
 Bring out that when placing something, first move to that position and then place the entity
 Only output the plan, do not think about path optimization, inventory space etc

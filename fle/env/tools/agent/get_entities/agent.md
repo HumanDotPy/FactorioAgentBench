@@ -17,19 +17,45 @@ entities = get_entities(prototype=Prototype.AssemblingMachine1)
 
 The function returns a list of Entity objects that match the specified criteria.
 
+## Ground Items And Footprints
+
+Item-on-ground stacks are returned separately from machines on the same list:
+
+- `entities.ground_items` holds one `GroundItem` per stack (`name`, `count`,
+  `position`); `entities.ground_item_count` is the stack count,
+  `entities.ground_item_totals` maps item name to total count, and
+  `entities.ground_items_truncated` reports the 32-stack listing cap.
+- Every returned machine also carries `tile_size` (`width`, `height` in
+  tiles), `center_parity` (`0` when the center sits on tile-center
+  coordinates, `1` on a tile corner) and `snapped_center` (the center of the
+  tile containing the entity center).
+- A catch tile for a machine output is `floor(drop_position) + 0.5`; compare
+  it with nearby machines' `snapped_center` and `tile_size` to see whether the
+  dropped items have a receiver or are landing on the ground.
+
+```python
+nearby = get_entities(position=Position(x=10, y=15), radius=8)
+print(nearby.ground_item_totals, nearby.ground_item_count)
+for item in nearby.ground_items:
+    print(item.name, item.count, item.position)
+for machine in nearby:
+    print(machine.name, machine.tile_size, machine.center_parity)
+```
+
 ## Parameters
 
-- `prototype`: The Prototype of entities to find (optional)
+- `entities`: Set of Prototypes to find (optional; empty means all)
 - `position`: Position to search around (default=player's current position)
-- `radius`: Search radius in tiles (default=20)
-- `name`: Exact entity name to search for (optional)
-- `type`: Entity type category to search for (optional)
+- `radius`: Search radius in tiles (default=32; pass a larger explicit value for wider scans). The returned list records the effective radius as `query_radius`.
 
 **Search Behavior**
 
-- If no prototype/name/type is specified, returns all entities within radius
+- If no prototype is specified, returns all player-force entities within radius
 - Returns empty list if no matching entities are found
-- Maximum radius is limited to 50 tiles for performance reasons
+- Results only cover the player's force; characters and prototypes this
+  client cannot map are dropped, and the returned list carries the drop
+  counts as `other_forces`, `characters_skipped`, `unmatched_prototypes`,
+  `server_skipped` and `skipped` attributes (also shown in its repr).
 
 ## Examples
 

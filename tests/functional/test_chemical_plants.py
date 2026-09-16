@@ -34,23 +34,20 @@ def game(base_game):
     water_location = base_game.nearest(Resource.Water)
     base_game.move_to(water_location)
 
-    offshore_pump = base_game.place_entity(
-        Prototype.OffshorePump, position=water_location
-    )
-    # Get offshore pump direction
-    direction = offshore_pump.direction
+    offshore_pump = base_game.place_offshore_pump(water_location)
+    output_direction = Direction.opposite(offshore_pump.direction)
 
-    # place the boiler next to the offshore pump
+    # place the boiler next to the offshore pump output
     boiler = base_game.place_entity_next_to(
         Prototype.Boiler,
         reference_position=offshore_pump.position,
-        direction=direction,
+        direction=output_direction,
         spacing=2,
     )
-    assert boiler.direction.value == direction.value
+    assert boiler.direction.value == output_direction.value
 
     # rotate the boiler to face the offshore pump
-    boiler = base_game.rotate_entity(boiler, Direction.next_clockwise(direction))
+    boiler = base_game.rotate_entity(boiler, Direction.next_clockwise(output_direction))
 
     # insert coal into the boiler
     base_game.insert_item(Prototype.Coal, boiler, quantity=5)

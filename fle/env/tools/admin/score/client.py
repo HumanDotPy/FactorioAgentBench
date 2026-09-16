@@ -10,16 +10,14 @@ class Reward(Tool):
 
     def __call__(self, *args, **kwargs):
         response, execution_time = self.execute(*args)
-        if self.game_state.instance.initial_score:
-            response["player"] -= self.game_state.instance.initial_score
-
-        if "goal" in response:
-            goal = response["goal"]
-        else:
-            goal = ""
 
         if isinstance(response, str):
             raise Exception("Could not get player score", response)
+
+        if not isinstance(response, dict):
+            raise Exception("Could not get player score", response)
+
+        goal = response.get("goal", "")
 
         if "player" not in response:
             response["player"] = 0

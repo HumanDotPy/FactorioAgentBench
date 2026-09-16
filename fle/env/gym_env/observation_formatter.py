@@ -1,10 +1,47 @@
 import pickle
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
 from fle.commons.constants import REWARD_OVERRIDE_KEY
 from fle.env.gym_env.observation import Observation
+
+
+@lru_cache(maxsize=1024)
+def _format_pickled_function(name: str, pickled_function: str) -> str:
+    try:
+        pickled_data = bytes.fromhex(pickled_function)
+        func = pickle.loads(pickled_data)
+        return f"\n```python\n{func}\n```"
+    except Exception as e:
+        return f"\n- {name}: [Error unpickling function: {str(e)}]"
+
+
+def _produced_without_manual_harvest(flows: Dict[str, Any]):
+    """Return (item, amount, manual_only) for measured output items.
+
+    Harvested amounts are subtracted from the matching produced item to expose
+    automated production. The harvested figure can describe a different window
+    than the measured production delta, so a harvest larger than the measured
+    output must never erase it: the measured amount is kept and flagged.
+    """
+
+    harvested_by_type = {}
+    for item in flows.get("harvested", []):
+        harvested_by_type[item["type"]] = item.get("amount", 0)
+
+    produced = []
+    for item in flows.get("output", []):
+        rate = item.get("rate", 0)
+        if rate <= 0:
+            continue
+        adjusted = rate - harvested_by_type.get(item["type"], 0)
+        if adjusted > 0:
+            produced.append((item["type"], adjusted, False))
+        else:
+            produced.append((item["type"], rate, True))
+    return produced
 
 
 @dataclass
@@ -363,11 +400,6 @@ class BasicObservationFormatter:
 
         flow_str = "### Production Flows (for *entire* previous step)\n"
 
-        # Build harvested lookup to subtract from production
-        harvested_by_type = {}
-        for item in flows.get("harvested", []):
-            harvested_by_type[item["type"]] = item.get("amount", 0)
-
         # Format input flows
         if flows.get("input"):
             flow_str += "#### Inputs\n"
@@ -375,17 +407,13 @@ class BasicObservationFormatter:
                 if item["rate"] > 0:
                     flow_str += f"- {item['type']}: {item['rate']:.2f}\n"
 
-        # Format output flows (subtract harvested since production includes both automated and harvested)
         if flows.get("output"):
             if flows.get("input"):
                 flow_str += "\n"
             flow_str += "#### Outputs\n"
-            for item in flows["output"]:
-                # Subtract harvested amount from production
-                harvested_amount = harvested_by_type.get(item["type"], 0)
-                adjusted_rate = item["rate"] - harvested_amount
-                if adjusted_rate > 0:
-                    flow_str += f"- {item['type']}: {adjusted_rate:.2f}\n"
+            for name, amount, manual_only in _produced_without_manual_harvest(flows):
+                suffix = " (manual harvest)" if manual_only else ""
+                flow_str += f"- {name}: {amount:.2f}{suffix}\n"
 
         # Format crafted items
         if flows.get("crafted"):
@@ -453,11 +481,6 @@ class BasicObservationFormatter:
         """
         lines = []
 
-        # Build harvested lookup to subtract from production
-        harvested_by_type = {}
-        for item in flows.get("harvested", []):
-            harvested_by_type[item["type"]] = item.get("amount", 0)
-
         # Consumed (input)
         consumed = flows.get("input", [])
         if consumed:
@@ -470,19 +493,12 @@ class BasicObservationFormatter:
         else:
             lines.append("  - Consumed: none")
 
-        # Produced (output) - subtract harvested since production includes both automated and harvested
-        produced = flows.get("output", [])
-        if produced:
-            adjusted_items = []
-            for item in produced:
-                harvested_amount = harvested_by_type.get(item["type"], 0)
-                adjusted_rate = item.get("rate", 0) - harvested_amount
-                if adjusted_rate > 0:
-                    adjusted_items.append(f"{item['type']}: {adjusted_rate:.1f}")
-            items = ", ".join(adjusted_items)
-            lines.append(f"  - Produced: {items}" if items else "  - Produced: none")
-        else:
-            lines.append("  - Produced: none")
+        adjusted_items = []
+        for name, amount, manual_only in _produced_without_manual_harvest(flows):
+            suffix = " (manual harvest)" if manual_only else ""
+            adjusted_items.append(f"{name}: {amount:.1f}{suffix}")
+        items = ", ".join(adjusted_items)
+        lines.append(f"  - Produced: {items}" if items else "  - Produced: none")
 
         # Crafted - aggregate by item type
         crafted = flows.get("crafted", [])
@@ -682,17 +698,11 @@ class BasicObservationFormatter:
         # Unpickle and format each function
         function_strs = ["### Available Functions"]
         for func_data in serialized_functions:
-            try:
-                # Unpickle the function
-                pickled_data = bytes.fromhex(func_data["pickled_function"])
-                func = pickle.loads(pickled_data)
-
-                # Get formatted string representation
-                function_strs.append(f"\n```python\n{func}\n```")
-            except Exception as e:
-                function_strs.append(
-                    f"\n- {func_data['name']}: [Error unpickling function: {str(e)}]"
+            function_strs.append(
+                _format_pickled_function(
+                    func_data["name"], func_data["pickled_function"]
                 )
+            )
 
         return "\n".join(function_strs)
 
@@ -733,116 +743,104 @@ class BasicObservationFormatter:
         # Convert Observation to dict if needed
         obs_dict = observation.to_dict()
 
-        # Format each component based on include flags
-        formatted_parts = []
-
-        if self.include_inventory:
-            inventory_str = self.format_inventory(obs_dict.get("inventory", []))
-            formatted_parts.append(inventory_str)
-
-        if self.include_entities:
-            entities_str = self.format_entities(obs_dict.get("entities", []))
-            formatted_parts.append(entities_str)
-
-        if self.include_flows:
-            flows_str = self.format_flows(obs_dict.get("flows", {}))
-            formatted_parts.append(flows_str)
-
-        if self.include_functions:
-            functions_str = self.format_functions(
-                obs_dict.get("serialized_functions", [])
-            )
-            formatted_parts.append(functions_str)
-
-        # Add research information
-        if self.include_research:
-            research_str = self.format_research(obs_dict.get("research", {}))
-            formatted_parts.append(research_str)
-
-        # Add game info
-        if self.include_game_info:
-            game_info_str = self.format_game_info(
+        inventory_str = (
+            self.format_inventory(obs_dict.get("inventory", []))
+            if self.include_inventory
+            else ""
+        )
+        entities_str = (
+            self.format_entities(obs_dict.get("entities", []))
+            if self.include_entities
+            else ""
+        )
+        flows_str = (
+            self.format_flows(obs_dict.get("flows", {})) if self.include_flows else ""
+        )
+        functions_str = (
+            self.format_functions(obs_dict.get("serialized_functions", []))
+            if self.include_functions
+            else ""
+        )
+        research_str = (
+            self.format_research(obs_dict.get("research", {}))
+            if self.include_research
+            else ""
+        )
+        game_info_str = (
+            self.format_game_info(
                 obs_dict.get("game_info", {}),
                 score=obs_dict.get("score", 0.0),
                 automated_score=obs_dict.get("automated_score", 0.0),
             )
+            if self.include_game_info
+            else ""
+        )
+        character_positions_str = (
+            self.format_character_positions(obs_dict.get("character_positions", []))
+            if self.include_character_positions
+            else ""
+        )
+        task_str = (
+            self.format_task(obs_dict.get("task_verification"))
+            if self.include_task
+            else ""
+        )
+        task_info_str = (
+            self.format_task_info(obs_dict.get("task_info"))
+            if self.include_task
+            else ""
+        )
+        messages_str = (
+            self.format_messages(obs_dict.get("messages", []), last_message_timestamp)
+            if self.include_messages
+            else ""
+        )
+        raw_text_str = (
+            self.format_raw_text(obs_dict.get("raw_text", ""))
+            if self.include_raw_output
+            else ""
+        )
+
+        formatted_parts = []
+        if self.include_inventory:
+            formatted_parts.append(inventory_str)
+        if self.include_entities:
+            formatted_parts.append(entities_str)
+        if self.include_flows:
+            formatted_parts.append(flows_str)
+        if self.include_functions:
+            formatted_parts.append(functions_str)
+        if self.include_research:
+            formatted_parts.append(research_str)
+        if self.include_game_info:
             formatted_parts.append(game_info_str)
-
-        # Add character positions
         if self.include_character_positions:
-            character_positions_str = self.format_character_positions(
-                obs_dict.get("character_positions", [])
-            )
             formatted_parts.append(character_positions_str)
-
-        # Add optional components if they exist and are enabled
         if self.include_task:
-            task_str = self.format_task(obs_dict.get("task_verification"))
             if task_str:
                 formatted_parts.append(task_str)
-
-            task_info_str = self.format_task_info(obs_dict.get("task_info"))
             if task_info_str:
                 formatted_parts.append(task_info_str)
-
-        if self.include_messages:
-            messages_str = self.format_messages(
-                obs_dict.get("messages", []), last_message_timestamp
-            )
-            if messages_str:
-                formatted_parts.append(messages_str)
-
-        # Add raw text output if enabled
-        if self.include_raw_output:
-            raw_text_str = self.format_raw_text(obs_dict.get("raw_text", ""))
-            if raw_text_str:
-                formatted_parts.append(raw_text_str)
+        if self.include_messages and messages_str:
+            formatted_parts.append(messages_str)
+        if self.include_raw_output and raw_text_str:
+            formatted_parts.append(raw_text_str)
 
         # Combine all parts with newlines
         raw_str = "\n\n".join(formatted_parts)
 
         # Create FormattedObservation with all fields, even if they're empty
         return FormattedObservation(
-            inventory_str=self.format_inventory(obs_dict.get("inventory", []))
-            if self.include_inventory
-            else "",
-            entities_str=self.format_entities(obs_dict.get("entities", []))
-            if self.include_entities
-            else "",
-            flows_str=self.format_flows(obs_dict.get("flows", {}))
-            if self.include_flows
-            else "",
-            task_str=self.format_task(obs_dict.get("task_verification"))
-            if self.include_task
-            else "",
-            task_info_str=self.format_task_info(obs_dict.get("task_info"))
-            if self.include_task
-            else "",
-            messages_str=self.format_messages(
-                obs_dict.get("messages", []), last_message_timestamp
-            )
-            if self.include_messages
-            else "",
-            functions_str=self.format_functions(
-                obs_dict.get("serialized_functions", [])
-            )
-            if self.include_functions
-            else "",
-            game_info_str=self.format_game_info(
-                obs_dict.get("game_info", {}),
-                score=obs_dict.get("score", 0.0),
-                automated_score=obs_dict.get("automated_score", 0.0),
-            )
-            if self.include_game_info
-            else "",
-            raw_text_str=self.format_raw_text(obs_dict.get("raw_text", ""))
-            if self.include_raw_output
-            else "",
-            character_positions_str=self.format_character_positions(
-                obs_dict.get("character_positions", [])
-            )
-            if self.include_character_positions
-            else "",
+            inventory_str=inventory_str,
+            entities_str=entities_str,
+            flows_str=flows_str,
+            task_str=task_str,
+            task_info_str=task_info_str,
+            messages_str=messages_str,
+            functions_str=functions_str,
+            game_info_str=game_info_str,
+            raw_text_str=raw_text_str,
+            character_positions_str=character_positions_str,
             raw_str=raw_str,
         )
 

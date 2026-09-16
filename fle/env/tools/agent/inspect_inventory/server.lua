@@ -3,8 +3,17 @@ storage.actions.inspect_inventory = function(player_index, is_character_inventor
     -- Ensure we have a valid character, recreating if necessary
     local player = storage.utils.ensure_valid_character(player_index)
     local surface = player.surface
-    local is_fast = storage.fast
-    local automatic_close = True
+
+    local function merge_contents(input_items, output_items)
+       local merged = {}
+       for k, v in pairs(input_items or {}) do
+           merged[k] = (merged[k] or 0) + v
+       end
+       for k, v in pairs(output_items or {}) do
+           merged[k] = (merged[k] or 0) + v
+       end
+       return merged
+    end
 
     local function get_player_inventory_items(player)
 
@@ -33,7 +42,7 @@ storage.actions.inspect_inventory = function(player_index, is_character_inventor
                end
            end
        end
-       
+
        if closest_entity == nil then
            error("No entity at given coordinates.")
        end
@@ -41,40 +50,20 @@ storage.actions.inspect_inventory = function(player_index, is_character_inventor
            error("No valid entity at given coordinates.")
        end
 
-       if not is_fast then
-           player.opened = closest_entity
-           script.on_nth_tick(60, function()
-               if automatic_close == True then
-                   if closest_entity and closest_entity.valid then
-                       player.opened = nil
-                   end
-                   automatic_close = False
-               end
-           end)
-       end
-
        -- Factorio 2.0: unified crafter_input/crafter_output for furnaces, assemblers, rocket silos
        if closest_entity.type == "furnace" or closest_entity.type == "assembling-machine" or closest_entity.type == "rocket-silo" then
-           if not closest_entity or not closest_entity.valid then
-               error("No valid entity at given coordinates.")
-           end
-           local source = storage.utils.get_contents_compat(closest_entity.get_inventory(defines.inventory.crafter_input))
-           local output = storage.utils.get_contents_compat(closest_entity.get_inventory(defines.inventory.crafter_output))
-           for k, v in pairs(output) do
-               source[k] = (source[k] or 0) + v
-           end
-           return source
+           local input_items = storage.utils.get_contents_compat(closest_entity.get_inventory(defines.inventory.crafter_input))
+           local output_items = storage.utils.get_contents_compat(closest_entity.get_inventory(defines.inventory.crafter_output))
+           return {
+               items = merge_contents(input_items, output_items),
+               input_inventory = input_items,
+               output_inventory = output_items,
+           }
        end
        if closest_entity.type == "lab" then
-           if not closest_entity or not closest_entity.valid then
-               error("No valid entity at given coordinates.")
-           end
            return storage.utils.get_contents_compat(closest_entity.get_inventory(defines.inventory.lab_input))
        end
        -- Note: centrifuge is now handled by the unified assembling-machine block above
-       if not closest_entity or not closest_entity.valid then
-           error("No valid entity at given coordinates.")
-       end
        return storage.utils.get_contents_compat(closest_entity.get_inventory(defines.inventory.chest))
     end
 
@@ -93,20 +82,20 @@ storage.actions.inspect_inventory = function(player_index, is_character_inventor
                 table.insert(all_inventories, {})
             end
         end
-        return dump(all_inventories)
+        return all_inventories
     end
 
     if is_character_inventory then
        local inventory_items = get_player_inventory_items(player)
        if inventory_items then
-           return dump(inventory_items)
+           return inventory_items
        else
            error("Could not get player inventory")
        end
     else
        local inventory_items = get_inventory()
        if inventory_items then
-           return dump(inventory_items)
+           return inventory_items
        else
            error("Could not get inventory of entity at "..x..", "..y)
        end

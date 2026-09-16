@@ -1,7 +1,5 @@
 import pytest
 
-from fle.commons.cluster_ips import get_local_container_ips
-from fle.env.instance import FactorioInstance
 from fle.env.entities import Direction
 from fle.env.game_types import Resource, Prototype, Technology
 from fle.commons.models.game_state import GameState
@@ -27,16 +25,8 @@ def game(instance):
         "lab": 1,
         "automation-science-pack": 10,
     }
-    ips, udp_ports, tcp_ports = get_local_container_ips()
-    instance = FactorioInstance(
-        address="localhost",
-        bounding_box=200,
-        tcp_port=tcp_ports[-1],
-        fast=True,
-        all_technologies_researched=False,
-        inventory=initial_inventory,
-    )
-    instance.reset()
+    instance.initial_inventory = initial_inventory
+    instance.reset(all_technologies_researched=False)
     # In Factorio 2.0, steam-power and automation-science-pack are trigger techs
     # (zero ingredients) that can't be researched via labs. Pre-research them.
     instance.rcon_client.send_command(

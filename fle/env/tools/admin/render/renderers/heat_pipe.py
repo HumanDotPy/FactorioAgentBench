@@ -6,6 +6,8 @@ Heat pipe renderer with connection logic
 from typing import Dict, Tuple, Optional, Callable
 from PIL import Image
 
+from ..constants import NORTH, EAST, SOUTH, WEST
+
 
 def render(entity: Dict, grid, image_resolver: Callable) -> Optional[Image.Image]:
     """Render heat pipe based on connections"""
@@ -73,25 +75,25 @@ def get_around(entity: Dict, grid) -> list:
     return [
         # North
         is_heat_pipe(grid.get_relative(0, -1))
-        or is_entity_in_direction(grid.get_relative(0, -1.5), "heat-exchanger", 0)
+        or is_entity_in_direction(grid.get_relative(0, -1.5), "heat-exchanger", NORTH)
         or is_entity(grid.get_relative(-2, -3), "nuclear-reactor")
         or is_entity(grid.get_relative(0, -3), "nuclear-reactor")
         or is_entity(grid.get_relative(2, -3), "nuclear-reactor"),
         # East
         is_heat_pipe(grid.get_relative(1, 0))
-        or is_entity_in_direction(grid.get_relative(1.5, 0), "heat-exchanger", 2)
+        or is_entity_in_direction(grid.get_relative(1.5, 0), "heat-exchanger", EAST)
         or is_entity(grid.get_relative(3, -2), "nuclear-reactor")
         or is_entity(grid.get_relative(3, 0), "nuclear-reactor")
         or is_entity(grid.get_relative(3, 2), "nuclear-reactor"),
         # South
         is_heat_pipe(grid.get_relative(0, 1))
-        or is_entity_in_direction(grid.get_relative(0, 1.5), "heat-exchanger", 4)
+        or is_entity_in_direction(grid.get_relative(0, 1.5), "heat-exchanger", SOUTH)
         or is_entity(grid.get_relative(-2, 3), "nuclear-reactor")
         or is_entity(grid.get_relative(0, 3), "nuclear-reactor")
         or is_entity(grid.get_relative(2, 3), "nuclear-reactor"),
         # West
         is_heat_pipe(grid.get_relative(-1, 0))
-        or is_entity_in_direction(grid.get_relative(-1.5, 0), "heat-exchanger", 6)
+        or is_entity_in_direction(grid.get_relative(-1.5, 0), "heat-exchanger", WEST)
         or is_entity(grid.get_relative(-3, -2), "nuclear-reactor")
         or is_entity(grid.get_relative(-3, 0), "nuclear-reactor")
         or is_entity(grid.get_relative(-3, 2), "nuclear-reactor"),

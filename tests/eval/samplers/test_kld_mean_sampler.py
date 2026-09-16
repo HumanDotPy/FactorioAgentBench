@@ -7,6 +7,9 @@ from psycopg2.extras import DictRow
 
 from fle.commons.models.program import Program
 from fle.eval.algorithms.mcts import KLDiversityAchievementSampler
+import pytest
+
+pytestmark = pytest.mark.no_factorio
 
 
 class TestKLDiversityAchievementSampler(unittest.TestCase):
@@ -52,6 +55,28 @@ class TestKLDiversityAchievementSampler(unittest.TestCase):
         kld = self.sampler._compute_kl_divergence(p, q)
         self.assertIsInstance(kld, float)
         self.assertFalse(np.isnan(kld))
+
+    def test_pairwise_kl_matches_per_pair_reference(self):
+        programs = [
+            (1, Counter({"static-stone": 5, "dynamic-iron-plate": 2})),
+            (2, Counter({"static-stone": 7, "static-iron-ore": 4})),
+            (3, Counter({"dynamic-iron-plate": 1})),
+            (4, Counter()),
+            (5, Counter({"static-stone": 0, "dynamic-copper-plate": 3})),
+        ]
+        matrix, present = self.sampler._build_frequency_matrix(programs)
+        actual = self.sampler._pairwise_kl_divergences(matrix, present)
+        expected = np.array(
+            [
+                sum(
+                    self.sampler._compute_kl_divergence(frequencies, other)
+                    for other_index, (_, other) in enumerate(programs)
+                    if other_index != index
+                )
+                for index, (_, frequencies) in enumerate(programs)
+            ]
+        )
+        np.testing.assert_allclose(actual, expected, rtol=1e-10, atol=1e-12)
 
     @patch("numpy.random.choice")
     async def test_sample_parent(self, mock_choice):
@@ -110,7 +135,7 @@ class TestKLDiversityAchievementSampler(unittest.TestCase):
             """
                         SELECT id, achievements_json
                         FROM programs
-                        WHERE version = %s 
+                        WHERE version = %s
                         AND achievements_json IS NOT NULL
                         ORDER BY created_at DESC
                         LIMIT %s

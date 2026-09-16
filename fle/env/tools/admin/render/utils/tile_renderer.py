@@ -1,8 +1,92 @@
-from typing import List, Dict, Callable
-from PIL import ImageDraw
+from typing import List, Dict, Callable, Tuple
+from PIL import Image, ImageDraw
 import math
 
 from fle.env.tools.admin.render.utils.render_config import RenderConfig
+
+_WATER_TILE_SPRITES: Dict[Tuple[int, tuple], Tuple[Image.Image, float]] = {}
+
+
+def _draw_water_tile_shape(
+    draw: ImageDraw.ImageDraw,
+    img_x: float,
+    img_y: float,
+    cell_size: float,
+    water_color: Tuple[int, int, int],
+) -> None:
+    hatching_spacing = max(3, cell_size // 6)
+    draw.rectangle(
+        [
+            img_x - cell_size / 2,
+            img_y - cell_size / 2,
+            img_x + cell_size / 2,
+            img_y + cell_size / 2,
+        ],
+        fill=water_color,
+        outline=None,
+    )
+    for i in range(-int(cell_size / 2), int(cell_size / 2), hatching_spacing):
+        line_start_x = img_x - cell_size / 2
+        line_start_y = img_y - cell_size / 2 + i
+        line_end_x = img_x - cell_size / 2 + i + cell_size
+        line_end_y = img_y - cell_size / 2
+        if (
+            line_end_x >= img_x - cell_size / 2
+            and line_start_y <= img_y + cell_size / 2
+        ):
+            draw.line(
+                [
+                    (line_start_x, line_start_y),
+                    (
+                        min(line_end_x, img_x + cell_size / 2),
+                        max(line_end_y, img_y - cell_size / 2),
+                    ),
+                ],
+                fill=(
+                    min(water_color[0] + 30, 255),
+                    min(water_color[1] + 30, 255),
+                    min(water_color[2] + 40, 255),
+                ),
+                width=1,
+            )
+    for i in range(-int(cell_size / 2), int(cell_size / 2), hatching_spacing):
+        line_start_x = img_x - cell_size / 2
+        line_start_y = img_y + cell_size / 2 - i
+        line_end_x = img_x - cell_size / 2 + i + cell_size
+        line_end_y = img_y + cell_size / 2
+        if (
+            line_end_x >= img_x - cell_size / 2
+            and line_start_y >= img_y - cell_size / 2
+        ):
+            draw.line(
+                [
+                    (line_start_x, line_start_y),
+                    (
+                        min(line_end_x, img_x + cell_size / 2),
+                        min(line_end_y, img_y + cell_size / 2),
+                    ),
+                ],
+                fill=(
+                    min(water_color[0] + 15, 255),
+                    min(water_color[1] + 15, 255),
+                    min(water_color[2] + 25, 255),
+                ),
+                width=1,
+            )
+
+
+def _water_tile_sprite(
+    cell_size: int, water_color: Tuple[int, int, int]
+) -> Tuple[Image.Image, float]:
+    key = (cell_size, water_color)
+    cached = _WATER_TILE_SPRITES.get(key)
+    if cached is not None:
+        return cached
+    base = cell_size + (cell_size % 2) * 0.5
+    sprite = Image.new("RGBA", (2 * cell_size + 2, 2 * cell_size + 2), (0, 0, 0, 0))
+    _draw_water_tile_shape(ImageDraw.Draw(sprite), base, base, cell_size, water_color)
+    _WATER_TILE_SPRITES[key] = (sprite, base)
+    return sprite, base
 
 
 class TileRenderer:
@@ -39,7 +123,7 @@ class TileRenderer:
         }
 
         cell_size = self.config.style["cell_size"]
-        hatching_spacing = max(3, cell_size // 6)  # Space between hatch lines
+        integral_cell_size = int(cell_size) == cell_size
 
         min_x, max_x = boundaries["min_x"], boundaries["max_x"]
         min_y, max_y = boundaries["min_y"], boundaries["max_y"]
@@ -62,74 +146,20 @@ class TileRenderer:
             # Convert to image coordinates
             img_x, img_y = game_to_img_func(x, y)
 
-            # Draw water tile background
-            draw.rectangle(
-                [
-                    img_x - cell_size / 2,
-                    img_y - cell_size / 2,
-                    img_x + cell_size / 2,
-                    img_y + cell_size / 2,
-                ],
-                fill=water_color,
-                outline=None,
-            )
-
-            # Add cross-hatched pattern
-            # First set of diagonal lines
-            for i in range(-int(cell_size / 2), int(cell_size / 2), hatching_spacing):
-                line_start_x = img_x - cell_size / 2
-                line_start_y = img_y - cell_size / 2 + i
-                line_end_x = img_x - cell_size / 2 + i + cell_size
-                line_end_y = img_y - cell_size / 2
-
-                # Only draw if endpoints are within tile bounds
+            if integral_cell_size:
+                sprite, base = _water_tile_sprite(int(cell_size), water_color)
+                offset_x = img_x - base
+                offset_y = img_y - base
                 if (
-                    line_end_x >= img_x - cell_size / 2
-                    and line_start_y <= img_y + cell_size / 2
+                    abs(offset_x - round(offset_x)) < 1e-9
+                    and abs(offset_y - round(offset_y)) < 1e-9
                 ):
-                    draw.line(
-                        [
-                            (line_start_x, line_start_y),
-                            (
-                                min(line_end_x, img_x + cell_size / 2),
-                                max(line_end_y, img_y - cell_size / 2),
-                            ),
-                        ],
-                        fill=(
-                            min(water_color[0] + 30, 255),
-                            min(water_color[1] + 30, 255),
-                            min(water_color[2] + 40, 255),
-                        ),
-                        width=1,
+                    draw._image.paste(
+                        sprite, (int(round(offset_x)), int(round(offset_y))), sprite
                     )
+                    continue
 
-            # Second set of diagonal lines (perpendicular to first set)
-            for i in range(-int(cell_size / 2), int(cell_size / 2), hatching_spacing):
-                line_start_x = img_x - cell_size / 2
-                line_start_y = img_y + cell_size / 2 - i
-                line_end_x = img_x - cell_size / 2 + i + cell_size
-                line_end_y = img_y + cell_size / 2
-
-                # Only draw if endpoints are within tile bounds
-                if (
-                    line_end_x >= img_x - cell_size / 2
-                    and line_start_y >= img_y - cell_size / 2
-                ):
-                    draw.line(
-                        [
-                            (line_start_x, line_start_y),
-                            (
-                                min(line_end_x, img_x + cell_size / 2),
-                                min(line_end_y, img_y + cell_size / 2),
-                            ),
-                        ],
-                        fill=(
-                            min(water_color[0] + 15, 255),
-                            min(water_color[1] + 15, 255),
-                            min(water_color[2] + 25, 255),
-                        ),
-                        width=1,
-                    )
+            _draw_water_tile_shape(draw, img_x, img_y, cell_size, water_color)
 
     def draw_resource_entities(
         self,

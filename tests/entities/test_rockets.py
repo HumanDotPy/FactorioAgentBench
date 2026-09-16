@@ -8,7 +8,7 @@ import pytest
 @pytest.fixture()
 def game(configure_game):
     """Configure game with rocket silo and required components."""
-    return configure_game(
+    game = configure_game(
         inventory={
             "rocket-silo": 1,
             "big-electric-pole": 10,
@@ -30,6 +30,8 @@ def game(configure_game):
         merge=True,
         reset_position=True,
     )
+    game.instance.set_speed(100)
+    return game
 
 
 def test_rocket_silo_placement(game):
@@ -116,6 +118,7 @@ def test_inserter_to_rocket_silo(configure_game):
         },
         merge=True,
     )
+    game.instance.set_speed(100)
 
     # Set up power generation first with steam engine
     water_pos = game.nearest(Resource.Water)
@@ -283,6 +286,7 @@ def test_rocket_launch_full(configure_game):
         },
         merge=True,
     )
+    game.instance.set_speed(100)
     # Place rocket silo at origin
     silo_pos = Position(x=0, y=0)
     game.move_to(silo_pos)

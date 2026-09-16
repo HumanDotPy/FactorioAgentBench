@@ -221,11 +221,17 @@ class MCTS:
         )
 
         # Process successful responses
+        messages_key = json.dumps(messages)
         programs = []
         for response in responses:
             if response is not None and not isinstance(response, Exception):
                 program = await self._create_program(
-                    response, conversation, messages, generation_params.model, meta
+                    response,
+                    conversation,
+                    messages,
+                    generation_params.model,
+                    meta,
+                    messages_key,
                 )
                 if program:
                     programs.append(program)
@@ -233,9 +239,11 @@ class MCTS:
         return programs
 
     async def _create_program(
-        self, response, conversation, messages, model, meta
+        self, response, conversation, messages, model, meta, messages_key=None
     ) -> Program:
         """Create a Program instance from a single response"""
+        if messages_key is None:
+            messages_key = json.dumps(messages)
         if hasattr(response, "choices"):
             choice = response.choices[0]  # Assuming only one choice per call
             input_tokens = (
@@ -265,7 +273,7 @@ class MCTS:
             return None
 
         program = Program(
-            id=hash((code, json.dumps(messages))),
+            id=hash((code, messages_key)),
             code=code,
             conversation=conversation,
             response=code,
@@ -308,12 +316,13 @@ class MCTS:
                 else response.usage.promptTokens
             )
 
+        messages_key = json.dumps(messages)
         for choice in response.choices:
             code, text_response = self.parser.extract_code(choice)
             if code:
                 programs.append(
                     Program(
-                        id=hash((code, json.dumps(messages))),
+                        id=hash((code, messages_key)),
                         code=code,
                         conversation=conversation,
                         response=choice.message.content,

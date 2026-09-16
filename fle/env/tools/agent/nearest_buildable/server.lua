@@ -4,6 +4,11 @@ local ceil = math.ceil
 local max = math.max
 local abs = math.abs
 
+local water_tile_names = {
+    "water", "deepwater", "water-green", "deepwater-green",
+    "water-shallow", "water-mud"
+}
+
 storage.actions.nearest_buildable = function(player_index, entity_name, bounding_box, center_position)
     local player = storage.agent_characters[player_index]
     local surface = player.surface
@@ -14,6 +19,9 @@ storage.actions.nearest_buildable = function(player_index, entity_name, bounding
 
     -- Cache for chunk resources
     local chunk_cache = {}
+    -- Cache for per-chunk blocking entity boxes and water tiles
+    local blocker_cache = {}
+    local water_cache = {}
 
     local function get_chunk_resources(chunk_x, chunk_y)
         local cache_key = chunk_x .. "," .. chunk_y
@@ -29,57 +37,145 @@ storage.actions.nearest_buildable = function(player_index, entity_name, bounding
         return chunk_cache[cache_key]
     end
 
+    local function get_chunk_blockers(chunk_x, chunk_y)
+        local cache_key = chunk_x .. "," .. chunk_y
+        if not blocker_cache[cache_key] then
+            local entities = surface.find_entities_filtered{
+                area = {
+                    {chunk_x * 32, chunk_y * 32},
+                    {(chunk_x + 1) * 32, (chunk_y + 1) * 32}
+                },
+                type = {"character", "resource"},
+                invert = true
+            }
+            local boxes = {}
+            for _, entity in ipairs(entities) do
+                boxes[#boxes + 1] = entity.bounding_box
+            end
+            blocker_cache[cache_key] = boxes
+        end
+        return blocker_cache[cache_key]
+    end
+
+    local function get_chunk_water(chunk_x, chunk_y)
+        local cache_key = chunk_x .. "," .. chunk_y
+        if not water_cache[cache_key] then
+            local tiles = surface.find_tiles_filtered{
+                area = {
+                    {chunk_x * 32, chunk_y * 32},
+                    {(chunk_x + 1) * 32, (chunk_y + 1) * 32}
+                },
+                name = water_tile_names
+            }
+            local positions = {}
+            for _, tile in ipairs(tiles) do
+                positions[#positions + 1] = {x = tile.position.x, y = tile.position.y}
+            end
+            water_cache[cache_key] = positions
+        end
+        return water_cache[cache_key]
+    end
+
+    local function boxes_overlap(left_top, right_bottom, box)
+        return box.left_top.x < right_bottom.x and box.right_bottom.x > left_top.x
+            and box.left_top.y < right_bottom.y and box.right_bottom.y > left_top.y
+    end
+
+    local function box_has_blockers(left_top, right_bottom)
+        local chunk_min_x = floor(left_top.x / 32)
+        local chunk_min_y = floor(left_top.y / 32)
+        local chunk_max_x = floor((right_bottom.x - 0.001) / 32)
+        local chunk_max_y = floor((right_bottom.y - 0.001) / 32)
+        if chunk_max_x < chunk_min_x then chunk_max_x = chunk_min_x end
+        if chunk_max_y < chunk_min_y then chunk_max_y = chunk_min_y end
+        for chunk_x = chunk_min_x, chunk_max_x do
+            for chunk_y = chunk_min_y, chunk_max_y do
+                for _, box in ipairs(get_chunk_blockers(chunk_x, chunk_y)) do
+                    if boxes_overlap(left_top, right_bottom, box) then
+                        return true
+                    end
+                end
+            end
+        end
+        return false
+    end
+
+    local function box_has_water(left_top, right_bottom)
+        local min_x = floor(left_top.x)
+        local min_y = floor(left_top.y)
+        local max_x = ceil(right_bottom.x) - 1
+        local max_y = ceil(right_bottom.y) - 1
+        for chunk_x = floor(min_x / 32), floor(max_x / 32) do
+            for chunk_y = floor(min_y / 32), floor(max_y / 32) do
+                for _, tile in ipairs(get_chunk_water(chunk_x, chunk_y)) do
+                    if tile.x >= min_x and tile.x <= max_x
+                        and tile.y >= min_y and tile.y <= max_y then
+                        return true
+                    end
+                end
+            end
+        end
+        return false
+    end
+
+    local function has_resource_in_box(left_top, right_bottom, resource_name)
+        local chunk_min_x = floor(left_top.x / 32)
+        local chunk_min_y = floor(left_top.y / 32)
+        local chunk_max_x = floor((right_bottom.x - 0.001) / 32)
+        local chunk_max_y = floor((right_bottom.y - 0.001) / 32)
+        if chunk_max_x < chunk_min_x then chunk_max_x = chunk_min_x end
+        if chunk_max_y < chunk_min_y then chunk_max_y = chunk_min_y end
+        for chunk_x = chunk_min_x, chunk_max_x do
+            for chunk_y = chunk_min_y, chunk_max_y do
+                for _, resource in ipairs(get_chunk_resources(chunk_x, chunk_y)) do
+                    if (resource_name == nil or resource.name == resource_name)
+                        and boxes_overlap(left_top, right_bottom, resource.bounding_box) then
+                        return true
+                    end
+                end
+            end
+        end
+        return false
+    end
+
     local function check_resource_coverage(left_top, right_bottom)
         if not needs_resources then return true end
 
         if needs_oil then
-            local oil_count = surface.count_entities_filtered{
-                area = {left_top, right_bottom},
-                name = "crude-oil"
-            }
-            return oil_count > 0
+            return has_resource_in_box(left_top, right_bottom, "crude-oil")
         end
-        -- Quick initial resource count check
-        local total_resources = surface.count_entities_filtered{
-            area = {left_top, right_bottom},
-            type = "resource"
-        }
 
-        -- Calculate required coverage
         local min_x = floor(left_top.x)
         local min_y = floor(left_top.y)
         local max_x = ceil(right_bottom.x) - 1
         local max_y = ceil(right_bottom.y) - 1
         local required_coverage = (max_x - min_x + 1) * (max_y - min_y + 1)
 
-        -- Early exit if not enough resources
-        if total_resources < required_coverage then
-            return false
-        end
-
         -- Set up position tracking
         local positions = {}
-
-        -- Get relevant chunks
-        local chunk_min_x = floor(min_x / 32)
-        local chunk_min_y = floor(min_y / 32)
-        local chunk_max_x = floor(max_x / 32)
-        local chunk_max_y = floor(max_y / 32)
+        local total_resources = 0
 
         -- Collect resources from relevant chunks
-        for chunk_x = chunk_min_x, chunk_max_x do
-            for chunk_y = chunk_min_y, chunk_max_y do
-                local resources = get_chunk_resources(chunk_x, chunk_y)
-                for _, resource in pairs(resources) do
+        for chunk_x = floor(min_x / 32), floor(max_x / 32) do
+            for chunk_y = floor(min_y / 32), floor(max_y / 32) do
+                for _, resource in ipairs(get_chunk_resources(chunk_x, chunk_y)) do
                     local x = floor(resource.position.x)
                     local y = floor(resource.position.y)
                     if x >= min_x and x <= max_x and
                        y >= min_y and y <= max_y then
                         positions[x] = positions[x] or {}
-                        positions[x][y] = true
+                        if not positions[x][y] then
+                            positions[x][y] = true
+                            total_resources = total_resources + 1
+                        end
                     end
                 end
             end
+        end
+
+        -- Early exit if not enough resources
+        if total_resources < required_coverage then
+            return false
         end
 
         -- Verify complete coverage
@@ -106,19 +202,12 @@ storage.actions.nearest_buildable = function(player_index, entity_name, bounding
 
         -- Quick collision checks first
         -- Factorio 2.0: Use tile name filter for water check instead of collision_mask
-        if surface.count_tiles_filtered{
-            area = {left_top, right_bottom},
-            name = {"water", "deepwater", "water-green", "deepwater-green", "water-shallow", "water-mud"}
-        } > 0 then
+        if box_has_water(left_top, right_bottom) then
             return false
         end
 
         -- Check for blocking entities
-        if surface.count_entities_filtered{
-            area = {left_top, right_bottom},
-            type = {"character", "resource"},
-            invert = true
-        } > 0 then
+        if box_has_blockers(left_top, right_bottom) then
             return false
         end
 
@@ -160,24 +249,14 @@ storage.actions.nearest_buildable = function(player_index, entity_name, bounding
                 end
             else
                 -- Simple position check for entities without bounding box
-                local entity_count
+                local left_top = {x = current_pos.x, y = current_pos.y}
+                local right_bottom = {x = current_pos.x + 1, y = current_pos.y + 1}
                 if needs_resources then
-                    entity_count = surface.count_entities_filtered{
-                        area = {{current_pos.x, current_pos.y},
-                               {current_pos.x + 1, current_pos.y + 1}},
-                        type = "resource"
-                    }
-                    if entity_count >= 1 then
+                    if has_resource_in_box(left_top, right_bottom) then
                         return current_pos
                     end
                 else
-                    entity_count = surface.count_entities_filtered{
-                        area = {{current_pos.x, current_pos.y},
-                               {current_pos.x + 1, current_pos.y + 1}},
-                        type = {"character", "resource"},
-                        invert = true
-                    }
-                    if entity_count == 0 then
+                    if not box_has_blockers(left_top, right_bottom) then
                         return current_pos
                     end
                 end

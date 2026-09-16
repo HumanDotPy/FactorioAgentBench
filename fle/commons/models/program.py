@@ -1,7 +1,7 @@
+import math
 from datetime import datetime
 from typing import Dict, List, Optional
 
-import numpy as np
 from pydantic import ConfigDict, BaseModel, Field
 
 from fle.commons.models.timing_metrics import TimingMetrics
@@ -47,8 +47,8 @@ class Program(BaseModel):
     def get_uct(self, parent_visits: int, exploration_constant: float = 1.41) -> float:
         if self.visits == 0:
             return float("inf")
-        return (self.value / self.visits) + exploration_constant * np.sqrt(
-            np.log(parent_visits) / self.visits
+        return (self.value / self.visits) + exploration_constant * math.sqrt(
+            math.log(parent_visits) / self.visits
         )
 
     model_config = ConfigDict(from_attributes=True, arbitrary_types_allowed=True)

@@ -1,15 +1,107 @@
-from time import sleep
-from typing import List, Set, Union
+from typing import List, Optional, Set, Union
+
+from pydantic import BaseModel, ConfigDict
 
 from fle.env.entities import Position, Entity, EntityGroup
-from fle.env.game_types import Prototype
+from fle.env.game_types import Prototype, prototype_by_name
 from fle.env.tools.agent.connect_entities.groupable_entities import (
     agglomerate_groupable_entities,
 )
 from fle.env.tools import Tool
 
 
+class GroundItem(BaseModel):
+    """An item-entity (item-on-ground) stack inside the queried area."""
+
+    model_config = ConfigDict(extra="allow")
+    name: str
+    count: int = 0
+    position: Optional[Position] = None
+
+    def __repr__(self) -> str:
+        return (
+            f"GroundItem(name='{self.name}', count={self.count}, "
+            f"position={self.position})"
+        )
+
+
+class EntityList(list):
+    """Entity query results with the counts of everything that was dropped."""
+
+    def __init__(
+        self,
+        items=(),
+        *,
+        other_forces: int = 0,
+        other_force_names=None,
+        characters_skipped: int = 0,
+        server_skipped: int = 0,
+        unmatched: int = 0,
+        construction_failed: int = 0,
+        ground_items=None,
+        ground_item_stacks: int = 0,
+        ground_item_totals=None,
+        ground_items_truncated: bool = False,
+        query_radius: float = 0.0,
+    ):
+        super().__init__(items)
+        self.other_forces = int(other_forces)
+        self.other_force_names = list(other_force_names or [])
+        self.characters_skipped = int(characters_skipped)
+        self.server_skipped = int(server_skipped)
+        self.unmatched = int(unmatched)
+        self.construction_failed = int(construction_failed)
+        self.ground_items = list(ground_items or [])
+        self.ground_item_stacks = int(ground_item_stacks)
+        self.ground_item_totals = {
+            str(name): int(count) for name, count in (ground_item_totals or {}).items()
+        }
+        self.ground_items_truncated = bool(ground_items_truncated)
+        self.query_radius = float(query_radius)
+
+    @property
+    def skipped(self) -> int:
+        return self.server_skipped + self.unmatched + self.construction_failed
+
+    @property
+    def ground_item_count(self) -> int:
+        return self.ground_item_stacks
+
+    def as_dict(self) -> dict:
+        return {
+            "entities": list(self),
+            "other_forces": self.other_forces,
+            "other_force_names": list(self.other_force_names),
+            "characters_skipped": self.characters_skipped,
+            "skipped": self.skipped,
+            "unmatched_prototypes": self.unmatched,
+            "construction_failed": self.construction_failed,
+            "ground_items": [
+                item.model_dump(exclude_none=True) for item in self.ground_items
+            ],
+            "ground_item_count": self.ground_item_count,
+            "ground_item_totals": dict(self.ground_item_totals),
+            "ground_items_truncated": self.ground_items_truncated,
+            "query_radius": self.query_radius,
+        }
+
+    def __repr__(self) -> str:
+        base = super().__repr__()
+        if not (self.other_forces or self.characters_skipped or self.skipped):
+            return base
+        return (
+            f"{base} [other_forces={self.other_forces}, "
+            f"other_force_names={self.other_force_names}, "
+            f"characters_skipped={self.characters_skipped}, "
+            f"unmatched_prototypes={self.unmatched}, "
+            f"server_skipped={self.server_skipped}, "
+            f"construction_failed={self.construction_failed}]"
+        )
+
+
 class GetEntities(Tool):
+    DEFAULT_RADIUS = 32
+
     def __init__(self, connection, game_state):
         super().__init__(connection, game_state)
 
@@ -18,20 +110,27 @@ class GetEntities(Tool):
         self,
         entities: Union[Set[Prototype], Prototype] = set(),
         position: Position = None,
-        radius: float = 1000,
+        radius: float = None,
     ) -> List[Union[Entity, EntityGroup]]:
         """
         Get entities within a radius of a given position.
         :param entities: Set of entity prototypes to filter by. If empty, all entities are returned.
         :param position: Position to search around. Can be a Position object or "player" for player's position.
-        :param radius: Radius to search within.
-        :param player_only: If True, only player entities are returned, otherwise terrain features too.
-        :return: Found entities
+        :param radius: Radius to search within (default 32; pass a larger value for wider scans).
+        :return: Found entities. The returned list also carries other_forces,
+            characters_skipped, unmatched_prototypes and skipped counts for
+            everything the query dropped.
         """
 
         try:
             if not isinstance(position, Position) and position is not None:
                 raise ValueError("The second argument must be a Position object")
+
+            if radius is None:
+                radius = self.DEFAULT_RADIUS
+            radius = float(radius)
+            if radius < 0:
+                raise ValueError("radius must be non-negative")
 
             if not isinstance(entities, Set):
                 entities = set([entities])
@@ -82,9 +181,6 @@ class GetEntities(Tool):
                 else "[]"
             )
 
-            # We need to add a small 50ms sleep to ensure that the entities have updated after previous actions
-            sleep(0.1)
-
             if position is None:
                 response, time_elapsed = self.execute(
                     self.player_index, radius, entity_names
@@ -95,27 +191,54 @@ class GetEntities(Tool):
                 )
 
             if not response:
-                return []
+                return EntityList(query_radius=radius)
 
-            if (not isinstance(response, dict) and not response) or isinstance(
-                response, str
-            ):  # or (isinstance(response, dict) and not response):
+            if isinstance(response, str):
                 raise Exception("Could not get entities", response)
 
+            disclosure = {}
+            raw_entities = response
+            if isinstance(response, dict):
+                raw_entities = response.get("entities")
+                if raw_entities is None:
+                    raise Exception("Could not get entities", response)
+                disclosure = response
+            if not raw_entities:
+                raw_entities = []
+
+            ground_items = self._ground_items_from_response(disclosure)
+            ground_item_stacks = len(ground_items)
+            ground_item_totals = {}
+            ground_items_truncated = False
+            if isinstance(disclosure, dict):
+                try:
+                    ground_item_stacks = int(
+                        disclosure.get("ground_item_stacks", ground_item_stacks)
+                    )
+                except (TypeError, ValueError):
+                    ground_item_stacks = len(ground_items)
+                raw_totals = disclosure.get("ground_item_totals")
+                if isinstance(raw_totals, dict):
+                    ground_item_totals = raw_totals
+                ground_items_truncated = bool(disclosure.get("ground_items_truncated"))
+
+            unmatched = 0
+            construction_failed = 0
             entities_list = []
-            for raw_entity_data in response:
+            for raw_entity_data in raw_entities:
                 if isinstance(raw_entity_data, list):
+                    continue
+                if not isinstance(raw_entity_data, dict):
                     continue
 
                 entity_data = self.clean_response(raw_entity_data)
                 # Find the matching Prototype
-                matching_prototype = None
-                for prototype in Prototype:
-                    if prototype.value[0] == entity_data["name"].replace("_", "-"):
-                        matching_prototype = prototype
-                        break
+                matching_prototype = prototype_by_name.get(
+                    entity_data["name"].replace("_", "-")
+                )
 
                 if matching_prototype is None:
+                    unmatched += 1
                     if "name" in entity_data and entity_data["name"] != "entity-ghost":
                         print(
                             f"Warning: No matching Prototype found for {entity_data['name']}"
@@ -149,8 +272,15 @@ class GetEntities(Tool):
                 try:
                     if "inventory" in entity_data:
                         if isinstance(entity_data["inventory"], list):
-                            for inv in entity_data["inventory"]:
-                                entity_data["inventory"] += inv
+                            merged_inventory = {}
+                            for lane in entity_data["inventory"]:
+                                if not isinstance(lane, dict):
+                                    continue
+                                for item, count in lane.items():
+                                    merged_inventory[item] = (
+                                        merged_inventory.get(item, 0) + count
+                                    )
+                            entity_data["inventory"] = merged_inventory
                         else:
                             inventory_data = {
                                 k: v
@@ -162,6 +292,7 @@ class GetEntities(Tool):
                     entity = metaclass(**entity_data)
                     entities_list.append(entity)
                 except Exception as e1:
+                    construction_failed += 1
                     print(f"Could not create {entity_data['name']} object: {e1}")
 
             # Group entities when:
@@ -169,11 +300,6 @@ class GetEntities(Tool):
             # 2. User provides a position filter (suggesting they want nearby entities grouped), OR
             # 3. No specific entities requested (get all entities - should be grouped), OR
             # 4. User requests individual pole entities (restore original behavior - poles are always grouped)
-            pole_types = {
-                Prototype.SmallElectricPole,
-                Prototype.MediumElectricPole,
-                Prototype.BigElectricPole,
-            }
             should_group = (
                 not entities  # No filter = group everything
                 or any(
@@ -191,42 +317,12 @@ class GetEntities(Tool):
             )
 
             if should_group:
-                # get all pipes into a list
-                pipes = [
-                    entity
-                    for entity in entities_list
-                    if hasattr(entity, "prototype")
-                    and entity.prototype in (Prototype.Pipe, Prototype.UndergroundPipe)
-                ]
-                group = agglomerate_groupable_entities(pipes)
-                [entities_list.remove(pipe) for pipe in pipes]
-                entities_list.extend(group)
-
-                poles = [
-                    entity
-                    for entity in entities_list
-                    if hasattr(entity, "prototype")
-                    and entity.prototype
-                    in (
-                        Prototype.SmallElectricPole,
-                        Prototype.BigElectricPole,
-                        Prototype.MediumElectricPole,
-                    )
-                ]
-                group = agglomerate_groupable_entities(poles)
-                [entities_list.remove(pole) for pole in poles]
-                entities_list.extend(group)
-
-                walls = [
-                    entity
-                    for entity in entities_list
-                    if hasattr(entity, "prototype")
-                    and entity.prototype == Prototype.StoneWall
-                ]
-                group = agglomerate_groupable_entities(walls)
-                [entities_list.remove(wall) for wall in walls]
-                entities_list.extend(group)
-
+                pipe_types = (Prototype.Pipe, Prototype.UndergroundPipe)
+                pole_group_types = (
+                    Prototype.SmallElectricPole,
+                    Prototype.BigElectricPole,
+                    Prototype.MediumElectricPole,
+                )
                 belt_types = (
                     Prototype.TransportBelt,
                     Prototype.FastTransportBelt,
@@ -235,14 +331,29 @@ class GetEntities(Tool):
                     Prototype.FastUndergroundBelt,
                     Prototype.ExpressUndergroundBelt,
                 )
-                belts = [
-                    entity
-                    for entity in entities_list
-                    if hasattr(entity, "prototype") and entity.prototype in belt_types
-                ]
-                group = agglomerate_groupable_entities(belts)
-                [entities_list.remove(belt) for belt in belts]
-                entities_list.extend(group)
+                pipes = []
+                poles = []
+                walls = []
+                belts = []
+                others = []
+                for entity in entities_list:
+                    prototype = getattr(entity, "prototype", None)
+                    if prototype in pipe_types:
+                        pipes.append(entity)
+                    elif prototype in pole_group_types:
+                        poles.append(entity)
+                    elif prototype == Prototype.StoneWall:
+                        walls.append(entity)
+                    elif prototype in belt_types:
+                        belts.append(entity)
+                    else:
+                        others.append(entity)
+
+                entities_list = others
+                entities_list.extend(agglomerate_groupable_entities(pipes))
+                entities_list.extend(agglomerate_groupable_entities(poles))
+                entities_list.extend(agglomerate_groupable_entities(walls))
+                entities_list.extend(agglomerate_groupable_entities(belts))
 
             # Final filtering after grouping is complete
             if entities:
@@ -324,7 +435,20 @@ class GetEntities(Tool):
                             filtered_entities.append(entity)
                 entities_list = filtered_entities
 
-            return entities_list
+            return EntityList(
+                entities_list,
+                other_forces=disclosure.get("other_forces", 0),
+                other_force_names=disclosure.get("other_force_names", []),
+                characters_skipped=disclosure.get("characters_skipped", 0),
+                server_skipped=disclosure.get("skipped", 0),
+                unmatched=unmatched,
+                construction_failed=construction_failed,
+                ground_items=ground_items,
+                ground_item_stacks=ground_item_stacks,
+                ground_item_totals=ground_item_totals,
+                ground_items_truncated=ground_items_truncated,
+                query_radius=radius,
+            )
 
         except Exception as e:
             # Include more context in error message for debugging
@@ -335,6 +459,22 @@ class GetEntities(Tool):
             raise Exception(
                 f"Error in GetEntities ({entity_info}, {position_info}, radius={radius}): {e}"
             )
+
+    def _ground_items_from_response(self, disclosure) -> List[GroundItem]:
+        if not isinstance(disclosure, dict):
+            return []
+        raw_items = disclosure.get("ground_items")
+        if not isinstance(raw_items, list):
+            return []
+        ground_items = []
+        for raw_item in raw_items:
+            if not isinstance(raw_item, dict):
+                continue
+            try:
+                ground_items.append(GroundItem(**self.clean_response(raw_item)))
+            except Exception:
+                continue
+        return ground_items
 
     def process_nested_dict(self, nested_dict):
         """Helper method to process nested dictionaries"""

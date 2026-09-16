@@ -23,6 +23,11 @@ class NearestBuildable(Tool):
         :param building_box: The building box denoting the area of location that must be placeable.
         :param center_position: The position to find the nearest area where building box fits
         :return: BoundingBox of the nearest buildable area or None if no such area exists.
+
+        The returned left_top/right_bottom are the corners of the verified buildable
+        area. Use ``result.center`` as the position to pass to ``place_entity`` or
+        ``move_to`` so the entity is centered inside that verified area; use
+        ``left_top`` only as the starting corner of a multi-entity layout.
         """
         if not isinstance(entity, Prototype):
             raise Exception(

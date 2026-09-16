@@ -18,6 +18,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -36,8 +37,22 @@ load_dotenv()
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
+from fle.envd.action_reference import ACTION_PROFILE_REFERENCE  # noqa: E402
+from fle.envd.benchmark_results import (  # noqa: E402
+    AdaptiveEpochRecord,
+    AdaptiveSessionRecord,
+    validate_adaptive_session,
+)
+from fle.envd.capability_certificates import ledger_from_epochs  # noqa: E402
+from fle.envd.capability_graph import (  # noqa: E402
+    build_capability_graph,
+    compare_capability_snapshots,
+)
 from fle.envd.client import HTTPEnvironmentClient  # noqa: E402
-from fle.envd.contract_features import ProductCatalog, StaticRecipeDataSource  # noqa: E402
+from fle.envd.contract_features import (  # noqa: E402
+    ProductCatalog,
+    StaticRecipeDataSource,
+)
 from fle.envd.contract_generator import (  # noqa: E402
     DEFAULT_TEMPLATE_BANK,
     MIXTURE_WEIGHTS,
@@ -45,6 +60,7 @@ from fle.envd.contract_generator import (  # noqa: E402
     build_epoch_spec,
     generate_candidates,
 )
+from fle.envd.contract_policy import EvidenceDrivenCustomerPolicy  # noqa: E402
 from fle.envd.contract_rating import (  # noqa: E402
     CalibratedDifficultyModel,
     TrueskillContractRater,
@@ -56,43 +72,40 @@ from fle.envd.contract_selector import (  # noqa: E402
     ContractSelector,
     SelectionHistory,
 )
-from fle.envd.models import (  # noqa: E402
-    ADAPTIVE_BENCHMARK_VERSION,
-    CapabilityRating,
-    CalibrationManifest,
-    ContractEpochSpec,
-    FactorioTaskSpec,
-    ParticipantIdentity,
-    ProductDemandSpec,
-    SelectorWeights,
-    SessionStoppingConfig,
-)
-from fle.envd.benchmark_results import (  # noqa: E402
-    AdaptiveEpochRecord,
-    AdaptiveSessionRecord,
-    validate_adaptive_session,
-)
-from fle.envd.action_reference import ACTION_PROFILE_REFERENCE  # noqa: E402
-from fle.envd.capability_graph import (  # noqa: E402
-    build_capability_graph,
-    compare_capability_snapshots,
-)
-from fle.envd.capability_certificates import ledger_from_epochs  # noqa: E402
-from fle.envd.contract_policy import EvidenceDrivenCustomerPolicy  # noqa: E402
 from fle.envd.knowledge import (  # noqa: E402
     ApiReference,
     GameDataReference,
     load_game_data,
 )
+from fle.envd.models import (  # noqa: E402
+    ADAPTIVE_BENCHMARK_VERSION,
+    CalibrationManifest,
+    CapabilityRating,
+    ContractContextSnapshot,
+    ContractEpochSpec,
+    FactorioTaskSpec,
+    ParticipantIdentity,
+    ProductDemandSpec,
+    RuntimeCheckpoint,
+    SelectorWeights,
+    SessionStoppingConfig,
+)
 from scripts import hermes_benchmark as hermes_harness  # noqa: E402
 from scripts.factorio_codex_mcp import (  # noqa: E402
     ALL_TOOLS as FACTORIO_MCP_TOOLS,
+)
+from scripts.factorio_codex_mcp import (
     MEMORY_TOOL_NAMES,
     _bounded_json_text,
+    _contract_result,
+    _execution_receipt,
+    _read_execution_artifact,
+    tool_route_manifest,
     tools_for_profile,
 )
 
-RUNNER_VERSION = "adaptive-runner-v3"
+RUNNER_VERSION = "adaptive-runner-v4"
+RUN_CHECKPOINT_VERSION = "adaptive-run-checkpoint-v1"
 ATOMIC_JSON_MAX_REPLACE_ATTEMPTS = 5
 ATOMIC_JSON_REPLACE_BACKOFF_SECONDS = 0.05
 ATOMIC_JSON_REPLACE_BACKOFF_MAX_SECONDS = 0.5
@@ -100,33 +113,65 @@ ATOMIC_JSON_REPLACE_BACKOFF_MAX_SECONDS = 0.5
 # Keep the operating objective useful to the agent without exposing benchmark
 # internals such as selection, rating, or qualification policy.
 FACTORY_ROLE_OBJECTIVE = (
-    "Operate and expand an automated Factorio factory capable of reliably "
-    "supplying changing customer demand. Favor durable automation, balanced "
-    "throughput, and reusable infrastructure. End-to-end throughput is "
-    "tested without agent actions. Customer depots credit only "
-    "inserter-fed factory output; direct hand delivery is audit-only."
+    "Operate and expand an automated factory in Factorio capable of sustaining "
+    "production rates of many items at scale. The goal is to develop the factory "
+    "into an increasingly large-scale industrial system. Advancement comes "
+    "through automating production, expanding infrastructure, eliminating "
+    "bottlenecks, and creating systems that scale. Alongside this long-term "
+    "objective there are periodic requisitions. Requisitions represent external "
+    "demand from the broader expedition and provide concrete tests of whether "
+    "the factory supplies useful output at scale. They are one measure of the "
+    "factory's usefulness and industrial maturity. Present and future "
+    "requisitions should influence production planning, but they are not the "
+    "sole objective. Advance technology, expand capacity, improve logistics, "
+    "and automate production while fulfilling requisitions. Completing a "
+    "requisition does not end the need for industrial development; pursue the "
+    "broader goal. Future requisitions will require greater quantities, "
+    "different products, or more advanced production chains. "
+    "Requisitions are assessed automatically as qualifying production and "
+    "delivery are demonstrated; you do not need to wait for the deadline. "
+    "While qualification is pending, keep developing the factory and address "
+    "any unmet requirements rather than waiting solely for assessment or expiry. "
+    "End-to-end (E2E) means a "
+    "connected chain from ongoing resource extraction, through processing and "
+    "transport, into the bound depot, with automatic recurring fuel "
+    "and energy supply. Throughput is tested without agent actions. "
+    "Bind an existing empty player-owned chest "
+    "to each active requisition product with set_delivery_chest; only inserter-fed output "
+    "is credited and direct hand delivery is audit-only."
+    " Manual actions may build, start, repair, and expand the factory. "
+    "Requisition throughput qualifies only when its production chain sustains "
+    "the required rate without those actions. Hand mining, crafting, and "
+    "fueling are acceptable during development, including while building a "
+    "requisition's production chain. Progress toward automated, unattended "
+    "supply chains that remove recurring dependence on manual operation. "
+    "Use observed inventories, machine statuses, production rates, and depot "
+    "traffic to locate bottlenecks. Distinguish production, delivery, and "
+    "qualification: output in storage is not delivery, and delivery alone is "
+    "not proof of sustained production. Choose your own layout and development "
+    "plan; maintain current service while investing in future capability."
 )
 
 FREEPLAY_TASK_ID = "adaptive_contract_session_v1"
 CUSTOMER_DEPOT_LOCATION = (
-    "the persistent customer depot is a pre-existing row of immutable sink "
-    "chests six tiles west and ten tiles north of your starting character "
-    "(relative anchor -6, -10; Factorio entity centers may use half-tile "
-    "coordinates). The authoritative chest IDs and exact positions are listed "
-    "under customer_depots in factorio_observe_factory; player-built chests "
-    "never count"
+    "delivery has no fixed map location. Select an existing empty player-owned "
+    "chest for each active product with set_delivery_chest. The binding appears "
+    "under customer_depots in factorio_observe_factory and ends with the requisition"
 )
 
 
-def freeplay_task_spec() -> FactorioTaskSpec:
+def freeplay_task_spec(
+    checkpoint_id: str | None = None, *, execution_mode="turn_based"
+) -> FactorioTaskSpec:
     """The single persistent lease task for one adaptive session."""
     from fle.envd.models import VerifierSpec
 
     return FactorioTaskSpec(
         task_id=FREEPLAY_TASK_ID,
+        execution_mode=execution_mode,
         goal=(
-            "Fulfil each customer order as it arrives. The factory persists "
-            "between orders; infrastructure you build remains available."
+            "Establish each requested autonomous production rate. The factory "
+            "persists between tasks; infrastructure you build remains available."
         ),
         task_family="open_play",
         adaptive_contract_session=True,
@@ -134,6 +179,76 @@ def freeplay_task_spec() -> FactorioTaskSpec:
         verifier=VerifierSpec(implementation="objective_engine_v1"),
         max_interventions=None,
         holdout_seconds=0,
+        scenario="freeplay",
+        checkpoint_id=checkpoint_id or "scenario:freeplay",
+    )
+
+
+def _run_checkpoint_path(record_path: Path) -> Path:
+    return record_path.with_suffix(record_path.suffix + ".checkpoint.json")
+
+
+def _load_run_checkpoint(path: str | Path | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if payload.get("schema_version") != RUN_CHECKPOINT_VERSION:
+        raise ValueError("unsupported adaptive run checkpoint version")
+    return payload
+
+
+def _persist_run_checkpoint(
+    path: Path,
+    *,
+    phase: str,
+    checkpoint: RuntimeCheckpoint,
+    args: argparse.Namespace,
+    started_at: datetime,
+    session_id: str,
+    epoch_index: int,
+    epochs: list[AdaptiveEpochRecord],
+    rating: CapabilityRating,
+    model_seconds: float,
+    tool_seconds: float,
+    infrastructure_errors: int,
+    extrapolations: int,
+    active_spec: ContractEpochSpec | None = None,
+    active_context: ContractContextSnapshot | None = None,
+    agent: object | None = None,
+) -> None:
+    _atomic_json(
+        path,
+        {
+            "schema_version": RUN_CHECKPOINT_VERSION,
+            "phase": phase,
+            "checkpoint": checkpoint.model_dump(mode="json"),
+            "run_id": args.run_id,
+            "model": args.model,
+            "provider": args.provider,
+            "harness": getattr(args, "harness", "native"),
+            "execution_mode": evaluation_execution_mode(args),
+            "started_at": started_at.isoformat(),
+            "session_id": session_id,
+            "epoch_index": epoch_index,
+            "epochs": [epoch.model_dump(mode="json") for epoch in epochs],
+            "rating": rating.model_dump(mode="json"),
+            "model_seconds": model_seconds,
+            "tool_seconds": tool_seconds,
+            "infrastructure_error_count": infrastructure_errors,
+            "extrapolation_count": extrapolations,
+            "active_spec": (
+                active_spec.model_dump(mode="json") if active_spec else None
+            ),
+            "active_context": (
+                active_context.model_dump(mode="json") if active_context else None
+            ),
+            "agent": {
+                "session_id": getattr(agent, "session_id", None),
+                "invocation_count": getattr(agent, "invocation_count", 0),
+                "workspace": str(getattr(agent, "scratch", "")),
+            },
+        },
+        compact=True,
     )
 
 
@@ -169,9 +284,7 @@ class AgentEpochTelemetry:
         # those continuations an evaluation budget.
         self.invocations = invocations
         self.continuation_reasons = list(continuation_reasons or [])
-        self.provider_step_finish_reasons = list(
-            provider_step_finish_reasons or []
-        )
+        self.provider_step_finish_reasons = list(provider_step_finish_reasons or [])
         self.stop_reason = stop_reason
         self.failure_category = failure_category
 
@@ -185,9 +298,7 @@ class AgentEpochTelemetry:
             "response_chars": self.response_chars,
             "invocations": self.invocations,
             "continuation_reasons": list(self.continuation_reasons),
-            "provider_step_finish_reasons": list(
-                self.provider_step_finish_reasons
-            ),
+            "provider_step_finish_reasons": list(self.provider_step_finish_reasons),
             "stop_reason": self.stop_reason,
             "failure_category": self.failure_category,
         }
@@ -240,6 +351,12 @@ def _native_callable_tool_manifest(
     """Translate the shared MCP reference tools to OpenAI function schemas."""
 
     names = {
+        "factorio_observe_factory",
+        "factorio_query_state",
+        "factorio_get_camera",
+        "factorio_get_craft_plan",
+        "factorio_set_camera",
+        "factorio_read_execution_result",
         "factorio_check_throughput",
         "factorio_search_reference",
         "factorio_read_reference",
@@ -284,11 +401,13 @@ class OpenAICompatibleAgentSession:
         f"{FACTORY_ROLE_OBJECTIVE} You operate a Factorio factory through a "
         "Python REPL. Each turn you "
         "submit one program via the submit_program tool; its stdout/stderr is "
-        "returned to you. Build automated production to fulfil every customer "
-        f"order before its deadline. The factory persists across all orders; "
+        "returned to you. Develop the industrial system while meeting active "
+        f"requisition requirements. The factory persists across all requisitions; "
         f"{CUSTOMER_DEPOT_LOCATION}. There is no intervention or turn budget; "
         "continue measuring and improving the persistent factory until the "
-        "current order is fulfilled. Only use the supplied submit_program and "
+        "current requisition reaches a terminal state. This ends the current "
+        "interaction, not the factory's development; subsequent requisitions "
+        "continue in the same world. Only use the supplied submit_program and "
         "factorio_* reference tools; web, browser, terminal, host filesystem, "
         "and delegation tools are unavailable. The action reference below describes "
         "the Python names available inside submit_program. Callable "
@@ -328,6 +447,7 @@ class OpenAICompatibleAgentSession:
         executor: Any = None,
         memory_executor: Any = None,
         throughput_executor: Any = None,
+        state_executor: Any = None,
         max_turns_per_epoch: int | None = None,
         temperature: float = 0.2,
         game_data_path: str | Path | None = None,
@@ -346,6 +466,7 @@ class OpenAICompatibleAgentSession:
         self._executor = executor
         self._memory_executor = memory_executor
         self._throughput_executor = throughput_executor
+        self._state_executor = state_executor
         self.game_data_path = str(game_data_path) if game_data_path else ""
         self.memory_path = str(memory_path) if memory_path else ""
         self.memory_enabled = memory_enabled
@@ -356,6 +477,10 @@ class OpenAICompatibleAgentSession:
         self.TOOL_MANIFEST_SHA256 = _sha256_json(self.TOOL_MANIFEST)
         self._api_reference: ApiReference | None = None
         self._game_data_reference: GameDataReference | None = None
+        self.compaction_count = 0
+        self.max_context_chars = 600_000
+        self._messages_chars = 0
+        self._camera_dirty = True
 
     def inference_settings(self) -> dict[str, Any]:
         return {
@@ -363,6 +488,13 @@ class OpenAICompatibleAgentSession:
             "temperature": self.temperature,
             "max_turns_per_epoch": self.max_turns,
             "parallel_tool_calls": True,
+            "tool_routes": tool_route_manifest(memory_enabled=self.memory_enabled),
+            "tool_result_projection": "factorio-execution-receipt-v1",
+            "context_compaction": {
+                "mode": "deterministic_safety_net",
+                "threshold_chars": self.max_context_chars,
+                "preserve_recent_messages": 48,
+            },
             "api_reference": "callable-in-native-tools",
             "game_data_reference": bool(self.game_data_path),
             "memory_enabled": self.memory_enabled,
@@ -374,8 +506,14 @@ class OpenAICompatibleAgentSession:
     def bind_memory_executor(self, executor: Any) -> None:
         self._memory_executor = executor
 
+    def _append_message(self, message: dict[str, Any]) -> None:
+        self.messages.append(message)
+        self._messages_chars = getattr(self, "_messages_chars", 0) + (
+            len(json.dumps(message, separators=(",", ":"), default=str)) + 1
+        )
+
     async def start(self, system_prompt: str | None = None) -> None:
-        self.messages.append(
+        self._append_message(
             {"role": "system", "content": system_prompt or self.SYSTEM_PROMPT}
         )
 
@@ -397,15 +535,16 @@ class OpenAICompatibleAgentSession:
                 ),
                 None,
             )
-        if hasattr(result, "event"):
-            # Keep the model-facing output compatible with the original
-            # session while retaining terminal metadata for the harness.
-            text = str(result.event.result)
+        if hasattr(result, "model_dump"):
+            text = _bounded_json_text(
+                _execution_receipt(result.model_dump(mode="json")),
+                max_chars=4_000,
+            )
         elif isinstance(result, str):
             text = result
         else:
-            text = str(result)
-        return text[:8000], terminal_reason
+            text = _bounded_json_text(_execution_receipt(dict(result)), max_chars=4_000)
+        return text, terminal_reason
 
     def _reference_call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Resolve a read-only reference locally for the native provider loop."""
@@ -455,9 +594,13 @@ class OpenAICompatibleAgentSession:
             }
         if name == "factorio_read_reference":
             document_id = str(arguments["document_id"])
-            if document_id.startswith("api/") or document_id.startswith("api:") or not any(
-                document_id.startswith(prefix)
-                for prefix in ("recipe:", "technology:", "prototype:")
+            if (
+                document_id.startswith("api/")
+                or document_id.startswith("api:")
+                or not any(
+                    document_id.startswith(prefix)
+                    for prefix in ("recipe:", "technology:", "prototype:")
+                )
             ):
                 return api.read(
                     document_id,
@@ -504,8 +647,7 @@ class OpenAICompatibleAgentSession:
                 result = result.model_dump(mode="json")
             terminal = (
                 f"contract_{result.get('contract_status')}"
-                if isinstance(result, dict)
-                and result.get("contract_status") != "open"
+                if isinstance(result, dict) and result.get("contract_status") != "open"
                 else None
             )
             return _bounded_json_text(result), terminal
@@ -522,6 +664,22 @@ class OpenAICompatibleAgentSession:
                 result = result.model_dump(mode="json")
             if not isinstance(result, dict):
                 result = {"result": result}
+            return _bounded_json_text(result), None
+        if name == "factorio_read_execution_result":
+            return _bounded_json_text(_read_execution_artifact(arguments)), None
+        if name in {
+            "factorio_observe_factory",
+            "factorio_query_state",
+            "factorio_get_camera",
+            "factorio_set_camera",
+            "factorio_get_craft_plan",
+        }:
+            if self._state_executor is None:
+                raise RuntimeError("native state executor is not bound")
+            result = await self._state_executor(name, arguments)
+            if hasattr(result, "model_dump"):
+                result = result.model_dump(mode="json")
+            result.pop("image_base64", None)
             return _bounded_json_text(result), None
         return _bounded_json_text(self._reference_call(name, arguments)), None
 
@@ -547,22 +705,64 @@ class OpenAICompatibleAgentSession:
     async def run_epoch(self, order_prompt: str) -> AgentEpochTelemetry:
         started = time.perf_counter()
         telemetry = AgentEpochTelemetry()
-        self.messages.append({"role": "user", "content": order_prompt})
+        self._append_message({"role": "user", "content": order_prompt})
         tools = self.TOOL_MANIFEST
         try:
             turn = 0
             while self.max_turns is None or turn < self.max_turns:
                 turn += 1
+                self._compact_messages_if_needed()
+                messages = list(self.messages)
+                if self._state_executor is not None and getattr(
+                    self, "_camera_dirty", True
+                ):
+                    camera_started = time.perf_counter()
+                    try:
+                        camera = dict(
+                            await self._state_executor("factorio_get_camera", {})
+                        )
+                        self._camera_dirty = False
+                        encoded = camera.pop("image_base64", None)
+                        if camera.get("enabled") is not False or camera.get(
+                            "objective"
+                        ):
+                            content = [
+                                {
+                                    "type": "text",
+                                    "text": json.dumps(
+                                        {"camera": camera}, separators=(",", ":")
+                                    ),
+                                }
+                            ]
+                            if encoded:
+                                content.append(
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/png;base64,{encoded}"
+                                        },
+                                    }
+                                )
+                            messages.append({"role": "user", "content": content})
+                    except Exception as exc:
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": f"Camera unavailable: {str(exc)[:300]}",
+                            }
+                        )
+                    finally:
+                        telemetry.tool_seconds += time.perf_counter() - camera_started
                 response = await self._client.chat.completions.create(
                     model=self.model,
-                    messages=self.messages,
+                    messages=messages,
                     tools=tools,
                     parallel_tool_calls=True,
                     temperature=self.temperature,
                 )
                 choice = response.choices[0]
                 message = choice.message
-                self.messages.append(
+                self._append_message(
                     {
                         "role": "assistant",
                         "content": message.content or "",
@@ -591,9 +791,16 @@ class OpenAICompatibleAgentSession:
                             call.id,
                             terminal_reason,
                         )
-                        self.messages.append(tool_message)
+                        self._append_message(tool_message)
                         continue
 
+                    if call.function.name in {
+                        "submit_program",
+                        "factorio_execute_program",
+                        "factorio_set_camera",
+                        "factorio_check_throughput",
+                    }:
+                        self._camera_dirty = True
                     tool_started = time.perf_counter()
                     try:
                         try:
@@ -617,9 +824,7 @@ class OpenAICompatibleAgentSession:
                                     request_id=call.id,
                                 )
                             else:
-                                raise ValueError(
-                                    f"unknown tool {call.function.name}"
-                                )
+                                raise ValueError(f"unknown tool {call.function.name}")
                         except (ValueError, TypeError, json.JSONDecodeError) as exc:
                             output = f"error: {type(exc).__name__}: {exc}"
                             terminal = None
@@ -637,7 +842,7 @@ class OpenAICompatibleAgentSession:
                         "tool_call_id": call.id,
                         "content": output,
                     }
-                    self.messages.append(tool_message)
+                    self._append_message(tool_message)
                     terminal_reason = terminal_reason or terminal
                 if finished_epoch or terminal_reason is not None:
                     break
@@ -652,6 +857,46 @@ class OpenAICompatibleAgentSession:
                 0.0,
             )
         return telemetry
+
+    def _compact_messages_if_needed(self) -> None:
+        max_context_chars = getattr(self, "max_context_chars", 600_000)
+        if (
+            getattr(self, "_messages_chars", 0) <= max_context_chars
+            or len(self.messages) <= 50
+        ):
+            return
+        encoded = json.dumps(self.messages, separators=(",", ":"), default=str)
+        self._messages_chars = len(encoded)
+        if len(encoded) <= max_context_chars:
+            return
+        start = max(len(self.messages) - 48, 1)
+        while start > 1 and self.messages[start].get("role") == "tool":
+            start -= 1
+        archived = self.messages[1:start]
+        execution_ids: list[str] = []
+        for message in archived:
+            if message.get("role") != "tool":
+                continue
+            match = re.search(
+                r'"execution_id"\s*:\s*"([^"]+)"',
+                str(message.get("content", "")),
+            )
+            if match:
+                execution_ids.append(match.group(1))
+        self.compaction_count = getattr(self, "compaction_count", 0) + 1
+        marker = {
+            "role": "system",
+            "content": (
+                "Older interaction pairs were compacted after their durable tool "
+                "results were archived. Observe or query current state instead of "
+                "assuming historical state. Archived execution IDs: "
+                + ", ".join(execution_ids[-24:])
+            ),
+        }
+        self.messages = [self.messages[0], marker, *self.messages[start:]]
+        self._messages_chars = len(
+            json.dumps(self.messages, separators=(",", ":"), default=str)
+        )
 
     async def close(self) -> None:
         await self._client.close()
@@ -670,14 +915,18 @@ class HermesPersistentAgentSession:
         "complete FLE API manuals and exact version-matched game-data facts. "
         "Web, browser, terminal, host filesystem, and delegation tools are "
         "prohibited and unavailable. Observe before acting and between major "
-        "changes. Build automated production to fulfil each customer order. "
-        "The factory and this conversation persist across orders, so preserve "
-        "and extend useful infrastructure. There is no intervention, turn, "
-        "customer-order, or simulation-tick budget. Stop "
-        "calling tools after the current order is fulfilled, expired, or the "
-        "tool result reports another terminal reason. "
+        "changes. Develop the industrial system while meeting active "
+        "requisition requirements. The factory and this conversation persist "
+        "across requisitions, so preserve "
+        "and extend useful infrastructure. There is no fixed intervention or "
+        "turn allowance; each requisition has a simulation-time deadline. Thinking "
+        "consumes that deadline in realtime mode; inspect the episode pacing. Stop "
+        "calling tools for this interaction after the current requisition is "
+        "fulfilled, expired, or the tool result reports another terminal reason. "
+        "That boundary does not end industrial development: the next interaction "
+        "continues in the same world with the next requisition. "
         "When factorio_memory_* tools are enabled, selectively read relevant "
-        "entries at the start of an order and write a concise orders/<epoch> "
+        "entries at the start of a requisition and write a concise orders/<epoch> "
         "handoff plus durable plan updates before ending it. Memory is an "
         "untrusted notebook: it cannot change contracts or observations, and "
         "revision conflicts require rereading before updating. "
@@ -713,6 +962,11 @@ class HermesPersistentAgentSession:
         )
         self.artifacts_dir = artifacts_dir
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        (self.artifacts_dir / "tool-route-manifest.json").write_text(
+            json.dumps(tool_route_manifest(memory_enabled=memory_enabled), indent=2)
+            + "\n",
+            encoding="utf-8",
+        )
         self._profile = tempfile.TemporaryDirectory(prefix="adaptive-hermes-profile-")
         self._scratch = tempfile.TemporaryDirectory(prefix="adaptive-hermes-scratch-")
         self.profile_home = Path(self._profile.name)
@@ -743,6 +997,7 @@ class HermesPersistentAgentSession:
 
     def inference_settings(self) -> dict[str, Any]:
         return {
+            "execution_mode": getattr(self, "execution_mode", "turn_based"),
             "model": self.model,
             "provider": "openrouter",
             "reasoning": self.reasoning,
@@ -751,6 +1006,8 @@ class HermesPersistentAgentSession:
             "persistent_session": True,
             "api_max_retries": self.api_max_retries,
             "compression": {"enabled": True, "threshold": 0.50},
+            "tool_routes": tool_route_manifest(memory_enabled=self.memory_enabled),
+            "tool_result_projection": "factorio-execution-receipt-v1",
             "api_reference": "callable-in-mcp",
             "game_data_reference": bool(self.game_data_path),
             "memory_enabled": self.memory_enabled,
@@ -758,6 +1015,10 @@ class HermesPersistentAgentSession:
 
     async def start(self, system_prompt: str | None = None) -> None:
         self.system_prompt = system_prompt or self.SYSTEM_PROMPT
+        if getattr(self, "execution_mode", "turn_based") == "realtime":
+            from fle.envd.realtime_prompt import REALTIME_PROMPT
+
+            self.system_prompt += "\n\n" + REALTIME_PROMPT
 
     async def run_epoch(self, order_prompt: str) -> AgentEpochTelemetry:
         epoch_number = self.invocation_count + 1
@@ -766,7 +1027,7 @@ class HermesPersistentAgentSession:
             if self.invocation_count == 0
             else (
                 "Continue the same persistent benchmark session. A new "
-                f"customer order is now active.\n\n{order_prompt}"
+                f"requisition is now active.\n\n{order_prompt}"
             )
         )
         usage_file = self.artifacts_dir / f"epoch-{epoch_number:04d}.usage.json"
@@ -776,53 +1037,66 @@ class HermesPersistentAgentSession:
             reasoning=self.reasoning,
         )
         started = time.perf_counter()
-        invocation_task = asyncio.create_task(
-            asyncio.to_thread(
-                hermes_harness._run_hermes,
-                self.profile_home,
-                self.scratch,
-                usage_file,
-                prompt,
-                self.model,
-                args,
-                resume_latest=self.invocation_count > 0,
-                toolsets=hermes_harness.MCP_SERVER_NAME,
-                process_callback=self._set_active_process,
-            )
-        )
+        outputs = []
         terminal_observed = False
-        while not invocation_task.done():
-            await asyncio.sleep(0.25)
-            if self.terminal_file.exists():
-                terminal_observed = True
-                terminal_payload = self.terminal_file.read_text(
-                    encoding="utf-8", errors="replace"
+        while True:
+            args.timeout_seconds = max(
+                1, self.timeout_seconds - (time.perf_counter() - started)
+            )
+            invocation_task = asyncio.create_task(
+                asyncio.to_thread(
+                    hermes_harness._run_hermes,
+                    self.profile_home,
+                    self.scratch,
+                    usage_file,
+                    prompt,
+                    self.model,
+                    args,
+                    resume_latest=self.invocation_count > 0 or bool(outputs),
+                    toolsets=hermes_harness.MCP_SERVER_NAME,
+                    process_callback=self._set_active_process,
                 )
-                (
-                    self.artifacts_dir / f"epoch-{epoch_number:04d}.terminal.json"
-                ).write_text(terminal_payload, encoding="utf-8")
-                # Give the MCP response a moment to flush, then end this
-                # Hermes invocation. The persistent session remains resumable.
-                await asyncio.sleep(0.5)
-                if (
-                    self._active_process is not None
-                    and self._active_process.poll() is None
-                ):
-                    hermes_harness._terminate_process_tree(self._active_process)
+            )
+            while not invocation_task.done():
+                await asyncio.sleep(0.25)
+                await _sync_realtime_programs(self)
+                if self.terminal_file.exists():
+                    terminal_observed = True
+                    terminal_payload = self.terminal_file.read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+                    (
+                        self.artifacts_dir / f"epoch-{epoch_number:04d}.terminal.json"
+                    ).write_text(terminal_payload, encoding="utf-8")
+                    await asyncio.sleep(0.5)
+                    if (
+                        self._active_process is not None
+                        and self._active_process.poll() is None
+                    ):
+                        hermes_harness._terminate_process_tree(self._active_process)
+                    break
+            invocation = await invocation_task
+            outputs.append(invocation.output)
+            if (
+                getattr(self, "execution_mode", "turn_based") != "realtime"
+                or terminal_observed
+                or invocation.failure_category is not None
+                or time.perf_counter() - started >= self.timeout_seconds
+            ):
                 break
-        invocation = await invocation_task
+            status = await self.program_client.program_status(self.program_lease_id)
+            if status["active_program_id"] or status["queue_length"]:
+                await self.program_client.program_events(
+                    self.program_lease_id, after=status["event_cursor"], timeout=30
+                )
+            prompt = "Continue this same realtime episode. Inspect program results, plan independent work, and await events when dependent on new information."
         elapsed = time.perf_counter() - started
         self.invocation_count += 1
         (self.artifacts_dir / f"epoch-{epoch_number:04d}.hermes.log").write_text(
-            invocation.output,
+            "\n".join(outputs),
             encoding="utf-8",
         )
-        trace_text = (
-            self.trace_file.read_text(encoding="utf-8", errors="replace")
-            if self.trace_file.exists()
-            else ""
-        )
-        trace_call_count = trace_text.count("tools/call")
+        trace_call_count = _incremental_trace_calls(self)
         epoch_tool_calls = max(trace_call_count - self._trace_call_count, 0)
         self._trace_call_count = trace_call_count
         return AgentEpochTelemetry(
@@ -868,6 +1142,60 @@ def _parse_opencode_jsonl(output: str) -> tuple[list[dict[str, Any]], int]:
     return events, malformed
 
 
+def _incremental_trace_calls(agent: Any) -> int:
+    """Count ``tools/call`` occurrences while scanning only new trace bytes."""
+
+    path = agent.trace_file
+    seen = getattr(agent, "_trace_calls_seen", 0)
+    offset = getattr(agent, "_trace_bytes_read", 0)
+    if not path.exists():
+        return seen
+    with path.open("rb") as stream:
+        stream.seek(offset)
+        chunk = stream.read()
+    newline = chunk.rfind(b"\n")
+    if newline == -1:
+        return seen
+    stable = chunk[: newline + 1]
+    agent._trace_bytes_read = offset + newline + 1
+    agent._trace_calls_seen = seen + stable.count(b"tools/call")
+    return agent._trace_calls_seen
+
+
+def _opencode_tool_seconds(
+    output: str, events: list[dict[str, Any]] | None = None
+) -> float:
+    """Union completed tool intervals so repeated/overlapping events count once."""
+    if events is None:
+        events, _ = _parse_opencode_jsonl(output)
+    intervals = []
+    for event in events:
+        if event.get("type") != "tool_use":
+            continue
+        part = event.get("part")
+        state = part.get("state") if isinstance(part, dict) else None
+        timing = state.get("time") if isinstance(state, dict) else None
+        if not isinstance(timing, dict):
+            continue
+        start, end = timing.get("start"), timing.get("end")
+        if (
+            isinstance(start, (int, float))
+            and not isinstance(start, bool)
+            and isinstance(end, (int, float))
+            and not isinstance(end, bool)
+            and math.isfinite(start)
+            and math.isfinite(end)
+            and end >= start
+        ):
+            intervals.append((start, end))
+    total = 0.0
+    previous_end = float("-inf")
+    for start, end in sorted(intervals):
+        total += max(end - max(start, previous_end), 0.0)
+        previous_end = max(previous_end, end)
+    return total / 1000.0
+
+
 def _event_field(event: dict[str, Any], field: str) -> Any:
     """Read a field from the top-level or common OpenCode event envelopes."""
 
@@ -880,8 +1208,11 @@ def _event_field(event: dict[str, Any], field: str) -> Any:
     return None
 
 
-def _parse_opencode_session_ids(output: str) -> list[str]:
-    events, _ = _parse_opencode_jsonl(output)
+def _parse_opencode_session_ids(
+    output: str, events: list[dict[str, Any]] | None = None
+) -> list[str]:
+    if events is None:
+        events, _ = _parse_opencode_jsonl(output)
     session_ids: list[str] = []
     for event in events:
         for field in ("sessionID", "sessionId", "session_id"):
@@ -892,10 +1223,13 @@ def _parse_opencode_session_ids(output: str) -> list[str]:
     return session_ids
 
 
-def _parse_opencode_step_finish_reasons(output: str) -> list[str]:
+def _parse_opencode_step_finish_reasons(
+    output: str, events: list[dict[str, Any]] | None = None
+) -> list[str]:
     """Return normalized provider reasons from ``step_finish`` events."""
 
-    events, _ = _parse_opencode_jsonl(output)
+    if events is None:
+        events, _ = _parse_opencode_jsonl(output)
     reasons: list[str] = []
     for event in events:
         event_type = str(event.get("type", "")).lower()
@@ -908,6 +1242,42 @@ def _parse_opencode_step_finish_reasons(output: str) -> list[str]:
         if normalized:
             reasons.append(normalized)
     return reasons
+
+
+def _parse_opencode_provider_error(
+    output: str, events: list[dict[str, Any]] | None = None
+) -> dict[str, Any] | None:
+    """Return the last structured provider error from an OpenCode stream."""
+
+    if events is None:
+        events, _ = _parse_opencode_jsonl(output)
+    for event in reversed(events):
+        if str(event.get("type", "")).lower() != "error":
+            continue
+        error = event.get("error")
+        if not isinstance(error, dict):
+            continue
+        data = error.get("data")
+        if not isinstance(data, dict):
+            data = {}
+        status_code = data.get("statusCode")
+        try:
+            normalized_status = int(status_code) if status_code is not None else None
+        except (TypeError, ValueError):
+            normalized_status = None
+        retryable_flag = data.get("isRetryable")
+        retryable = (
+            retryable_flag
+            if isinstance(retryable_flag, bool)
+            else normalized_status in {408, 409, 425, 429, 500, 502, 503, 504}
+        )
+        return {
+            "name": str(error.get("name", "provider_error")),
+            "message": str(data.get("message", "")),
+            "status_code": normalized_status,
+            "retryable": retryable,
+        }
+    return None
 
 
 class OpenCodePersistentAgentSession:
@@ -930,29 +1300,48 @@ class OpenCodePersistentAgentSession:
         game_data_path: str | Path | None = None,
         memory_path: str | Path | None = None,
         memory_enabled: bool = False,
-        api_max_retries: int = 12,
+        api_max_retries: int | None = None,
     ) -> None:
         self.model = model
         self.reasoning = reasoning
-        self.variant = "xhigh" if reasoning == "max" else reasoning
+        # Muse names its highest advertised OpenCode variant ``xhigh``; models
+        # such as GLM expose the requested ``max`` variant directly.
+        self.variant = (
+            "xhigh"
+            if reasoning == "max" and "muse-spark" in model.lower()
+            else reasoning
+        )
         self.timeout_seconds = timeout_seconds
         self.artifacts_dir = artifacts_dir
         self.game_data_path = str(game_data_path) if game_data_path else ""
         self.memory_path = str(memory_path) if memory_path else ""
         self.memory_enabled = memory_enabled
-        self.api_max_retries = max(int(api_max_retries), 0)
+        self.api_max_retries = (
+            None if api_max_retries is None else max(int(api_max_retries), 0)
+        )
         self.TOOL_MANIFEST_SHA256 = _sha256_json(
             tools_for_profile(memory_enabled=memory_enabled)
         )
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
-        self._scratch = tempfile.TemporaryDirectory(prefix="adaptive-opencode-scratch-")
-        self.scratch = Path(self._scratch.name)
+        (self.artifacts_dir / "tool-route-manifest.json").write_text(
+            json.dumps(tool_route_manifest(memory_enabled=memory_enabled), indent=2)
+            + "\n",
+            encoding="utf-8",
+        )
+        self.scratch = self.artifacts_dir / "workspace"
+        self.scratch.mkdir(parents=True, exist_ok=True)
+        self._scratch = SimpleNamespace(cleanup=lambda: None)
         self.trace_file = self.artifacts_dir / "mcp-trace.log"
         self.terminal_file = self.artifacts_dir / "epoch-terminal.signal.json"
+        self.terminal_finalization_file = (
+            self.artifacts_dir / "epoch-terminal-finalization.lock"
+        )
+        self.terminal_finalization_file.unlink(missing_ok=True)
         self.command = self._resolve_command(command)
         self.system_prompt = self.SYSTEM_PROMPT
         self.invocation_count = 0
         self.session_id: str | None = None
+        self.session_title = self.artifacts_dir.parent.name
         self._trace_call_count = 0
         self._active_process: subprocess.Popen[str] | None = None
         self._write_project_config(envd_url, lease_id)
@@ -1011,10 +1400,23 @@ class OpenCodePersistentAgentSession:
                     ],
                     "cwd": str(REPO),
                     "environment": {
+                        "FACTORIO_EXECUTION_MODE": os.environ.get(
+                            "FACTORIO_EXECUTION_MODE", "turn_based"
+                        ),
                         "ENVD_URL": envd_url,
                         "LEASE_ID": lease_id,
                         "MCP_TRACE_FILE": str(self.trace_file),
                         "MCP_TERMINAL_FILE": str(self.terminal_file),
+                        "MCP_TERMINAL_FINALIZATION_FILE": str(
+                            self.terminal_finalization_file
+                        ),
+                        "FACTORIO_TOOL_ARTIFACT_DIR": str(
+                            self.artifacts_dir / "tool-results"
+                        ),
+                        "FACTORIO_RESUME_POINTER_FILE": str(
+                            self.artifacts_dir / "resume" / "world-checkpoint.json"
+                        ),
+                        "FACTORIO_CHECKPOINT_EVERY": "5",
                         "FACTORIO_GAME_DATA_FILE": self.game_data_path,
                         "MEMORY_PATH": self.memory_path,
                         "MEMORY_ENABLED": "1" if self.memory_enabled else "0",
@@ -1031,6 +1433,7 @@ class OpenCodePersistentAgentSession:
 
     def inference_settings(self) -> dict[str, Any]:
         return {
+            "execution_mode": getattr(self, "execution_mode", "turn_based"),
             "model": self.model,
             "provider": self.model.split("/", 1)[0]
             if "/" in self.model
@@ -1041,6 +1444,8 @@ class OpenCodePersistentAgentSession:
             "toolsets": ["factorio"],
             "persistent_session": True,
             "automatic_compaction": True,
+            "tool_routes": tool_route_manifest(memory_enabled=self.memory_enabled),
+            "tool_result_projection": "factorio-execution-receipt-v1",
             "tool_permissions": {"factorio_*": "allow", "*": "deny"},
             "api_reference": "callable-in-mcp",
             "game_data_reference": bool(self.game_data_path),
@@ -1050,6 +1455,48 @@ class OpenCodePersistentAgentSession:
 
     async def start(self, system_prompt: str | None = None) -> None:
         self.system_prompt = system_prompt or self.SYSTEM_PROMPT
+        path = self.scratch / "opencode.json"
+        if getattr(self, "execution_mode", "turn_based") == "realtime":
+            from fle.envd.realtime_prompt import REALTIME_PROMPT
+
+            self.system_prompt += "\n\n" + REALTIME_PROMPT
+        config = json.loads(path.read_text(encoding="utf-8"))
+        config["agent"]["factorio-eval"]["prompt"] = self.system_prompt
+        _atomic_json(path, config)
+
+    def restore_state(self, state: dict[str, Any]) -> None:
+        self.session_id = state.get("session_id") or self._discover_session_id()
+        self.invocation_count = max(int(state.get("invocation_count", 0)), 0)
+
+    def _discover_session_id(self) -> str | None:
+        completed = subprocess.run(
+            [self.command, "session", "list", "--format", "json"],
+            cwd=self.scratch,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
+        )
+        if completed.returncode != 0:
+            return None
+        try:
+            sessions = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(sessions, list):
+            return None
+        workspace = str(self.scratch.resolve()).casefold()
+        for session in sessions:
+            if not isinstance(session, dict):
+                continue
+            directory = str(session.get("directory", "")).casefold()
+            if directory == workspace or session.get("title") == self.session_title:
+                value = session.get("id") or session.get("sessionID")
+                if isinstance(value, str):
+                    return value
+        return None
 
     @staticmethod
     def _parse_session_id(output: str) -> str | None:
@@ -1062,7 +1509,9 @@ class OpenCodePersistentAgentSession:
 
         return _parse_opencode_step_finish_reasons(output)
 
-    def _invoke(self, prompt: str) -> SimpleNamespace:
+    def _invoke(
+        self, prompt: str, *, timeout_seconds: float | None = None
+    ) -> SimpleNamespace:
         command = [
             self.command,
             "run",
@@ -1078,6 +1527,8 @@ class OpenCodePersistentAgentSession:
         ]
         if self.session_id:
             command.extend(["--session", self.session_id])
+        else:
+            command.extend(["--title", self.session_title])
         if self.variant and self.variant.lower() not in {"none", "default"}:
             command.extend(["--variant", self.variant])
         command.append(prompt)
@@ -1093,7 +1544,13 @@ class OpenCodePersistentAgentSession:
         self._active_process = process
         timed_out = False
         try:
-            stdout, stderr = process.communicate(timeout=self.timeout_seconds)
+            stdout, stderr = process.communicate(
+                timeout=(
+                    self.timeout_seconds
+                    if timeout_seconds is None
+                    else max(float(timeout_seconds), 1.0)
+                )
+            )
         except subprocess.TimeoutExpired:
             timed_out = True
             hermes_harness._terminate_process_tree(process)
@@ -1139,12 +1596,138 @@ class OpenCodePersistentAgentSession:
     def _continuation_prompt() -> str:
         return (
             "The previous OpenCode provider step ended with reason:length. "
-            "The current customer order is still active. Continue the same "
+            "The current evaluation objective is still active. Continue the same "
             "persistent benchmark session after automatic context compaction; "
             "do not start a new session, reset the factory, or claim completion "
-            "without verifying the order. Continue using the Factorio tools "
+            "without verifying the evaluation objective. Continue using the Factorio tools "
             "until the MCP environment reports an authoritative terminal state."
         )
+
+    @staticmethod
+    def _provider_recovery_prompt() -> str:
+        return (
+            "The previous OpenCode request ended in a retryable provider "
+            "interruption after Factorio actions may have completed. Resume "
+            "this same persistent session and the still-active "
+            "evaluation objective. Do not replay earlier actions or reset the factory. "
+            "Observe the current environment state first, then continue until "
+            "the MCP environment reports an authoritative terminal state."
+        )
+
+    @staticmethod
+    def _premature_stop_prompt() -> str:
+        return (
+            "The previous OpenCode step stopped normally, but the Factorio "
+            "environment has not reported that the current evaluation objective is "
+            "terminal. Continue this same persistent session and "
+            "evaluation objective. Observe the current factory state first, then keep acting "
+            "until an authoritative terminal state is reported."
+        )
+
+    @staticmethod
+    def _terminal_finalization_prompt(
+        terminal_payload: dict[str, Any], epoch_number: int
+    ) -> str:
+        raw_result = terminal_payload.get("payload")
+        normalized = (
+            _contract_result(raw_result) if isinstance(raw_result, dict) else None
+        ) or {
+            "status": OpenCodePersistentAgentSession._terminal_reason(terminal_payload),
+            "terminal_reason": OpenCodePersistentAgentSession._terminal_reason(
+                terminal_payload
+            ),
+        }
+        return (
+            f"Evaluation segment #{epoch_number} is terminal. The authoritative "
+            "result is:\n"
+            + json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+            + "\nWorld actions are now disabled. Use only factorio_memory_* tools "
+            "to record a concise, accurate handoff for this evaluation and any "
+            "durable plan update that will help future work, then stop."
+        )
+
+    async def _finalize_terminal_memory(
+        self,
+        *,
+        terminal_payload: dict[str, Any],
+        epoch_number: int,
+    ) -> tuple[str, dict[str, Any]]:
+        """Allow one bounded, mutation-free same-session memory handoff."""
+
+        record: dict[str, Any] = {
+            "attempted": False,
+            "completed": False,
+            "reason": "memory_disabled",
+        }
+        if not self.memory_enabled:
+            return "", record
+        if self.session_id is None:
+            record["reason"] = "opencode_session_missing"
+            return "", record
+
+        prompt = self._terminal_finalization_prompt(terminal_payload, epoch_number)
+        self.terminal_finalization_file.write_text(
+            json.dumps(
+                {
+                    "epoch_index": epoch_number,
+                    "terminal_reason": self._terminal_reason(terminal_payload),
+                }
+            ),
+            encoding="utf-8",
+        )
+        record.update({"attempted": True, "reason": "provider_invoked"})
+        try:
+            try:
+                invocation = await asyncio.to_thread(
+                    self._invoke,
+                    prompt,
+                    timeout_seconds=min(self.timeout_seconds, 300.0),
+                )
+            except Exception as exc:
+                record.update(
+                    {
+                        "reason": "provider_exception",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                return "", record
+        finally:
+            self.terminal_finalization_file.unlink(missing_ok=True)
+
+        stdout = str(getattr(invocation, "stdout", "") or "")
+        stderr = str(getattr(invocation, "stderr", "") or "")
+        stdout_events, _ = _parse_opencode_jsonl(stdout)
+        session_ids = _parse_opencode_session_ids(stdout, events=stdout_events)
+        same_session = not session_ids or all(
+            session_id == self.session_id for session_id in session_ids
+        )
+        completed = (
+            getattr(invocation, "returncode", None) in {0, None}
+            and not bool(getattr(invocation, "timed_out", False))
+            and same_session
+        )
+        record.update(
+            {
+                "completed": completed,
+                "reason": "completed" if completed else "provider_failed",
+                "returncode": getattr(invocation, "returncode", None),
+                "timed_out": bool(getattr(invocation, "timed_out", False)),
+                "session_ids": session_ids,
+                "step_finish_reasons": _parse_opencode_step_finish_reasons(
+                    stdout, events=stdout_events
+                ),
+            }
+        )
+        text = stdout
+        if stderr:
+            text += "\n--- stderr ---\n" + stderr
+        return text, record
+
+    @staticmethod
+    def _provider_retry_delay(retry_attempt: int) -> float:
+        """Back off long enough for provider rate windows without busy retrying."""
+
+        return float(min(5 * (2**retry_attempt), 300))
 
     def _write_epoch_audit(
         self,
@@ -1157,6 +1740,7 @@ class OpenCodePersistentAgentSession:
         terminal_payload: dict[str, Any] | None,
         stop_reason: str,
         failure_category: str | None,
+        terminal_memory_finalization: dict[str, Any] | None = None,
     ) -> None:
         """Persist the provider state machine decisions for later calibration."""
 
@@ -1169,13 +1753,12 @@ class OpenCodePersistentAgentSession:
                 "provider_invocations": len(invocation_records),
                 "invocations": invocation_records,
                 "continuation_reasons": list(continuation_reasons),
-                "provider_step_finish_reasons": list(
-                    provider_step_finish_reasons
-                ),
+                "provider_step_finish_reasons": list(provider_step_finish_reasons),
                 "terminal_observed": terminal_payload is not None,
                 "terminal_reason": self._terminal_reason(terminal_payload),
                 "stop_reason": stop_reason,
                 "failure_category": failure_category,
+                "terminal_memory_finalization": terminal_memory_finalization,
             },
         )
 
@@ -1186,7 +1769,7 @@ class OpenCodePersistentAgentSession:
             if self.invocation_count == 0
             else (
                 "Continue the same persistent benchmark session. A new "
-                f"customer order is now active.\n\n{order_prompt}"
+                f"requisition is now active.\n\n{order_prompt}"
             )
         )
         self.terminal_file.unlink(missing_ok=True)
@@ -1198,24 +1781,29 @@ class OpenCodePersistentAgentSession:
         provider_step_finish_reasons: list[str] = []
         prompt_chars = 0
         failure_category: str | None = None
+        terminal_memory_finalization: dict[str, Any] | None = None
         stop_reason = "unknown"
         current_prompt = prompt
 
-        # A logical invocation may be retried for a provider rate limit. A
-        # length result is different: it is a successful provider boundary
-        # that requires an unbounded continuation in the same OpenCode
-        # session, so it deliberately does not consume api_max_retries.
+        # Retryable provider errors resume the same logical epoch. Before any
+        # world call the original prompt is safe to replay; after a world call
+        # recovery uses a continuation prompt in the established session so
+        # completed actions are never duplicated. A length result is a
+        # successful provider boundary and uses the same continuation state
+        # machine without consuming a configured provider retry limit.
         while True:
-            prompt_chars += len(current_prompt)
             logical_outputs: list[str] = []
             invocation: SimpleNamespace | None = None
             retry_exhausted = False
-            for retry_attempt in range(self.api_max_retries + 1):
+            retry_attempt = 0
+            while True:
+                prompt_chars += len(current_prompt)
                 invocation_task = asyncio.create_task(
                     asyncio.to_thread(self._invoke, current_prompt)
                 )
                 while not invocation_task.done():
                     await asyncio.sleep(0.25)
+                    await _sync_realtime_programs(self)
                     if terminal_payload is None:
                         terminal_payload = self._capture_terminal_signal(epoch_number)
                     if terminal_payload is not None:
@@ -1237,37 +1825,56 @@ class OpenCodePersistentAgentSession:
                     attempt_text += "\n--- stderr ---\n" + stderr
                 logical_outputs.append(attempt_text)
 
-                session_ids = _parse_opencode_session_ids(stdout)
+                stdout_events, _ = _parse_opencode_jsonl(stdout)
+                session_ids = _parse_opencode_session_ids(stdout, events=stdout_events)
                 session_error: str | None = None
                 if session_ids:
                     if self.session_id is None:
                         self.session_id = session_ids[0]
-                    elif any(session_id != self.session_id for session_id in session_ids):
+                    elif any(
+                        session_id != self.session_id for session_id in session_ids
+                    ):
                         session_error = "opencode_session_changed"
-                reasons = _parse_opencode_step_finish_reasons(stdout)
+                reasons = _parse_opencode_step_finish_reasons(
+                    stdout, events=stdout_events
+                )
                 provider_step_finish_reasons.extend(reasons)
+                provider_error = _parse_opencode_provider_error(
+                    stdout, events=stdout_events
+                )
                 if terminal_payload is None:
                     # The process can exit before the polling loop gets a
                     # chance to observe a signal written at the same instant.
                     terminal_payload = self._capture_terminal_signal(epoch_number)
 
-                trace_text = (
-                    self.trace_file.read_text(encoding="utf-8", errors="replace")
-                    if self.trace_file.exists()
-                    else ""
+                calls_started = _incremental_trace_calls(self) > self._trace_call_count
+                normalized_output = (stdout + "\n" + stderr).replace(" ", "")
+                retry_limit_reached = (
+                    self.api_max_retries is not None
+                    and retry_attempt >= self.api_max_retries
                 )
-                calls_started = trace_text.count("tools/call") > self._trace_call_count
-                normalized_stdout = stdout.replace(" ", "")
                 retryable = (
                     terminal_payload is None
                     and not bool(getattr(invocation, "timed_out", False))
-                    and not calls_started
                     and getattr(invocation, "returncode", None) not in {0, None}
+                    and session_error is None
+                    and (not calls_started or self.session_id is not None)
                     and (
-                        '"isRetryable":true' in normalized_stdout
-                        or '"statusCode":429' in normalized_stdout
-                        or "Rate limit exceeded" in stdout
+                        bool(provider_error and provider_error["retryable"])
+                        or (
+                            provider_error is None
+                            and (
+                                '"isRetryable":true' in normalized_output
+                                or '"statusCode":429' in normalized_output
+                                or "Rate limit exceeded" in stdout + stderr
+                            )
+                        )
                     )
+                )
+                retry_action = (
+                    "provider_resume_after_retryable_error"
+                    if retryable and calls_started
+                    else "provider_retry"
                 )
                 invocation_records.append(
                     {
@@ -1277,19 +1884,22 @@ class OpenCodePersistentAgentSession:
                         "timed_out": bool(getattr(invocation, "timed_out", False)),
                         "session_ids": session_ids,
                         "step_finish_reasons": reasons,
+                        "provider_error": provider_error,
+                        "world_calls_started": calls_started,
                         "retryable": retryable,
-                        "retry_exhausted": bool(
-                            retryable and retry_attempt >= self.api_max_retries
-                        ),
+                        "retry_exhausted": bool(retryable and retry_limit_reached),
                         "action": (
-                            "provider_retry"
-                            if retryable and retry_attempt < self.api_max_retries
+                            retry_action
+                            if retryable and not retry_limit_reached
                             else "evaluate"
                         ),
                     }
                 )
-                if retryable and retry_attempt < self.api_max_retries:
-                    await asyncio.sleep(min(2**retry_attempt, 60))
+                if retryable and not retry_limit_reached:
+                    if calls_started:
+                        current_prompt = self._provider_recovery_prompt()
+                    await asyncio.sleep(self._provider_retry_delay(retry_attempt))
+                    retry_attempt += 1
                     continue
                 retry_exhausted = bool(retryable)
 
@@ -1297,8 +1907,8 @@ class OpenCodePersistentAgentSession:
                     failure_category = session_error
                     stop_reason = "provider_session_changed"
                 elif terminal_payload is not None:
-                    stop_reason = (
-                        "contract_terminal:" + self._terminal_reason(terminal_payload)
+                    stop_reason = "contract_terminal:" + self._terminal_reason(
+                        terminal_payload
                     )
                 elif bool(getattr(invocation, "timed_out", False)):
                     failure_category = "provider_timeout"
@@ -1325,6 +1935,50 @@ class OpenCodePersistentAgentSession:
                             f"{len(continuation_reasons)}: reason:length ---\n"
                         )
                         break
+                elif (
+                    getattr(invocation, "returncode", None) in {0, None}
+                    and self.session_id is not None
+                    and (not reasons or reasons[-1] == "stop")
+                ):
+                    # Some providers voluntarily end an otherwise successful
+                    # step while the environment order remains active.  EOF is
+                    # not a benchmark outcome: resume the established session
+                    # and require an authoritative MCP terminal signal.
+                    continuation_reasons.append("reason:stop_without_terminal")
+                    stop_reason = "continuing_after_reason:stop_without_terminal"
+                    current_prompt = self._premature_stop_prompt()
+                    if getattr(self, "execution_mode", "turn_based") == "realtime":
+                        status = await self.program_client.program_status(
+                            self.program_lease_id
+                        )
+                        if status["active_program_id"] or status["queue_length"]:
+                            await self.program_client.program_events(
+                                self.program_lease_id,
+                                after=status["event_cursor"],
+                                timeout=30,
+                            )
+                        status = await self.program_client.program_status(
+                            self.program_lease_id
+                        )
+                        status.pop("checkpoint", None)
+                        current_prompt = (
+                            "The realtime executor has continued since your last response. "
+                            "Inspect completed program receipts and do useful independent work; "
+                            "await events when new information is required. Runtime status: "
+                            + json.dumps(status)
+                        )
+                    if len(logical_outputs) > 1:
+                        attempt_outputs.append(
+                            "\n--- provider retry ---\n".join(logical_outputs)
+                        )
+                    else:
+                        attempt_outputs.append(logical_outputs[0])
+                    attempt_outputs.append(
+                        "\n--- provider continuation "
+                        f"{len(continuation_reasons)}: "
+                        "reason:stop_without_terminal ---\n"
+                    )
+                    break
                 elif retry_exhausted:
                     failure_category = "provider_rate_limit"
                     stop_reason = "provider_retry_exhausted_without_terminal"
@@ -1342,7 +1996,9 @@ class OpenCodePersistentAgentSession:
 
             # ``break`` above exits the inner retry loop. A length result uses
             # the continuation branch and must re-enter the outer loop.
-            if continuation_reasons and stop_reason == "continuing_after_reason:length":
+            if continuation_reasons and stop_reason.startswith(
+                "continuing_after_reason:"
+            ):
                 continue
             if logical_outputs:
                 if len(logical_outputs) > 1:
@@ -1352,6 +2008,30 @@ class OpenCodePersistentAgentSession:
                 else:
                     attempt_outputs.append(logical_outputs[0])
             break
+
+        if terminal_payload is not None:
+            (
+                finalization_text,
+                terminal_memory_finalization,
+            ) = await self._finalize_terminal_memory(
+                terminal_payload=terminal_payload,
+                epoch_number=epoch_number,
+            )
+            if terminal_memory_finalization.get("attempted"):
+                finalization_prompt = self._terminal_finalization_prompt(
+                    terminal_payload, epoch_number
+                )
+                prompt_chars += len(finalization_prompt)
+                attempt_outputs.append(
+                    "\n--- terminal memory finalization ---\n" + finalization_text
+                )
+                invocation_records.append(
+                    {
+                        "invocation": len(invocation_records) + 1,
+                        "action": "terminal_memory_finalization",
+                        **terminal_memory_finalization,
+                    }
+                )
 
         if invocation is None:
             # Defensive guard: the loop always invokes at least once, but a
@@ -1365,12 +2045,7 @@ class OpenCodePersistentAgentSession:
         (self.artifacts_dir / f"epoch-{epoch_number:04d}.opencode.jsonl").write_text(
             combined_output, encoding="utf-8"
         )
-        trace_text = (
-            self.trace_file.read_text(encoding="utf-8", errors="replace")
-            if self.trace_file.exists()
-            else ""
-        )
-        trace_call_count = trace_text.count("tools/call")
+        trace_call_count = _incremental_trace_calls(self)
         epoch_tool_calls = max(trace_call_count - self._trace_call_count, 0)
         self._trace_call_count = trace_call_count
         self._write_epoch_audit(
@@ -1382,10 +2057,14 @@ class OpenCodePersistentAgentSession:
             terminal_payload=terminal_payload,
             stop_reason=stop_reason,
             failure_category=failure_category,
+            terminal_memory_finalization=terminal_memory_finalization,
         )
+        tool_seconds = min(_opencode_tool_seconds(combined_output), elapsed)
         return AgentEpochTelemetry(
-            model_seconds=elapsed,
-            tool_seconds=0.0,
+            # The remainder includes provider and harness overhead, as for
+            # the other persistent harnesses; it is not pure inference time.
+            model_seconds=max(elapsed - tool_seconds, 0.0),
+            tool_seconds=tool_seconds,
             turns=epoch_tool_calls,
             transport_errors=int(failure_category is not None),
             prompt_chars=prompt_chars,
@@ -1400,7 +2079,6 @@ class OpenCodePersistentAgentSession:
     async def close(self) -> None:
         if self._active_process is not None and self._active_process.poll() is None:
             hermes_harness._terminate_process_tree(self._active_process)
-        self._scratch.cleanup()
 
 
 # ---------------------------------------------------------------------------
@@ -1408,11 +2086,36 @@ class OpenCodePersistentAgentSession:
 # ---------------------------------------------------------------------------
 
 
+def render_previous_contract_feedback(outcome) -> str:
+    """Public outcome summary, without hidden audit windows or failure details."""
+    if outcome is None:
+        return ""
+    summary = (
+        f"Previous contract #{outcome.epoch_index}: {outcome.status}; "
+        f"credited delivery {outcome.delivered_quantity}/{outcome.requested_quantity}. "
+    )
+    if outcome.status == "infrastructure_error":
+        return (
+            summary
+            + "This was an infrastructure interruption, not a factory diagnosis.\n\n"
+        )
+    if outcome.status in {"expired", "partial", "abandoned"}:
+        summary += (
+            "The contract did not fully succeed. This result alone does not "
+            "identify a broken machine. Compare observed depot arrivals with "
+            "the requested rate and inspect the connected input, fuel/power, "
+            "processing, and delivery path. Check whether progress depended on "
+            "your refills or stored inputs. Preserve useful infrastructure and "
+            "use the evidence to revise your plan. "
+        )
+    return summary + "\n\n"
+
+
 def render_order_prompt(
     spec: ContractEpochSpec, *, memory_enabled: bool = False
 ) -> str:
     memory_instruction = (
-        "At this order boundary, selectively read relevant session memory; "
+        "At this requisition boundary, selectively read relevant session memory; "
         "before stopping, record a short handoff under "
         f"orders/{spec.epoch_index} with delivery, capability progress, "
         "blockers, and the next likely step. "
@@ -1422,30 +2125,39 @@ def render_order_prompt(
     lines = spec.products or (
         ProductDemandSpec(product=spec.item_name, quantity=float(spec.quantity)),
     )
+    window_minutes = max(spec.deadline_ticks / 3600.0, 1e-9)
     demand = ", ".join(
-        f"{round(line.quantity)} x {line.product}" for line in lines
-    )
-    service = (
-        "This is a sustained-throughput order: deliveries are scored across "
-        "the entire window, so an end-of-window burst does not substitute for "
-        "steady production. You may call factorio_check_throughput to measure "
-        "the unattended depot rate; it advances factory time. "
-        if spec.order_kind == "sustained"
-        else ""
+        f"{line.quantity / window_minutes:.3g} {line.product}/min" for line in lines
     )
     return (
-        f"CUSTOMER ORDER #{spec.epoch_index}\n"
-        f"Deliver {demand} into the customer depot "
-        f"within {spec.deadline_ticks} ticks ({spec.deadline_ticks // 3600} "
-        "minutes of factory time). Deliveries count only when they cross "
-        f"into the pre-existing depot chests; {CUSTOMER_DEPOT_LOCATION}. "
+        f"REQUISITION #{spec.epoch_index}\n"
+        "Continue industrial development while supplying this expedition demand. "
+        f"Sustain {demand} at the "
+        f"depot. The construction deadline is {spec.deadline_ticks} ticks "
+        f"({spec.deadline_ticks // 3600} minutes of factory time). "
+        "This requisition qualifies through continuous unattended production and delivery; "
+        "hand crafting, stockpiles, and an end-of-window burst do not qualify. "
+        "Hand mining, crafting, and fueling are available for construction and "
+        "bootstrap; they do not demonstrate that the finished factory can "
+        "sustain itself. Before long waits, check the connected supply path, "
+        "including energy, ingredients, transport, and the bound destination. "
+        "You may call factorio_check_throughput to measure the unattended depot "
+        "rate; it advances factory time. Deliveries count only when they cross "
+        f"into a chest you bind for the active product; {CUSTOMER_DEPOT_LOCATION}. "
         "Feed a depot with an inserter: direct insert_item delivery is recorded "
-        "for audit but does not fulfill the order. Depot contents are consumed "
-        "immediately, so its inventory will normally appear empty. "
-        f"{service}{memory_instruction}Current inventory "
+        "for audit but does not fulfill the requisition. Accepted requisition units are "
+        "consumed immediately; surplus remains in the chest. "
+        "Read delivery receipts as interval measurements: no arrivals in one "
+        "interval is not an audit failure. Use customer_delivery for measured "
+        "depot traffic and throughput_certified for qualification. A diagnostic "
+        "throughput check measures delivery during its window; it does not "
+        "by itself certify end-to-end production. If physical traffic and "
+        "contract accounting disagree, record the evidence rather than "
+        "assuming that another manual refill resolves the discrepancy. "
+        f"{memory_instruction}Current inventory "
         "and infrastructure remain "
-        "yours to use. Reply with programs that advance fulfillment; the "
-        "order cannot be changed now."
+        "yours to use. Reply with programs that develop the factory while "
+        "supplying the active requisition; its requirements cannot be changed now."
     )
 
 
@@ -1528,7 +2240,10 @@ def stopping_rule_met(
         and rating.rated_epoch_count >= config.max_rated_epochs
     ):
         return True
-    if config.max_session_ticks is not None and session_ticks >= config.max_session_ticks:
+    if (
+        config.max_session_ticks is not None
+        and session_ticks >= config.max_session_ticks
+    ):
         return True
     if (
         config.max_session_interventions is not None
@@ -1542,11 +2257,301 @@ def stopping_rule_met(
     )
 
 
+async def _sync_realtime_programs(agent):
+    """Persist executor progress independently of model tool calls or provider EOF."""
+    if getattr(agent, "execution_mode", "turn_based") != "realtime":
+        return
+    now = time.monotonic()
+    if now - getattr(agent, "_program_sync_time", 0) < 1:
+        return
+    agent._program_sync_time = now
+    status = await agent.program_client.program_status(agent.program_lease_id)
+    if status.get("failure"):
+        raise RuntimeError(status["failure"])
+    checkpoint = status.get("checkpoint")
+    if checkpoint:
+        _atomic_json(
+            agent.artifacts_dir / "resume" / "world-checkpoint.json",
+            {"schema_version": "factorio-resume-pointer-v1", "checkpoint": checkpoint},
+        )
+    terminal_id = status.get("terminal_program_id")
+    terminal_event = status.get("terminal_event")
+    if terminal_event and not terminal_id:
+        observation = await agent.program_client.observe(agent.program_lease_id)
+        _atomic_json(
+            agent.terminal_file,
+            {
+                "reason": terminal_event["kind"],
+                "payload": observation.model_dump(mode="json"),
+            },
+        )
+    if terminal_id:
+        completed = await agent.program_client.program_status(
+            agent.program_lease_id, terminal_id, result=True
+        )
+        result = completed.get("result")
+        if result:
+            reason = (
+                result.get("terminal_reason")
+                or (terminal_event or {}).get("kind")
+                or next(
+                    (
+                        e["kind"]
+                        for e in result.get("events", [])
+                        if e.get("kind") in {"contract_fulfilled", "contract_expired"}
+                    ),
+                    None,
+                )
+            )
+            if reason:
+                _atomic_json(agent.terminal_file, {"reason": reason, "payload": result})
+
+
+def evaluation_execution_mode(args):
+    mode = getattr(args, "execution_mode", "auto")
+    if mode == "auto":
+        return (
+            "realtime"
+            if getattr(args, "harness", "native") in {"opencode", "hermes"}
+            else "turn_based"
+        )
+    if mode == "realtime" and getattr(args, "harness", "native") == "native":
+        raise ValueError(
+            "Realtime mode currently requires the OpenCode or Hermes MCP harness"
+        )
+    return mode
+
+
+def create_agent_session(
+    args, client, lease, record_path, trajectory_dir, *, on_execution=None
+):
+    """Construct the same tool routes and harness for every evaluation mode."""
+    execution_mode = evaluation_execution_mode(args)
+    os.environ["FACTORIO_EXECUTION_MODE"] = execution_mode
+    memory_enabled = getattr(args, "memory_profile", "disabled") == "stateful"
+    memory_path = record_path.parent / f"{record_path.stem}.memory.json"
+    resume_pointer_path = trajectory_dir / "resume" / "world-checkpoint.json"
+
+    async def _executor(
+        code: str,
+        *,
+        request_id: str | None = None,
+    ) -> Any:
+        result = await client.execute(
+            lease.lease_id,
+            code,
+            request_id=request_id,
+        )
+        try:
+            checkpoint = await client.checkpoint(
+                lease.lease_id,
+                f"native-active-{lease.lease_id[:12]}",
+            )
+            _atomic_json(
+                resume_pointer_path,
+                {
+                    "schema_version": "factorio-resume-pointer-v1",
+                    "checkpoint": checkpoint.model_dump(mode="json"),
+                    "sequence": result.event.sequence,
+                    "evaluation_progress": result.evaluation_progress,
+                },
+            )
+        except Exception as exc:
+            _atomic_json(
+                trajectory_dir / "resume" / "checkpoint-error.json",
+                {
+                    "sequence": result.event.sequence,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
+        if on_execution is not None:
+            on_execution(result)
+        return result
+
+    async def _memory_executor(
+        name: str,
+        arguments: dict[str, Any],
+    ) -> Any:
+        """Route native memory calls through the same lease service API."""
+
+        if name == "factorio_memory_list":
+            return await client.memory_list(
+                lease.lease_id,
+                prefix=str(arguments.get("prefix", "")),
+                limit=int(arguments.get("limit", 50)),
+                cursor=(
+                    str(arguments["cursor"])
+                    if arguments.get("cursor") is not None
+                    else None
+                ),
+            )
+        if name == "factorio_memory_read":
+            return await client.memory_read(
+                lease.lease_id,
+                str(arguments["key"]),
+            )
+        if name == "factorio_memory_write":
+            return await client.memory_write(
+                lease.lease_id,
+                str(arguments["key"]),
+                str(arguments["content"]),
+                expected_revision=(
+                    int(arguments["expected_revision"])
+                    if arguments.get("expected_revision") is not None
+                    else None
+                ),
+            )
+        if name == "factorio_memory_delete":
+            return await client.memory_delete(
+                lease.lease_id,
+                str(arguments["key"]),
+                expected_revision=(
+                    int(arguments["expected_revision"])
+                    if arguments.get("expected_revision") is not None
+                    else None
+                ),
+            )
+        if name == "factorio_memory_search":
+            return await client.memory_search(
+                lease.lease_id,
+                str(arguments["query"]),
+                limit=int(arguments.get("limit", 20)),
+                cursor=(
+                    str(arguments["cursor"])
+                    if arguments.get("cursor") is not None
+                    else None
+                ),
+            )
+        if name == "factorio_memory_trace":
+            return await client.memory_trace(
+                lease.lease_id,
+                limit=int(arguments.get("limit", 100)),
+                cursor=(
+                    str(arguments["cursor"])
+                    if arguments.get("cursor") is not None
+                    else None
+                ),
+            )
+        raise ValueError(f"unknown memory tool: {name}")
+
+    async def _throughput_executor(*, request_id: str | None = None) -> Any:
+        return await client.check_contract_throughput(
+            lease.lease_id,
+            request_id=(f"native-throughput:{request_id}" if request_id else None),
+        )
+
+    async def _state_executor(name: str, arguments: dict[str, Any]) -> Any:
+        if name == "factorio_get_craft_plan":
+            return await client.craft_plan(
+                lease.lease_id,
+                product=str(arguments["product"]),
+                quantity=int(arguments.get("quantity", 1)),
+                depth=int(arguments.get("depth", 2)),
+            )
+        if name in {"factorio_get_camera", "factorio_set_camera"}:
+            from fle.envd.camera import persist_camera_snapshot
+
+            camera = await client.camera(
+                lease.lease_id,
+                settings=arguments if name == "factorio_set_camera" else None,
+            )
+            return await asyncio.to_thread(
+                persist_camera_snapshot, trajectory_dir / "tool-results", camera
+            )
+        if name == "factorio_observe_factory":
+            return await client.observe(
+                lease.lease_id,
+                cursor=arguments.get("cursor"),
+                force_keyframe=bool(arguments.get("keyframe", False)),
+            )
+        return await client.query_state(
+            lease.lease_id,
+            kind=str(arguments["kind"]),
+            item=arguments.get("item"),
+            window_seconds=arguments.get("window_seconds"),
+            since_revision=arguments.get("since_revision"),
+            entity_type=arguments.get("entity_type"),
+            area=arguments.get("area"),
+            changed_since=arguments.get("changed_since"),
+            limit=int(arguments.get("limit", 32)),
+        )
+
+    agent: AgentSession
+    if args.scripted_responses:
+        agent = ScriptedAgentSession(json.loads(args.scripted_responses))
+    elif getattr(args, "harness", "native") == "hermes":
+        agent = HermesPersistentAgentSession(
+            envd_url=args.envd_url,
+            lease_id=lease.lease_id,
+            model=args.model,
+            reasoning=getattr(args, "reasoning", "max"),
+            timeout_seconds=getattr(
+                args,
+                "epoch_harness_timeout_seconds",
+                args.wall_clock_failsafe_seconds,
+            ),
+            artifacts_dir=record_path.parent / "hermes",
+            api_max_retries=getattr(args, "hermes_api_max_retries", 12),
+            game_data_path=args.recipe_dump,
+            memory_path=memory_path,
+            memory_enabled=memory_enabled,
+        )
+    elif getattr(args, "harness", "native") == "opencode":
+        agent = OpenCodePersistentAgentSession(
+            envd_url=args.envd_url,
+            lease_id=lease.lease_id,
+            model=args.model,
+            reasoning=getattr(args, "reasoning", None),
+            timeout_seconds=getattr(
+                args,
+                "epoch_harness_timeout_seconds",
+                args.wall_clock_failsafe_seconds,
+            ),
+            artifacts_dir=record_path.parent / "opencode",
+            command=getattr(args, "opencode_command", None),
+            game_data_path=args.recipe_dump,
+            memory_path=memory_path,
+            memory_enabled=memory_enabled,
+        )
+    else:
+        agent = OpenAICompatibleAgentSession(
+            base_url=args.model_base_url,
+            api_key=(
+                args.api_key
+                or (
+                    os.environ.get("OPEN_ROUTER_API_KEY", "")
+                    if args.provider.lower() in {"openrouter", "stealth"}
+                    else os.environ.get("OPENAI_API_KEY", "")
+                )
+            ),
+            model=args.model,
+            executor=_executor,
+            memory_executor=_memory_executor,
+            throughput_executor=_throughput_executor,
+            state_executor=_state_executor,
+            max_turns_per_epoch=args.max_turns_per_epoch,
+            temperature=args.temperature,
+            game_data_path=args.recipe_dump,
+            memory_path=memory_path,
+            memory_enabled=memory_enabled,
+        )
+
+    agent.execution_mode = execution_mode
+    agent.program_client = client
+    agent.program_lease_id = lease.lease_id
+    return agent
+
+
 async def run_session(args: argparse.Namespace) -> AdaptiveSessionRecord:
+    if getattr(args, "mode", "requisitions") != "requisitions":
+        from scripts.progression_benchmark import run_progression_session
+
+        return await run_progression_session(args)
     from fle.envd.benchmark_results import summarize_adaptive_session
 
     started_at = datetime.now(timezone.utc)
-    recipes, technologies = _load_recipe_dump(args.recipe_dump)
+    recipe_payload = _recipe_dump_payload(args.recipe_dump)
+    recipes, technologies = _load_recipe_dump(args.recipe_dump, payload=recipe_payload)
     # Reference construction scans the complete API corpus.  It is evaluator
     # setup, not model wall-clock time, so compute identity inputs before the
     # session failsafe starts.
@@ -1555,7 +2560,7 @@ async def run_session(args: argparse.Namespace) -> AdaptiveSessionRecord:
     # metadata when present.  The candidate catalog still consumes the
     # validated recipe/technology projections below, while MCP lookups use the
     # same source file unchanged.
-    game_data_reference, _ = load_game_data(args.recipe_dump)
+    game_data_reference = _game_data_reference_from_payload(recipe_payload)
     game_data_reference_hash = game_data_reference.reference_hash
     session_wall_start = time.perf_counter()
 
@@ -1580,11 +2585,30 @@ async def run_session(args: argparse.Namespace) -> AdaptiveSessionRecord:
     customer_policy = EvidenceDrivenCustomerPolicy()
 
     catalog_source = StaticRecipeDataSource(
-        recipes, technologies, game_version="2.0.73"
+        recipes, technologies, game_version="2.0.77"
     )
     catalog = ProductCatalog(catalog_source)
 
     record_path = Path(args.output).resolve()
+    resume_bundle = _load_run_checkpoint(getattr(args, "resume_from", None))
+    if resume_bundle:
+        if resume_bundle.get(
+            "execution_mode", "turn_based"
+        ) != evaluation_execution_mode(args):
+            raise ValueError(
+                "Resume execution mode differs from the saved evaluation; select its original --execution-mode"
+            )
+        for key, expected in (
+            ("model", args.model),
+            ("provider", args.provider),
+            ("harness", args.harness),
+        ):
+            if resume_bundle.get(key) != expected:
+                raise ValueError(
+                    f"resume {key} mismatch: {resume_bundle.get(key)!r} != {expected!r}"
+                )
+        args.run_id = str(resume_bundle["run_id"])
+        started_at = datetime.fromisoformat(str(resume_bundle["started_at"]))
     trajectory_dir = record_path.parent / f"{record_path.stem}-epochs"
     trajectory_dir.mkdir(parents=True, exist_ok=True)
     memory_profile = getattr(args, "memory_profile", "disabled")
@@ -1594,7 +2618,9 @@ async def run_session(args: argparse.Namespace) -> AdaptiveSessionRecord:
     # This path is intentionally passed only to the isolated MCP process as a
     # stable run identity.  Memory mutations are served by envd and the model
     # never receives a filesystem tool or this path.
-    memory_path = record_path.parent / f"{record_path.stem}.memory.json"
+    tool_artifact_dir = trajectory_dir / "tool-results"
+    tool_artifact_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["FACTORIO_TOOL_ARTIFACT_DIR"] = str(tool_artifact_dir)
 
     rating = rater.initial_rating()
     epochs: list[AdaptiveEpochRecord] = []
@@ -1605,162 +2631,98 @@ async def run_session(args: argparse.Namespace) -> AdaptiveSessionRecord:
     infrastructure_error_count = 0
     termination_reason = "unknown"
     session_id = f"adaptive-{started_at.strftime('%Y%m%dT%H%M%SZ')}-{args.run_id}"
+    if resume_bundle:
+        rating = CapabilityRating.model_validate(resume_bundle["rating"])
+        epochs = [
+            AdaptiveEpochRecord.model_validate(epoch)
+            for epoch in resume_bundle.get("epochs", [])
+        ]
+        model_seconds_total = float(resume_bundle.get("model_seconds", 0.0))
+        tool_seconds_total = float(resume_bundle.get("tool_seconds", 0.0))
+        infrastructure_error_count = int(
+            resume_bundle.get("infrastructure_error_count", 0)
+        )
+        extrapolation_count = int(resume_bundle.get("extrapolation_count", 0))
+        session_id = str(resume_bundle["session_id"])
+        for epoch in epochs:
+            history.record(epoch.spec.features, epoch.spec.mixture_class)
+            customer_policy.observe(epoch.spec, epoch.outcome, epoch.post_context)
 
     participant: ParticipantIdentity | None = None
     async with HTTPEnvironmentClient(args.envd_url) as client:
-        lease = await client.lease(freeplay_task_spec())
-
-        async def _executor(
-            code: str,
-            *,
-            request_id: str | None = None,
-        ) -> Any:
-            result = await client.execute(
-                lease.lease_id,
-                code,
-                request_id=request_id,
+        resume_checkpoint = None
+        if resume_bundle:
+            selected_checkpoint = dict(resume_bundle["checkpoint"])
+            pointer_root = (
+                record_path.parent / args.harness
+                if args.harness in {"opencode", "hermes"}
+                else trajectory_dir
             )
-            return result
+            pointer_file = pointer_root / "resume" / "world-checkpoint.json"
+            if resume_bundle.get("phase") == "active_epoch" and pointer_file.exists():
+                pointer = json.loads(pointer_file.read_text(encoding="utf-8"))
+                pointer_checkpoint = pointer.get("checkpoint") or {}
 
-        async def _memory_executor(
-            name: str,
-            arguments: dict[str, Any],
-        ) -> Any:
-            """Route native memory calls through the same lease service API."""
+                def _checkpoint_created_at(checkpoint: dict[str, Any]) -> datetime:
+                    raw = str(checkpoint.get("created_at") or "")
+                    try:
+                        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                    except ValueError:
+                        return datetime.min.replace(tzinfo=timezone.utc)
 
-            if name == "factorio_memory_list":
-                return await client.memory_list(
-                    lease.lease_id,
-                    prefix=str(arguments.get("prefix", "")),
-                    limit=int(arguments.get("limit", 50)),
-                    cursor=(
-                        str(arguments["cursor"])
-                        if arguments.get("cursor") is not None
-                        else None
-                    ),
+                # MCP checkpoints are written after individual tool calls,
+                # while the runner checkpoint is written at epoch boundaries.
+                # Either can be newest; never rewind merely because a stale
+                # per-tool pointer exists.
+                if pointer_checkpoint.get("checkpoint_id") and _checkpoint_created_at(
+                    pointer_checkpoint
+                ) > _checkpoint_created_at(selected_checkpoint):
+                    selected_checkpoint = pointer_checkpoint
+            if (selected_checkpoint.get("metadata") or {}).get("program_runtime_id"):
+                selected_checkpoint = await client.latest_program_checkpoint(
+                    selected_checkpoint
                 )
-            if name == "factorio_memory_read":
-                return await client.memory_read(
-                    lease.lease_id,
-                    str(arguments["key"]),
+            resume_checkpoint = str(selected_checkpoint["checkpoint_id"])
+        lease = None
+        if resume_bundle:
+            original_lease_id = str(resume_bundle["checkpoint"].get("lease_id", ""))
+            if original_lease_id:
+                try:
+                    await client.get_contract_session_state(original_lease_id)
+                    lease = SimpleNamespace(lease_id=original_lease_id)
+                except Exception:
+                    lease = None
+        if lease is None:
+            lease = await client.lease(
+                freeplay_task_spec(
+                    resume_checkpoint, execution_mode=evaluation_execution_mode(args)
                 )
-            if name == "factorio_memory_write":
-                return await client.memory_write(
-                    lease.lease_id,
-                    str(arguments["key"]),
-                    str(arguments["content"]),
-                    expected_revision=(
-                        int(arguments["expected_revision"])
-                        if arguments.get("expected_revision") is not None
-                        else None
-                    ),
-                )
-            if name == "factorio_memory_delete":
-                return await client.memory_delete(
-                    lease.lease_id,
-                    str(arguments["key"]),
-                    expected_revision=(
-                        int(arguments["expected_revision"])
-                        if arguments.get("expected_revision") is not None
-                        else None
-                    ),
-                )
-            if name == "factorio_memory_search":
-                return await client.memory_search(
-                    lease.lease_id,
-                    str(arguments["query"]),
-                    limit=int(arguments.get("limit", 20)),
-                    cursor=(
-                        str(arguments["cursor"])
-                        if arguments.get("cursor") is not None
-                        else None
-                    ),
-                )
-            if name == "factorio_memory_trace":
-                return await client.memory_trace(
-                    lease.lease_id,
-                    limit=int(arguments.get("limit", 100)),
-                    cursor=(
-                        str(arguments["cursor"])
-                        if arguments.get("cursor") is not None
-                        else None
-                    ),
-                )
-            raise ValueError(f"unknown memory tool: {name}")
-
-        async def _throughput_executor(
-            *, request_id: str | None = None
-        ) -> Any:
-            return await client.check_contract_throughput(
-                lease.lease_id,
-                request_id=(
-                    f"native-throughput:{request_id}" if request_id else None
-                ),
             )
 
-        agent: AgentSession
-        if args.scripted_responses:
-            agent = ScriptedAgentSession(json.loads(args.scripted_responses))
-        elif getattr(args, "harness", "native") == "hermes":
-            agent = HermesPersistentAgentSession(
-                envd_url=args.envd_url,
-                lease_id=lease.lease_id,
-                model=args.model,
-                reasoning=getattr(args, "reasoning", "max"),
-                timeout_seconds=getattr(
-                    args,
-                    "epoch_harness_timeout_seconds",
-                    args.wall_clock_failsafe_seconds,
-                ),
-                artifacts_dir=record_path.parent / "hermes",
-                api_max_retries=getattr(args, "hermes_api_max_retries", 12),
-                game_data_path=args.recipe_dump,
-                memory_path=memory_path,
-                memory_enabled=memory_enabled,
-            )
-        elif getattr(args, "harness", "native") == "opencode":
-            agent = OpenCodePersistentAgentSession(
-                envd_url=args.envd_url,
-                lease_id=lease.lease_id,
-                model=args.model,
-                reasoning=getattr(args, "reasoning", None),
-                timeout_seconds=getattr(
-                    args,
-                    "epoch_harness_timeout_seconds",
-                    args.wall_clock_failsafe_seconds,
-                ),
-                artifacts_dir=record_path.parent / "opencode",
-                command=getattr(args, "opencode_command", None),
-                game_data_path=args.recipe_dump,
-                memory_path=memory_path,
-                memory_enabled=memory_enabled,
-            )
-        else:
-            agent = OpenAICompatibleAgentSession(
-                base_url=args.model_base_url,
-                api_key=(
-                    args.api_key
-                    or (
-                        os.environ.get("OPEN_ROUTER_API_KEY", "")
-                        if args.provider.lower() in {"openrouter", "stealth"}
-                        else os.environ.get("OPENAI_API_KEY", "")
-                    )
-                ),
-                model=args.model,
-                executor=_executor,
-                memory_executor=_memory_executor,
-                throughput_executor=_throughput_executor,
-                max_turns_per_epoch=args.max_turns_per_epoch,
-                temperature=args.temperature,
-                game_data_path=args.recipe_dump,
-                memory_path=memory_path,
-                memory_enabled=memory_enabled,
-            )
+        agent = create_agent_session(args, client, lease, record_path, trajectory_dir)
+
+        if resume_bundle and isinstance(agent, OpenCodePersistentAgentSession):
+            agent.restore_state(dict(resume_bundle.get("agent") or {}))
 
         active_spec: ContractEpochSpec | None = None
+        pending_resume_spec = (
+            ContractEpochSpec.model_validate(resume_bundle["active_spec"])
+            if resume_bundle and resume_bundle.get("active_spec")
+            else None
+        )
+        pending_resume_context = (
+            ContractContextSnapshot.model_validate(resume_bundle["active_context"])
+            if resume_bundle and resume_bundle.get("active_context")
+            else None
+        )
         mandatory_bands: set[int] = set()
         mandatory_mixtures: set[str] = set()
-        epoch_index = 1
+        epoch_index = (
+            int(resume_bundle.get("epoch_index", len(epochs) + 1))
+            if resume_bundle
+            else 1
+        )
+
         async def _renew_environment_lease() -> None:
             await client.get_contract_session_state(lease.lease_id)
 
@@ -1825,95 +2787,122 @@ async def run_session(args: argparse.Namespace) -> AdaptiveSessionRecord:
                 if remaining_session_ticks == 0:
                     termination_reason = "session_tick_limit"
                     break
-                context = await client.capture_contract_context(
-                    lease.lease_id, session_id, epoch_index
-                )
-                pool = build_candidate_pool(
-                    context=context,
-                    catalog=catalog,
-                    difficulty_model=difficulty_model,
-                    selection_history=history,
-                    remaining_session_ticks=remaining_session_ticks,
-                    calibration_manifest=manifest,
-                )
-                accepted_pool = [candidate for candidate in pool if candidate.accepted]
-                if not accepted_pool:
-                    # Repetition controls must not become an implicit order
-                    # ceiling when only one progression family is reachable.
-                    # Retry without recent-history penalties; genuine stage,
-                    # reachability, and feasibility rejection still applies.
+                resumed_epoch = pending_resume_spec is not None
+                if resumed_epoch:
+                    spec = pending_resume_spec
+                    context = pending_resume_context or spec.context
+                    candidate = SimpleNamespace(
+                        features=spec.features,
+                        mixture_class=spec.mixture_class,
+                        item_name=spec.item_name,
+                    )
+                    active_spec = spec
+                    history.record(spec.features, spec.mixture_class)
+                    pending_resume_spec = None
+                    pending_resume_context = None
+                else:
+                    context = await client.capture_contract_context(
+                        lease.lease_id, session_id, epoch_index
+                    )
                     pool = build_candidate_pool(
                         context=context,
                         catalog=catalog,
                         difficulty_model=difficulty_model,
-                        selection_history=SelectionHistory(),
+                        selection_history=history,
                         remaining_session_ticks=remaining_session_ticks,
                         calibration_manifest=manifest,
                     )
-                    accepted_pool = [
-                        candidate for candidate in pool if candidate.accepted
-                    ]
+                    accepted_pool = [item for item in pool if item.accepted]
                     if not accepted_pool:
-                        termination_reason = "candidate_pool_exhausted"
-                        break
-                mandatory_bands, mandatory_mixtures = _refresh_coverage_obligations(
-                    required_bands=mandatory_bands,
-                    required_mixtures=mandatory_mixtures,
-                    reachable_bands={
-                        candidate.features.stage_band
-                        for candidate in accepted_pool
-                        if candidate.features is not None
-                    },
-                    reachable_mixtures={
-                        candidate.mixture_class for candidate in accepted_pool
-                    },
-                    history=history,
-                )
-                # Session IDs contain a wall-clock timestamp for artifact
-                # identity. Never let that timestamp perturb order selection:
-                # identical run IDs, base seeds, and factory states must replay
-                # the same candidate sequence.
-                selection_seed = _selection_seed(args.run_id, epoch_index, args.seed)
-                plan = customer_policy.choose(
-                    pool,
-                    context=context,
-                    catalog=catalog,
-                    difficulty_model=difficulty_model,
-                    selection_seed=selection_seed,
-                    rating=rating,
-                )
-                candidate = plan.candidate
-                scored = selector.score_candidates(pool, rating, history)
-                spec = build_epoch_spec(
-                    session_id=session_id,
-                    epoch_index=epoch_index,
-                    selection_seed=selection_seed,
-                    candidate=candidate,
-                    context=context,
-                    benchmark_version=ADAPTIVE_BENCHMARK_VERSION,
-                    calibration_version=(
-                        manifest.calibration_version if manifest else "uncalibrated"
-                    ),
-                    order_kind=plan.order_kind,
-                    products=plan.products,
-                    policy_evidence=plan.evidence,
-                )
-                _persist_selection_audit(
-                    trajectory_dir=trajectory_dir,
-                    context=context,
-                    pool=pool,
-                    scored=scored,
-                    selected=candidate,
-                    spec=spec,
-                    rating=rating,
-                )
-                await client.begin_contract_epoch(
-                    lease.lease_id,
-                    spec,
-                    request_id=f"{session_id}:begin:{epoch_index}",
-                )
-                active_spec = spec
-                history.record(candidate.features, candidate.mixture_class)
+                        pool = build_candidate_pool(
+                            context=context,
+                            catalog=catalog,
+                            difficulty_model=difficulty_model,
+                            selection_history=SelectionHistory(),
+                            remaining_session_ticks=remaining_session_ticks,
+                            calibration_manifest=manifest,
+                        )
+                        accepted_pool = [item for item in pool if item.accepted]
+                        if not accepted_pool:
+                            termination_reason = "candidate_pool_exhausted"
+                            break
+                    mandatory_bands, mandatory_mixtures = _refresh_coverage_obligations(
+                        required_bands=mandatory_bands,
+                        required_mixtures=mandatory_mixtures,
+                        reachable_bands={
+                            item.features.stage_band
+                            for item in accepted_pool
+                            if item.features is not None
+                        },
+                        reachable_mixtures={
+                            item.mixture_class for item in accepted_pool
+                        },
+                        history=history,
+                    )
+                    selection_seed = _selection_seed(
+                        args.run_id, epoch_index, args.seed
+                    )
+                    plan = customer_policy.choose(
+                        pool,
+                        context=context,
+                        catalog=catalog,
+                        difficulty_model=difficulty_model,
+                        selection_seed=selection_seed,
+                        rating=rating,
+                    )
+                    candidate = plan.candidate
+                    scored = selector.score_candidates(pool, rating, history)
+                    spec = build_epoch_spec(
+                        session_id=session_id,
+                        epoch_index=epoch_index,
+                        selection_seed=selection_seed,
+                        candidate=candidate,
+                        context=context,
+                        benchmark_version=ADAPTIVE_BENCHMARK_VERSION,
+                        calibration_version=(
+                            manifest.calibration_version if manifest else "uncalibrated"
+                        ),
+                        order_kind=plan.order_kind,
+                        products=plan.products,
+                        policy_evidence=plan.evidence,
+                    )
+                    _persist_selection_audit(
+                        trajectory_dir=trajectory_dir,
+                        context=context,
+                        pool=pool,
+                        scored=scored,
+                        selected=candidate,
+                        spec=spec,
+                        rating=rating,
+                    )
+                    await client.begin_contract_epoch(
+                        lease.lease_id,
+                        spec,
+                        request_id=f"{session_id}:begin:{epoch_index}",
+                    )
+                    active_spec = spec
+                    history.record(candidate.features, candidate.mixture_class)
+                    active_checkpoint = await client.checkpoint(
+                        lease.lease_id, f"runner-active-{args.run_id}"
+                    )
+                    _persist_run_checkpoint(
+                        _run_checkpoint_path(record_path),
+                        phase="active_epoch",
+                        checkpoint=active_checkpoint,
+                        args=args,
+                        started_at=started_at,
+                        session_id=session_id,
+                        epoch_index=epoch_index,
+                        epochs=epochs,
+                        rating=rating,
+                        model_seconds=model_seconds_total,
+                        tool_seconds=tool_seconds_total,
+                        infrastructure_errors=infrastructure_error_count,
+                        extrapolations=extrapolation_count,
+                        active_spec=spec,
+                        active_context=context,
+                        agent=agent,
+                    )
                 # Publish an empty/previous-epoch session shell immediately so
                 # live dashboards can join active-order.json before a long
                 # first contract finishes.
@@ -1930,6 +2919,7 @@ async def run_session(args: argparse.Namespace) -> AdaptiveSessionRecord:
                     tool_seconds_total,
                     infrastructure_error_count,
                     extrapolation_count,
+                    runner_wall_seconds=time.perf_counter() - session_wall_start,
                     progress_vector=progress_vector,
                     portfolio_evidence=portfolio_evidence,
                 )
@@ -1948,7 +2938,18 @@ async def run_session(args: argparse.Namespace) -> AdaptiveSessionRecord:
                         )
                     telemetry = await asyncio.wait_for(
                         agent.run_epoch(
-                            render_order_prompt(spec, memory_enabled=memory_enabled)
+                            render_previous_contract_feedback(
+                                epochs[-1].outcome if epochs else None
+                            )
+                            + render_order_prompt(spec, memory_enabled=memory_enabled)
+                            + (
+                                "\n\nThis order resumed from an exact environment "
+                                "checkpoint after an infrastructure interruption. "
+                                "Observe current state before acting and do not replay "
+                                "earlier actions."
+                                if resumed_epoch
+                                else ""
+                            )
                         ),
                         timeout=remaining_wall_seconds,
                     )
@@ -2080,11 +3081,31 @@ async def run_session(args: argparse.Namespace) -> AdaptiveSessionRecord:
                     tool_seconds_total,
                     infrastructure_error_count,
                     extrapolation_count,
+                    runner_wall_seconds=time.perf_counter() - session_wall_start,
                     progress_vector=progress_vector,
                     portfolio_evidence=portfolio_evidence,
                 )
                 _persist_active_outcome(record_path.parent, spec, outcome)
                 customer_policy.observe(spec, outcome, post_context)
+                boundary_checkpoint = await client.checkpoint(
+                    lease.lease_id, f"runner-boundary-{args.run_id}"
+                )
+                _persist_run_checkpoint(
+                    _run_checkpoint_path(record_path),
+                    phase="between_epochs",
+                    checkpoint=boundary_checkpoint,
+                    args=args,
+                    started_at=started_at,
+                    session_id=session_id,
+                    epoch_index=epoch_index + 1,
+                    epochs=epochs,
+                    rating=rating,
+                    model_seconds=model_seconds_total,
+                    tool_seconds=tool_seconds_total,
+                    infrastructure_errors=infrastructure_error_count,
+                    extrapolations=extrapolation_count,
+                    agent=agent,
+                )
 
                 # Provider or harness failures leave the persistent model
                 # conversation in an unknown state. End the session instead
@@ -2179,7 +3200,7 @@ async def run_session(args: argparse.Namespace) -> AdaptiveSessionRecord:
             "calibration": (
                 manifest.calibration_version if manifest else "uncalibrated"
             ),
-            "game": "2.0.73",
+            "game": "2.0.77",
         },
         epochs=epochs,
         final_rating=rating,
@@ -2267,8 +3288,7 @@ def build_progress_report(
     """
 
     deltas = [
-        epoch.capability_delta or epoch.outcome.capability_delta
-        for epoch in epochs
+        epoch.capability_delta or epoch.outcome.capability_delta for epoch in epochs
     ]
     deltas = [delta for delta in deltas if delta is not None]
     ledger = ledger_from_epochs(epochs)
@@ -2286,9 +3306,7 @@ def build_progress_report(
         "new_technologies": sorted(
             {item for delta in deltas for item in delta.new_technologies}
         ),
-        "new_recipes": sorted(
-            {item for delta in deltas for item in delta.new_recipes}
-        ),
+        "new_recipes": sorted({item for delta in deltas for item in delta.new_recipes}),
         "new_machines": sorted(
             {item for delta in deltas for item in delta.new_machines}
         ),
@@ -2297,8 +3315,7 @@ def build_progress_report(
         ),
     }
     portfolio = [
-        certificate.model_dump(mode="json")
-        for certificate in ledger.certificates
+        certificate.model_dump(mode="json") for certificate in ledger.certificates
     ]
     return vector, portfolio
 
@@ -2338,6 +3355,7 @@ def _persist(
     infra_count: int,
     extrapolation_count: int,
     *,
+    runner_wall_seconds: float = 0.0,
     progress_vector: Any = None,
     portfolio_evidence: Any = None,
     notes: list[str] | None = None,
@@ -2356,6 +3374,7 @@ def _persist(
         final_rating=rating,
         model_seconds=model_seconds,
         tool_seconds=tool_seconds,
+        runner_wall_seconds=runner_wall_seconds,
         infrastructure_error_count=infra_count,
         extrapolation_count=extrapolation_count,
         notes=_persistence_notes(
@@ -2365,7 +3384,9 @@ def _persist(
         ),
     )
     _atomic_json(
-        record_path.with_suffix(".partial.json"), snapshot.model_dump(mode="json")
+        record_path.with_suffix(".partial.json"),
+        snapshot.model_dump(mode="json"),
+        compact=True,
     )
 
 
@@ -2455,8 +3476,9 @@ def _persist_selection_audit(
         "committed_spec": spec.model_dump(mode="json"),
     }
     epoch_path = trajectory_dir / f"epoch-{spec.epoch_index:04d}.selection.json"
-    _atomic_json(epoch_path, payload)
-    _atomic_json(trajectory_dir.parent / "active-order.json", payload)
+    text = json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n"
+    _atomic_text(epoch_path, text)
+    _atomic_text(trajectory_dir.parent / "active-order.json", text)
 
 
 def _persist_active_outcome(
@@ -2501,6 +3523,7 @@ def _atomic_json(
     path: Path,
     payload: Any,
     *,
+    compact: bool = False,
     max_replace_attempts: int = ATOMIC_JSON_MAX_REPLACE_ATTEMPTS,
     backoff_seconds: float = ATOMIC_JSON_REPLACE_BACKOFF_SECONDS,
     max_backoff_seconds: float = ATOMIC_JSON_REPLACE_BACKOFF_MAX_SECONDS,
@@ -2512,6 +3535,27 @@ def _atomic_json(
     retries address transient sharing violations without an unbounded loop.
     """
 
+    if compact:
+        text = json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n"
+    else:
+        text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    _atomic_text(
+        path,
+        text,
+        max_replace_attempts=max_replace_attempts,
+        backoff_seconds=backoff_seconds,
+        max_backoff_seconds=max_backoff_seconds,
+    )
+
+
+def _atomic_text(
+    path: Path,
+    text: str,
+    *,
+    max_replace_attempts: int = ATOMIC_JSON_MAX_REPLACE_ATTEMPTS,
+    backoff_seconds: float = ATOMIC_JSON_REPLACE_BACKOFF_SECONDS,
+    max_backoff_seconds: float = ATOMIC_JSON_REPLACE_BACKOFF_MAX_SECONDS,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     attempts = max(int(max_replace_attempts), 1)
     delay = max(float(backoff_seconds), 0.0)
@@ -2522,7 +3566,7 @@ def _atomic_json(
     temporary = Path(temporary_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
-            stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
         for attempt in range(attempts):
@@ -2544,20 +3588,24 @@ def _atomic_json(
             pass
 
 
+_git_commit_cache: str | None = None
+
+
 def _git_commit() -> str:
     import subprocess
 
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=str(REPO), text=True
-        ).strip()
-    except Exception:
-        return "unknown"
+    global _git_commit_cache
+    if _git_commit_cache is None:
+        try:
+            _git_commit_cache = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=str(REPO), text=True
+            ).strip()
+        except Exception:
+            _git_commit_cache = "unknown"
+    return _git_commit_cache
 
 
-def _load_recipe_dump(
-    path: str | None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _recipe_dump_payload(path: str | None) -> Any:
     if not path:
         raise ValueError(
             "An authoritative non-empty recipe dump is required; "
@@ -2567,9 +3615,30 @@ def _load_recipe_dump(
     if not recipe_path.exists():
         raise ValueError(f"Recipe dump does not exist: {recipe_path}")
     try:
-        data = json.loads(recipe_path.read_text(encoding="utf-8"))
+        return json.loads(recipe_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"Could not read recipe dump {recipe_path}: {exc}") from exc
+
+
+def _game_data_reference_from_payload(payload: Any) -> GameDataReference:
+    if isinstance(payload, list):
+        payload = {
+            "factorio_version": "unknown",
+            "recipes": payload,
+            "technologies": [],
+        }
+    return GameDataReference(payload, source="run-export")
+
+
+def _load_recipe_dump(
+    path: str | None,
+    *,
+    payload: Any = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if payload is None:
+        payload = _recipe_dump_payload(path)
+    recipe_path = Path(path) if path else None
+    data = payload
     if isinstance(data, list):
         recipes = data
         technologies: list[dict[str, Any]] = []
@@ -2646,8 +3715,7 @@ def default_adaptive_run_id(
         "native": "Native",
     }.get(harness.lower(), _display_name_component(harness) or "Harness")
     base = (
-        f"{timestamp.strftime('%m-%d-%Y')}-"
-        f"{_display_model_name(model)}-{harness_name}"
+        f"{timestamp.strftime('%m-%d-%Y')}-{_display_model_name(model)}-{harness_name}"
     )
     if collision:
         base += f"-{timestamp.strftime('%H-%M-%S')}"
@@ -2656,6 +3724,17 @@ def default_adaptive_run_id(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--execution-mode",
+        choices=("auto", "turn_based", "realtime"),
+        default="auto",
+        help="auto selects continuous 1x for OpenCode/Hermes; native remains turn-based",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("requisitions", "technology", "rocket_launch"),
+        default="requisitions",
+    )
     parser.add_argument("--envd-url", default="http://127.0.0.1:8172")
     parser.add_argument("--model-base-url", default="http://127.0.0.1:18080/v1")
     parser.add_argument("--api-key", default=None)
@@ -2695,6 +3774,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--resume-from",
+        type=Path,
+        default=None,
+        help=(
+            "Resume an exact adaptive-run-checkpoint-v1 bundle. Model, provider, "
+            "and harness identity must match."
+        ),
+    )
     parser.add_argument("--calibration-manifest", default=None)
     parser.add_argument(
         "--recipe-dump",

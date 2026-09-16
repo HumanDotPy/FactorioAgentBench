@@ -238,7 +238,11 @@ class _Model:
         ] * self.packed_size()
         offset = self.n_participants + self.n_templates
         for index, key in enumerate(self.design.raw_keys):
-            if key in {"log_quantity", "required_rate_per_minute", "supply_pressure_ratio"}:
+            if key in {
+                "log_quantity",
+                "required_rate_per_minute",
+                "supply_pressure_ratio",
+            }:
                 bounds[offset + index] = (0.0, None)
         offset += len(self.design.raw_keys)
         for index, key in enumerate(self.design.state_keys):
@@ -541,10 +545,7 @@ def _predict_win_probabilities(
         )
         state_term = max(float(state_vec @ fit.view["beta_state"]), 0.0)
         margin = (
-            ability
-            - intercept
-            - float(raw_vec @ fit.view["beta_raw"])
-            + state_term
+            ability - intercept - float(raw_vec @ fit.view["beta_raw"]) + state_term
         )
         _, _, p_win = _ordinal_probit_probs(
             np.asarray([margin]), float(fit.view["threshold"])

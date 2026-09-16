@@ -14,8 +14,18 @@ Invariants tested:
 
 import pytest
 
-from fle.env import Direction, EntityStatus, Position
+from fle.env import Direction, DirectionInternal, EntityStatus, Position
 from fle.env.game_types import Prototype, Resource
+
+
+def _output_position(pump, distance: float = 2) -> Position:
+    offsets = {
+        Direction.UP.value: Position(x=0, y=-distance),
+        Direction.RIGHT.value: Position(x=distance, y=0),
+        Direction.DOWN.value: Position(x=0, y=distance),
+        Direction.LEFT.value: Position(x=-distance, y=0),
+    }
+    return pump.position + offsets[DirectionInternal.opposite(pump.direction).value]
 
 
 @pytest.fixture()
@@ -40,7 +50,6 @@ def game(instance):
     }
     instance.reset()
     yield instance.namespace
-    instance.reset()
 
 
 def test_no_fuel_status_when_burner_empty(game):
@@ -104,12 +113,7 @@ def test_not_connected_status_for_offshore_pump(game):
     game.move_to(water_pos)
 
     # Place offshore pump
-    pump = game.place_entity(
-        Prototype.OffshorePump,
-        position=water_pos,
-        direction=Direction.DOWN,
-        exact=False,
-    )
+    pump = game.place_offshore_pump(water_pos)
 
     # Offshore pump without connections should be NOT_CONNECTED
     assert pump.status == EntityStatus.NOT_CONNECTED, (
@@ -129,15 +133,10 @@ def test_full_output_status_when_blocked(game):
     game.move_to(water_pos)
 
     # Create a working offshore pump connected to pipes
-    pump = game.place_entity(
-        Prototype.OffshorePump,
-        position=water_pos,
-        direction=Direction.DOWN,
-        exact=False,
-    )
+    pump = game.place_offshore_pump(water_pos)
 
-    # Connect pipe to pump
-    pipe_pos = pump.position.down(2)
+    # Connect pipe to pump output
+    pipe_pos = _output_position(pump)
     game.move_to(pipe_pos)
     pipe = game.place_entity(
         Prototype.Pipe,

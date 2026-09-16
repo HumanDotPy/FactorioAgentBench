@@ -6,8 +6,13 @@ import pytest
 from pydantic import ValidationError
 
 from fle.commons.models.game_state import GameState
-from fle.envd.backend import FLEWorker, ThroughputAuditCandidate
+from fle.envd.backend import (
+    FLEWorker,
+    ThroughputAuditCandidate,
+    _autonomous_throughput_score,
+)
 from fle.envd.customer import ActiveOrder
+from fle.envd.contract_features import ProductCatalog, StaticRecipeDataSource
 from fle.envd.errors import LeaseFinalized
 from fle.envd.models import (
     ContractContextSnapshot,
@@ -30,7 +35,7 @@ def _epoch_spec(*, order_kind: str = "sustained", audit=None) -> ContractEpochSp
         session_id="session-1",
         epoch_index=1,
         captured_tick=100,
-        technology_ids=("electricity",),
+        technology_ids=("steam-power",),
         unlocked_recipe_ids=(),
         inventory_counts={},
         placed_entity_counts={},
@@ -102,6 +107,62 @@ def test_throughput_audit_spec_validates_windows_and_sustained_default_is_commit
     assert _epoch_spec(order_kind="one_shot").throughput_audit is None
 
 
+def test_adaptive_candidate_detector_uses_recent_depot_service(monkeypatch):
+    audit = ThroughputAuditSpec(
+        detector_window_seconds=5,
+        burn_in_seconds=0,
+        holdout_seconds_min=10,
+        holdout_seconds_max=10,
+        subwindow_seconds=10,
+    )
+    spec = _epoch_spec(audit=audit)
+    order = ActiveOrder(
+        "iron-plate",
+        200,
+        3600,
+        activation_tick=0,
+        order_kind="sustained",
+    )
+
+    class Namespace:
+        @staticmethod
+        def _get_recent_rate(*_args):
+            raise AssertionError("adaptive contracts must detect depot service")
+
+        @staticmethod
+        def _save_research_state():
+            return None
+
+    worker = FLEWorker.__new__(FLEWorker)
+    worker.instance = SimpleNamespace(first_namespace=Namespace())
+    worker._active_order = order
+    worker._active_epoch_spec = spec
+    worker._active_epoch_index = 1
+    worker._active_commitment_hash = spec.commitment_hash
+    worker.contract_session_id = "session-1"
+    worker._customer_depots_cache = []
+    worker._delivery_history = [(600, {"iron-plate": 20.0})]
+    worker._delivery_observed_tick = 600
+    worker._throughput_audit_enabled = True
+    worker._executing_lease_id = "lease"
+    worker._pending_throughput_candidate = None
+    worker._throughput_audit_result = None
+    worker._throughput_audit_retry_after_tick = 0
+    worker._capture_tool_calls = True
+    worker._episode_tick = lambda: 600
+    monkeypatch.setattr(
+        GameState,
+        "from_instance",
+        lambda *_args, **_kwargs: GameState(entities="", inventories=[], research=None),
+    )
+
+    worker._maybe_capture_throughput_candidate()
+
+    assert worker._pending_throughput_candidate is not None
+    assert worker._pending_throughput_candidate.detector_rates == {"iron-plate": 240.0}
+    assert worker._capture_tool_calls is True
+
+
 class _CandidateWorker(FakeWorker):
     def __init__(self, worker_id="agent-worker"):
         super().__init__(worker_id)
@@ -109,8 +170,14 @@ class _CandidateWorker(FakeWorker):
         self.recorded: list[ThroughputAuditResult] = []
         self.accepted: list[ThroughputAuditResult] = []
 
-    def execute(self, lease_id: str, code: str, sequence: int) -> ExecutionResult:
-        result = super().execute(lease_id, code, sequence)
+    def execute(
+        self,
+        lease_id: str,
+        code: str,
+        sequence: int,
+        template: str | None = None,
+    ) -> ExecutionResult:
+        result = super().execute(lease_id, code, sequence, template=template)
         self._candidate = SimpleNamespace(candidate_tick=sequence * 60)
         return result
 
@@ -151,6 +218,18 @@ def _audit_result(*, passed: bool, calls: int = 0) -> ThroughputAuditResult:
     )
 
 
+def test_adaptive_score_requires_autonomous_audit_evidence():
+    assert _autonomous_throughput_score(None, [], None) == (0.0, False)
+
+    failed = _audit_result(passed=False).model_copy(
+        update={"line_scores": {"iron-plate": 0.8}}
+    )
+    assert _autonomous_throughput_score(None, [failed], None) == (0.0, False)
+
+    passed = _audit_result(passed=True)
+    assert _autonomous_throughput_score(passed, [failed], None) == (1.0, True)
+
+
 class _AuditWorker(FakeWorker):
     def __init__(self, result_factory, *, fail_first=False):
         super().__init__("audit-worker")
@@ -169,55 +248,46 @@ class _AuditWorker(FakeWorker):
         self.accepted.append(result)
 
 
-def test_service_passes_candidate_audit_and_terminates_immediately():
+@pytest.mark.parametrize("passed", [True, False], ids=["passed", "failed"])
+def test_service_candidate_audit_outcome_controls_rollout(passed):
     agent = _CandidateWorker()
-    auditor = _AuditWorker(lambda calls: _audit_result(passed=True, calls=calls))
+    auditor = _AuditWorker(lambda calls: _audit_result(passed=passed, calls=calls))
     service = EnvironmentService([agent], audit_workers=[auditor])
     lease = service.lease(FactorioTaskSpec(task_id="throughput", goal="produce"))
 
     result = service.execute(lease.lease_id, "step()")
+    if passed:
+        with pytest.raises(LeaseFinalized, match="throughput_audit_passed"):
+            service.execute(lease.lease_id, "step_again()")
+        snapshot = service.finalize(lease.lease_id)
+        assert snapshot.action_events[0].sequence == 1
+    else:
+        continued = service.execute(lease.lease_id, "step_again()")
+        assert continued.event.sequence == 2
 
     audit_event = next(
         event
         for event in result.events
-        if event.payload.get("event") == "throughput_audit_passed"
+        if event.payload.get("event")
+        == ("throughput_audit_passed" if passed else "throughput_audit_failed")
     )
-    assert audit_event.payload == {"event": "throughput_audit_passed"}
-    assert result.terminal_reason == "throughput_audit_passed"
-    assert auditor.calls == 1
-    assert len(agent.recorded) == 1
-    assert agent.recorded[0].passed is True
-    assert len(agent.accepted) == 1
-    assert agent.accepted[0] is agent.recorded[0]
-    with pytest.raises(LeaseFinalized, match="throughput_audit_passed"):
-        service.execute(lease.lease_id, "step_again()")
-
-    snapshot = service.finalize(lease.lease_id)
-    assert snapshot.action_events[0].sequence == 1
-    service.close()
-
-
-def test_service_keeps_rollout_open_when_candidate_audit_fails():
-    agent = _CandidateWorker()
-    auditor = _AuditWorker(lambda calls: _audit_result(passed=False, calls=calls))
-    service = EnvironmentService([agent], audit_workers=[auditor])
-    lease = service.lease(FactorioTaskSpec(task_id="throughput", goal="produce"))
-
-    failed = service.execute(lease.lease_id, "step()")
-    continued = service.execute(lease.lease_id, "step_again()")
-
-    audit_event = next(
-        event
-        for event in failed.events
-        if event.payload.get("event") == "throughput_audit_failed"
-    )
-    assert audit_event.payload == {"event": "throughput_audit_failed"}
-    assert failed.terminal_reason is None
-    assert continued.event.sequence == 2
-    assert auditor.calls == 2
-    assert len(agent.recorded) == 2
-    assert all(not audit.passed for audit in agent.recorded)
-    assert agent.accepted == []
+    assert audit_event.payload == {
+        "event": "throughput_audit_passed" if passed else "throughput_audit_failed",
+        "failure_reasons": [] if passed else ["failed-attempt-1"],
+        "line_scores": {"iron-plate": 1.0 if passed else 0.0},
+        "production_rates_per_minute": {"iron-plate": 200.0},
+        "depot_rates_per_minute": {"iron-plate": 200.0},
+        "minimum_production_subwindow_rates": {"iron-plate": 200.0},
+        "minimum_depot_subwindow_rates": {"iron-plate": 200.0},
+    }
+    assert result.terminal_reason == ("throughput_audit_passed" if passed else None)
+    assert auditor.calls == (1 if passed else 2)
+    assert len(agent.recorded) == (1 if passed else 2)
+    assert all(audit.passed is passed for audit in agent.recorded)
+    if passed:
+        assert agent.accepted[0] is agent.recorded[0]
+    else:
+        assert agent.accepted == []
     service.close()
 
 
@@ -284,7 +354,9 @@ class _FakeDepot:
     def adopt(self, specs):
         return {"adopted": len(specs)}
 
-    def __call__(self, command):
+    def __call__(self, command, payload=None, *_args):
+        if command == "adopt":
+            return self.adopt(payload or [])
         assert command == "telemetry"
         return {}
 
@@ -352,6 +424,7 @@ def test_audit_uses_subwindow_floor_not_average_for_bursty_production():
         holdout_seconds_max=30,
         subwindow_seconds=10,
         require_depot_service=False,
+        require_closed_loop=False,
     )
     worker = FLEWorker.__new__(FLEWorker)
     worker.worker_id = "audit-worker"
@@ -371,9 +444,7 @@ def test_audit_uses_subwindow_floor_not_average_for_bursty_production():
     )
     assert result.passed is False
     assert result.line_scores["iron-plate"] == pytest.approx(0.0)
-    assert result.failure_reasons == [
-        "iron-plate:rate_or_subwindow_below_threshold"
-    ]
+    assert result.failure_reasons == ["iron-plate:rate_or_subwindow_below_threshold"]
 
 
 def test_randomized_holdout_length_uses_hidden_entropy_within_bounds(monkeypatch):
@@ -383,6 +454,7 @@ def test_randomized_holdout_length_uses_hidden_entropy_within_bounds(monkeypatch
         holdout_seconds_max=60,
         subwindow_seconds=10,
         require_depot_service=False,
+        require_closed_loop=False,
     )
     instance = _FakeProductionInstance([200.0] * 8)
     worker = FLEWorker.__new__(FLEWorker)
@@ -400,3 +472,39 @@ def test_randomized_holdout_length_uses_hidden_entropy_within_bounds(monkeypatch
     assert second.holdout_seconds == 60
     assert first.passed is True
     assert second.passed is True
+
+
+def test_closed_loop_audit_rejects_target_output_without_upstream_replenishment():
+    audit = ThroughputAuditSpec(
+        burn_in_seconds=0,
+        holdout_seconds_min=30,
+        holdout_seconds_max=30,
+        subwindow_seconds=10,
+        require_depot_service=False,
+        require_closed_loop=True,
+    )
+    worker = FLEWorker.__new__(FLEWorker)
+    worker.worker_id = "audit-worker"
+    worker.instance = _FakeProductionInstance([200.0] * 4)
+    worker._recipe_catalog = ProductCatalog(
+        StaticRecipeDataSource(
+            [
+                {
+                    "name": "iron-plate",
+                    "category": "smelting",
+                    "energy": 3.2,
+                    "ingredients": [{"name": "iron-ore", "amount": 1}],
+                    "products": [{"name": "iron-plate", "amount": 1}],
+                }
+            ]
+        )
+    )
+
+    result = worker.run_throughput_audit(
+        _production_candidate(rates=[200.0] * 4, audit=audit)
+    )
+
+    assert result.passed is False
+    assert result.supply_chain_targets_per_minute == {"iron-ore": 200.0}
+    assert result.supply_chain_rates_per_minute == {"iron-ore": 0.0}
+    assert result.failure_reasons == ["iron-ore:upstream_supply_below_threshold"]

@@ -85,7 +85,7 @@ def _context(**overrides) -> ContractContextSnapshot:
         session_id="s",
         epoch_index=0,
         captured_tick=1000,
-        technology_ids=("electricity",),
+        technology_ids=("steam-power",),
         unlocked_recipe_ids=("iron-plate",),
         inventory_counts={"iron-plate": 50},
         placed_entity_counts={"stone-furnace": 4},
@@ -191,7 +191,6 @@ def test_commitment_binds_every_field_and_is_immutable():
         )
         == canonical
     )
-    _ = canonical
 
     # A parsed, tampered specification fails validation because the hash is
     # re-derived and compared on load.
@@ -373,66 +372,61 @@ def test_inventory_covered_orders_are_rejected():
         )
 
 
-def test_family_repetition_cap_rejects():
-    template = DEFAULT_TEMPLATE_BANK.get("consolidate-smelting")
-    candidates = generate_candidates(
-        template=template,
-        generation_seed=21,
-        context=_context(),
-        catalog=CATALOG,
-        difficulty_model=MODEL,
-        pool_size=6,
-        recent_family_counts={"smelting": 99},
-        family_repetition_cap=3,
-    )
-    assert all(c.rejection_reason == "family_repetition_cap" for c in candidates)
-
-
-def test_session_horizon_rejection():
-    template = DEFAULT_TEMPLATE_BANK.get("consolidate-smelting")
-    candidates = generate_candidates(
-        template=template,
-        generation_seed=31,
-        context=_context(),
-        catalog=CATALOG,
-        difficulty_model=MODEL,
-        pool_size=6,
-        remaining_session_ticks=60,
-    )
-    assert candidates
-    assert all(c.rejection_reason == "exceeds_session_horizon" for c in candidates)
-
-
-def test_calibration_envelope_rejection():
-    template = DEFAULT_TEMPLATE_BANK.get("consolidate-smelting")
-    candidates = generate_candidates(
-        template=template,
-        generation_seed=41,
-        context=_context(),
-        catalog=CATALOG,
-        difficulty_model=MODEL,
-        pool_size=6,
-        calibration_envelope={
-            "log_quantity": (-100.0, -90.0),  # impossible to satisfy
-        },
-    )
-    assert all(c.rejection_reason == "outside_calibration_envelope" for c in candidates)
-
-
-def test_template_rejects_orders_outside_current_stage_band():
-    template = DEFAULT_TEMPLATE_BANK.get("consolidate-smelting")
-    candidates = generate_candidates(
-        template=template,
-        generation_seed=42,
-        context=_context(
-            placed_entity_counts={"rocket-silo": 1}, state_digest="rocket-stage"
+@pytest.mark.parametrize(
+    ("generate_overrides", "context_overrides", "expected_reason"),
+    [
+        pytest.param(
+            {
+                "generation_seed": 21,
+                "pool_size": 6,
+                "recent_family_counts": {"smelting": 99},
+                "family_repetition_cap": 3,
+            },
+            {},
+            "family_repetition_cap",
+            id="family_repetition_cap",
         ),
+        pytest.param(
+            {"generation_seed": 31, "pool_size": 6, "remaining_session_ticks": 60},
+            {},
+            "exceeds_session_horizon",
+            id="session_horizon",
+        ),
+        pytest.param(
+            {
+                "generation_seed": 41,
+                "pool_size": 6,
+                "calibration_envelope": {
+                    "log_quantity": (-100.0, -90.0),  # impossible to satisfy
+                },
+            },
+            {},
+            "outside_calibration_envelope",
+            id="calibration_envelope",
+        ),
+        pytest.param(
+            {"generation_seed": 42, "pool_size": 4},
+            {
+                "placed_entity_counts": {"rocket-silo": 1},
+                "state_digest": "rocket-stage",
+            },
+            "stage_band_unsupported",
+            id="stage_band",
+        ),
+    ],
+)
+def test_generate_candidates_rejects_with_reason(
+    generate_overrides, context_overrides, expected_reason
+):
+    candidates = generate_candidates(
+        template=DEFAULT_TEMPLATE_BANK.get("consolidate-smelting"),
+        context=_context(**context_overrides),
         catalog=CATALOG,
         difficulty_model=MODEL,
-        pool_size=4,
+        **generate_overrides,
     )
     assert candidates
-    assert all(c.rejection_reason == "stage_band_unsupported" for c in candidates)
+    assert all(c.rejection_reason == expected_reason for c in candidates)
 
 
 def test_rejection_reasons_are_persisted_on_candidates():

@@ -33,6 +33,7 @@ class RotateEntity(Tool):
 
         try:
             x, y = self.get_position(entity.position)
+            self.ensure_reachable(entity)
 
             # get metaclass from pydantic model
             metaclass = entity.__class__
@@ -45,6 +46,14 @@ class RotateEntity(Tool):
 
             if not response:
                 raise Exception(f"Could not rotate: {response}")
+            if isinstance(response, str):
+                raise Exception(
+                    f"Could not rotate {entity.name}: {self.get_error_message(response)}"
+                )
+            if isinstance(response, dict) and response.get("error"):
+                raise Exception(
+                    f"Could not rotate {entity.name}: {response.get('reason', 'rotation_rejected')}"
+                )
 
         except Exception as e:
             raise e
@@ -79,7 +88,7 @@ class RotateEntity(Tool):
         if object.direction.value != direction.value:
             if isinstance(entity, AssemblingMachine):
                 raise Exception(
-                    f"Could not rotate {entity.name}. Set the recipe first."
+                    f"Could not rotate {entity.name}. Set a fluid recipe first."
                 )
             raise Exception(f"Could not rotate {entity.name}.")
 

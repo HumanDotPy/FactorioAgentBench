@@ -2,24 +2,34 @@
 
 Status: implemented transport contract, 2026-08-26
 
+Realtime extension: see [continuous program execution](realtime-program-execution.md)
+for the provider-independent acceptance, status, cancellation, event and recovery
+contract used by OpenCode/Hermes realtime evaluations. The synchronous guarantees
+below apply to `execution_mode=turn_based` unless otherwise noted.
+
 This note defines what a modern model harness can rely on when it connects to
 Factorio envd. It deliberately separates direct MCP calls, programmatic action
 composition, and provider-specific programmatic tool-calling features.
 
 ## Direct MCP calls
 
-The lease-bound MCP adapter exposes two direct tools:
+Operator-only [active-run profiling](runtime-profiling.md) can measure the
+HTTP, runtime, and MCP stages without changing the agent tool contract.
+
+The lease-bound MCP adapter exposes mutation, live-state, immutable-reference,
+durable-result, and optional session-memory tools. The two world-action tools are:
 
 - `factorio_observe_factory` reads the current public observation.
 - `factorio_execute_program` submits one Python program as one environment
   intervention.
 
 The adapter uses newline-delimited JSON-RPC with request IDs and negotiates MCP
-protocol revisions from `2024-11-05` through `2025-11-25`. Its stdio dispatcher
-handles one input line at a time, so one adapter process is a serialized queue.
-A client may still pipeline requests and correlate responses by ID, but this
-adapter does not provide intra-process parallel execution.
-Use separate MCP sessions and leases for genuinely independent rollouts.
+protocol revisions from `2024-11-05` through `2025-11-25`. Each tool schema has
+a `factorio/toolRoute` annotation. Immutable reference, memory-read, and
+execution-artifact requests use a bounded read pool and may complete out of
+order by JSON-RPC ID. Live reads are ordered with mutations. Mutations remain
+exclusive. Use separate MCP sessions and leases for genuinely independent
+world rollouts.
 
 The HTTP service underneath the adapter is safe to call concurrently. Requests
 for different leases can run in parallel subject to worker capacity. Requests
@@ -53,10 +63,79 @@ This is distinct from provider-native PTC or code-mode protocols. OpenAI,
 Anthropic, OpenCode, and other harnesses may have their own mechanisms for
 letting a model compose tool calls, but envd does not claim to implement those
 provider protocols. They must either submit ordinary code through
-`factorio_execute_program` or dispatch the two direct MCP tools themselves.
+`factorio_execute_program` or dispatch the direct MCP tools themselves.
 The manifest advertises `programmatic_action_composition=true` and
 `provider_native_programmatic_tool_calling=false` to make that boundary
 explicit.
+
+## Canonical semantic motor runtime
+
+`semantic-motor-v1` is the canonical action profile. Reasoning remains
+turn-based for tasks using `execution_mode=turn_based`: the world pauses while the model thinks and advances on
+native Factorio ticks while semantic options execute. `execution_game_speed`
+changes only the ratio of simulation time to observer wall time, so an observer
+may run at 1x or faster without changing action semantics, receipts, deadlines,
+or scores.
+
+Agents may explicitly opt out of paused-while-thinking with
+`factorio_set_realtime(enabled, speed)` (envd `POST /v1/leases/{id}/realtime`).
+When enabled, the world stays unpaused between interventions at the requested
+speed, clamped to 1x-10x; disabling pauses immediately. Pacing is never a
+determinism input: receipts, scores, and deadlines still use authoritative
+ticks, and the active mode is reported in every observation under `realtime`.
+Audit workers and lease release/finalize always return to the paused default.
+Evaluation configurations decide whether realtime mode is permitted, because
+"paused while thinking" versus "running while thinking" are different tasks.
+
+Tasks selecting `execution_mode=realtime` fix pacing at continuous 1x and use
+background program admission. Agents cannot toggle that task back to paused mode.
+The adaptive/progression runners select this mode by default for OpenCode and
+Hermes, with an explicit `--execution-mode turn_based` alternative. Existing
+construction primitives are unchanged.
+
+Reusable agent-authored programs are first-class through the program template
+library (`factorio_save_program_template`, `factorio_run_program_template`,
+`factorio_list_program_templates`, `factorio_get_program_template`,
+`factorio_delete_program_template`). A template is a normal sandbox program
+body with declared `{{parameter}}` placeholders and defaults. Saving expands
+the body with its defaults and runs the canonical `validate_program` policy, so
+templates cannot smuggle in new powers, planner assistance, or imports.
+Execution expands the stored body with the supplied JSON arguments, validates
+it again, and hashes the expanded source, so receipts, idempotency, and
+telemetry behave exactly as for a hand-written program; the action event records
+the template name next to the expanded-code hash. Scope mirrors blueprints:
+lease-ephemeral by default, durable per training generation when the task sets
+`template_scope`.
+
+The controller owns character-scale execution: collision-aware walking,
+auto-approach for interactions, native mining and crafting duration, and exact
+termination receipts. The policy owns factory-scale decisions: entity
+locations, path corners, patterns, routing corridors, recipes, and research
+sequence. Construction batches are ordered and non-atomic; a failed step
+returns the successful prefix and blocker instead of silently rerouting.
+
+The canonical profile therefore rejects `connect_entities`,
+`nearest_buildable`, `move_to(..., laying=...)`, and generic non-exact
+placement. Those remain available only through the explicit
+`planner-assisted-v1` ablation profile. This makes planner assistance a
+measurable evaluation variable rather than an accidental capability leak.
+
+Long-running native work can overlap: `queue_craft` and `queue_research`
+return immediately, while `wait` accepts bounded semantic conditions. Returned
+entities carry stable integer handles for `resolve_entity`; semantic ports are
+available through `get_entity_ports`. The agent camera is a default-on public
+read surface with persistent opt-out and radius settings; it does not grant
+alternative mutation semantics. See [player observation parity](player-observation-parity.md).
+
+`submit_actions` adds a finite persistent command queue above these options.
+Submission validates command and technology availability, then execution checks
+the evolving inventory and geometry at each step. A failure preserves the
+successful prefix and pending suffix. Queues can be inspected, truncated,
+extended before a pending index, or resumed after an interrupt. Result
+references allow later commands to consume entities returned by earlier ones.
+The queue is deliberately not an arbitrary conditional policy: it represents
+an open-loop commitment from the model's current information and returns at
+declared semantic event boundaries.
 
 ## Harness obligations
 
@@ -74,10 +153,16 @@ different program returns HTTP 409. The bundled HTTP and MCP clients make one
 automatic keyed retry after an ambiguous transport failure; returned HTTP
 errors and unkeyed mutations are never retried automatically.
 
-MCP results are bounded as complete JSON documents. If the serialized envd
-payload exceeds the adapter limit, both text and `structuredContent` contain a
-truncation envelope with `original_json_chars`, `original_json_sha256`, and a
-`json_prefix`. The adapter never cuts serialized JSON mid-token.
+Mutation calls return a compact `factorio-execution-receipt-v1` rather than the
+complete raw result. The raw result is written once under the run's
+`tool-results` directory and can be paged with
+`factorio_read_execution_result`. Other MCP results are bounded as complete
+JSON documents. The adapter never cuts serialized JSON mid-token.
+
+After each mutation, evaluation profiles also create an exact environment
+checkpoint and atomically replace the run's resume pointer. Runner bundles add
+the active contract, rating/history, harness workspace, and OpenCode session ID.
+Compaction is therefore a context safety net; it is not the persistence layer.
 
 ## RLVR follow-up
 

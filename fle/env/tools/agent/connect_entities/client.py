@@ -191,6 +191,8 @@ class ConnectEntities(Tool):
                 )
                 # sleep(real_world_sleep)
 
+        self.refresh_player_location()
+
         if dry_run:
             return {
                 "number_of_entities_required": total_required_entities,
@@ -630,12 +632,35 @@ class ConnectEntities(Tool):
             "last_connection_type": connection_type,
         }
 
+    @staticmethod
+    def _entity_values(entities):
+        """Iterate over a Lua table decoded as either a dictionary or a list."""
+        if isinstance(entities, dict):
+            return entities.values()
+        if isinstance(entities, (list, tuple)):
+            return entities
+        return ()
+
+    @classmethod
+    def _append_entity_values(cls, target, source):
+        values = list(cls._entity_values(source))
+        if isinstance(target, list):
+            target.extend(values)
+            return
+        if isinstance(target, dict):
+            next_index = max((key for key in target if isinstance(key, int)), default=0)
+            for value in values:
+                next_index += 1
+                target[next_index] = value
+            return
+        raise TypeError("Path entities must be represented as a list or dictionary")
+
     def _get_groupable_entities(self, result, metaclasses, names_to_type):
         # Process created entities
         path = []
         groupable_entities = []
 
-        for entity_data in result.entities.values():
+        for entity_data in self._entity_values(result.entities):
             if not isinstance(entity_data, dict):
                 continue
 
@@ -1067,9 +1092,14 @@ class ConnectEntities(Tool):
             "RIGHT": {"x": 1, "y": 0},
         }
 
+        target_varies = isinstance(target_entity, (ChemicalPlant, OilRefinery))
+        source_varies = isinstance(source_entity, (ChemicalPlant, OilRefinery))
+        target_runs = range(1, max_distance + 1) if target_varies else (1,)
+        source_runs = range(1, max_distance + 1) if source_varies else (1,)
+
         # Loop through possible distances for target extension
         # first get the target straight line
-        for target_run_idx in range(1, max_distance + 1):
+        for target_run_idx in target_runs:
             # try to create the target straight line extension if needed
             # we extend the target position in a straight line by the offset usng the target_run_idx as the distance to try
             # extension is only needed if the target is a chemical plant or oil refinery
@@ -1087,7 +1117,7 @@ class ConnectEntities(Tool):
             if not target_straight_line_path_dict:
                 continue
             # then for each target straight line extension, we get the source straight line
-            for source_run_idx in range(1, max_distance + 1):
+            for source_run_idx in source_runs:
                 # same logic as for target, just for source
                 source_straight_line_path_dict = self.create_straight_line_dict(
                     source_entity,
@@ -1134,20 +1164,16 @@ class ConnectEntities(Tool):
                     if inbetween_path.is_success:
                         if source_straight_line_path_dict["path"]:
                             # add the underground pipes to the source_to_underground_start result
-                            for value in source_straight_line_path_dict[
-                                "path"
-                            ].entities.values():
-                                inbetween_path.entities[
-                                    len(inbetween_path.entities) + 1
-                                ] = value
+                            self._append_entity_values(
+                                inbetween_path.entities,
+                                source_straight_line_path_dict["path"].entities,
+                            )
                         if target_straight_line_path_dict["path"]:
                             # add the underground pipes to the underground_end_to_target result
-                            for value in target_straight_line_path_dict[
-                                "path"
-                            ].entities.values():
-                                inbetween_path.entities[
-                                    len(inbetween_path.entities) + 1
-                                ] = value
+                            self._append_entity_values(
+                                inbetween_path.entities,
+                                target_straight_line_path_dict["path"].entities,
+                            )
                         # return the final path
                         return inbetween_path
 
@@ -1365,7 +1391,7 @@ class ConnectEntities(Tool):
         """
         Pickup the entities in the path data
         """
-        for entity_data in path_data.entities.values():
+        for entity_data in self._entity_values(path_data.entities):
             if not isinstance(entity_data, dict):
                 continue
             # clean up the first path

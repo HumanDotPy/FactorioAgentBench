@@ -44,20 +44,97 @@ storage.actions.save_entity_state = function(player_index, distance, player_enti
 
     local entity_states = {}
     local entity_array = {}
+    -- The native design overlay retains settings/wires both before and after
+    -- construction. Entity snapshots below retain runtime inventory and energy;
+    -- existing real entities are matched when the design overlay is restored.
+    local capture_design = false
+    local min_x,min_y,max_x,max_y = math.huge,math.huge,-math.huge,-math.huge
     for _, entity in pairs(entities) do
+        if entity.type == "entity-ghost" or entity.type == "tile-ghost"
+            or entity.type == "item-request-proxy" then capture_design = true
+        elseif entity.type ~= "character" and entity.type ~= "item-entity"
+            and not entity.prototype.has_flag("not-blueprintable") then
+            capture_design = true
+        end
+        local box=entity.bounding_box
+        min_x=math.min(min_x,box.left_top.x); min_y=math.min(min_y,box.left_top.y)
+        max_x=math.max(max_x,box.right_bottom.x); max_y=math.max(max_y,box.right_bottom.y)
+    end
+    if capture_design then
+        local inventory=game.create_inventory(1)
+        local ok,err=pcall(function()
+            local stack=inventory[1]; stack.set_stack{name="blueprint"}
+            local mapping=stack.create_blueprint{surface=surface,
+                force=storage.agent_characters[player_index].force,
+                area={{min_x-1,min_y-1},{max_x+1,max_y+1}},always_include_tiles=true,
+                include_entities=true,include_modules=true,include_station_names=true,
+                include_trains=true,include_fuel=true}
+            local anchor=nil
+            for _, blueprint_entity in ipairs(stack.get_blueprint_entities() or {}) do
+                local original=mapping[blueprint_entity.entity_number]
+                if original then
+                    anchor={x=original.position.x-blueprint_entity.position.x,
+                        y=original.position.y-blueprint_entity.position.y}
+                    break
+                end
+            end
+            if not anchor then
+                local tiles=stack.get_blueprint_tiles() or {}
+                local names,seen={},{}
+                local relative_x,relative_y=math.huge,math.huge
+                for _,tile in ipairs(tiles) do
+                    if not seen[tile.name] then names[#names+1]=tile.name;seen[tile.name]=true end
+                    relative_x=math.min(relative_x,tile.position.x)
+                    relative_y=math.min(relative_y,tile.position.y)
+                end
+                local absolute_x,absolute_y=math.huge,math.huge
+                for _,tile in ipairs(surface.find_tiles_filtered{
+                    name=names,area={{min_x-1,min_y-1},{max_x+1,max_y+1}}}) do
+                    absolute_x=math.min(absolute_x,tile.position.x)
+                    absolute_y=math.min(absolute_y,tile.position.y)
+                end
+                for _,ghost in ipairs(surface.find_entities_filtered{type="tile-ghost",
+                    area={{min_x-1,min_y-1},{max_x+1,max_y+1}}}) do
+                    absolute_x=math.min(absolute_x,math.floor(ghost.position.x))
+                    absolute_y=math.min(absolute_y,math.floor(ghost.position.y))
+                end
+                if tiles[1] and absolute_x < math.huge then
+                    anchor={x=absolute_x-relative_x,y=absolute_y-relative_y}
+                end
+            end
+            if not anchor or not stack.is_blueprint_setup() then
+                error("Could not capture pending construction for checkpoint")
+            end
+            local pending_tiles={}
+            for _,entity in pairs(entities) do
+                if entity.type == "tile-ghost" then
+                    pending_tiles[#pending_tiles+1]=entity.position
+                end
+            end
+            table.insert(entity_array,{name='"fle-blueprint-overlay"',
+                position=serialize_position(anchor),content='"'..stack.export_stack()..'"',
+                pending_tiles=pending_tiles})
+        end)
+        inventory.destroy()
+        if not ok then error(err) end
+    end
+    -- Serialize inventories by type (Factorio 2.0: unified crafter_* defines)
+    local inventory_defines = {
+        chest = defines.inventory.chest,
+        crafter_input = defines.inventory.crafter_input,      -- was furnace_source/assembling_machine_input
+        crafter_output = defines.inventory.crafter_output,    -- was furnace_result/assembling_machine_output
+        fuel = defines.inventory.fuel,
+        burnt_result = defines.inventory.burnt_result,
+        turret_ammo = defines.inventory.turret_ammo,
+        lab_input = defines.inventory.lab_input,
+        lab_modules = defines.inventory.lab_modules,
+        crafter_modules = defines.inventory.crafter_modules,
+        roboport_robot = defines.inventory.roboport_robot,
+        roboport_material = defines.inventory.roboport_material,
+        robot_cargo = defines.inventory.robot_cargo,
+    }
 
-        -- Serialize inventories by type (Factorio 2.0: unified crafter_* defines)
-        local inventory_defines = {
-            chest = defines.inventory.chest,
-            crafter_input = defines.inventory.crafter_input,      -- was furnace_source/assembling_machine_input
-            crafter_output = defines.inventory.crafter_output,    -- was furnace_result/assembling_machine_output
-            fuel = defines.inventory.fuel,
-            burnt_result = defines.inventory.burnt_result,
-            turret_ammo = defines.inventory.turret_ammo,
-            lab_input = defines.inventory.lab_input,
-            lab_modules = defines.inventory.lab_modules,
-            crafter_modules = defines.inventory.crafter_modules   -- was assembling_machine_modules
-        }
+    for _, entity in pairs(entities) do
 
         if entity.name == "item-on-ground" then
             -- Capture the item details
@@ -71,6 +148,9 @@ storage.actions.save_entity_state = function(player_index, distance, player_enti
                 }
                 table.insert(entity_array, state)
             end
+        elseif entity.type == "entity-ghost" or entity.type == "tile-ghost"
+            or entity.type == "item-request-proxy" then
+            -- Restored through the native overlay after physical entities.
         elseif entity.name ~= "character" then
             local state = {
                 name = '"' .. entity.name .. '"',
@@ -85,6 +165,14 @@ storage.actions.save_entity_state = function(player_index, distance, player_enti
                 warnings = {},
                 inventories = {}
             }
+            state.deconstruction = entity.to_be_deconstructed(entity.force)
+            if entity.to_be_upgraded() then
+                local target,quality=entity.get_upgrade_target()
+                if target then
+                    state.upgrade_target='"'..target.name..'"'
+                    state.upgrade_quality='"'..(quality and quality.name or "normal")..'"'
+                end
+            end
 
             -- Add any warnings
             for _, warning in pairs(storage.utils.get_issues(entity) or {}) do

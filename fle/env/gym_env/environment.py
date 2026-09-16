@@ -294,10 +294,14 @@ class FactorioGymEnv(gym.Env):
         self.last_message_timestamps = {i: 0.0 for i in range(instance.num_agents)}
 
     def get_observation(
-        self, agent_idx: int = 0, response: Optional[Response] = None
+        self,
+        agent_idx: int = 0,
+        response: Optional[Response] = None,
+        ticks: Optional[int] = None,
     ) -> Observation:
         """Convert the current game state into a gym observation"""
         namespace = self.instance.namespaces[agent_idx]
+        ticks = self.instance.get_elapsed_ticks() if ticks is None else ticks
 
         # Render map image if vision is enabled
         map_image = ""
@@ -321,8 +325,8 @@ class FactorioGymEnv(gym.Env):
 
         # Get game info
         game_info = GameInfo(
-            tick=self.instance.get_elapsed_ticks(),
-            time=self.instance.get_elapsed_ticks() / 60,
+            tick=ticks,
+            time=ticks / 60,
             speed=self.instance.get_speed(),
         )
 
@@ -364,8 +368,12 @@ class FactorioGymEnv(gym.Env):
         # Get serialized functions
         serialized_functions = []
         for func in namespace.get_functions():
+            pickled = getattr(func, "_pickled_hex", None)
+            if pickled is None:
+                pickled = pickle.dumps(func).hex()
+                func._pickled_hex = pickled
             serialized_functions.append(
-                {"name": func.name, "pickled_function": pickle.dumps(func).hex()}
+                {"name": func.name, "pickled_function": pickled}
             )
 
         # Get task information
@@ -463,7 +471,14 @@ class FactorioGymEnv(gym.Env):
             )
             terminated = task_success.success
 
-        production_score, automated_production_score = namespace.score()
+        if self.task:
+            production_score, automated_production_score = namespace._refresh_score()
+        else:
+            cached_score = getattr(namespace, "_last_score", None)
+            if cached_score is not None:
+                production_score, automated_production_score = cached_score
+            else:
+                production_score, automated_production_score = namespace.score()
         if not automated_production_score:
             automated_production_score = 0
         # Calculate reward
@@ -479,6 +494,7 @@ class FactorioGymEnv(gym.Env):
         achievements = calculate_achievements(start_production_flows, current_flows)
 
         # Create response object for observation
+        ticks = self.instance.get_elapsed_ticks()
         response = Response(
             code=f"```python\n{action.code}\n```",
             created_at=datetime.datetime.now(),
@@ -486,7 +502,7 @@ class FactorioGymEnv(gym.Env):
             automated_score=automated_production_score,
             achievements=achievements,
             step=0,
-            ticks=self.instance.get_elapsed_ticks(),
+            ticks=ticks,
             flows=start_production_flows.get_new_flows(current_flows),
             response=task_response if task_response else result,
             task=task_success if task_success else TaskResponse(success=False, meta={}),
@@ -496,7 +512,7 @@ class FactorioGymEnv(gym.Env):
 
         # Get observation for the acting agent
         try:
-            observation = self.get_observation(action.agent_idx, response)
+            observation = self.get_observation(action.agent_idx, response, ticks=ticks)
         except Exception as e:
             raise Exception(f"Error getting observation: {e}") from e
 
@@ -504,7 +520,7 @@ class FactorioGymEnv(gym.Env):
         info = {
             "error_occurred": error_occurred,
             "result": result,
-            "ticks": self.instance.get_elapsed_ticks(),
+            "ticks": ticks,
             "flows": response.flows,
             "agent_idx": agent_idx,
             "last_message_timestamp": self.last_message_timestamps[agent_idx],

@@ -60,6 +60,7 @@ class Renderer:
         sprites_dir: Optional[Path] = None,
         max_render_radius: Optional[float] = None,
         center_on_player: bool = True,
+        center_position: Optional[Dict[str, float]] = None,
     ):
         """Initialize renderer with blueprint data.
 
@@ -74,12 +75,13 @@ class Renderer:
         self.icons = []
         self.max_render_radius = max_render_radius
         self.center_on_player = center_on_player
+        self._scaled_sprites: Dict[tuple, tuple] = {}
 
         flattened_entities = list(flatten_entities(entities))
 
         # Find player position if centering on player
-        self.player_position = None
-        if center_on_player:
+        self.player_position = center_position
+        if center_on_player and self.player_position is None:
             for entity in flattened_entities:
                 if isinstance(entity, dict) and entity.get("name") == "character":
                     pos = entity.get("position", {})
@@ -270,8 +272,19 @@ class Renderer:
 
         for entity in entities:
             # Handle both Entity objects and dicts
+            name = entity.get("name", "") if isinstance(entity, dict) else entity.name
+            if (
+                name == "character"
+                or is_tree_entity(name)
+                or is_rock_entity(name)
+                or name == "cliff"
+                or name.startswith("crash-site-")
+            ):
+                continue
             if hasattr(entity, "status"):
                 status = entity.status
+                if isinstance(status, str):
+                    status = EntityStatus.from_string(status)
                 entity_dict = (
                     entity.model_dump()
                     if hasattr(entity, "model_dump")
@@ -344,12 +357,8 @@ class Renderer:
                 alert_icon = alert_icon.convert("RGBA")
 
             # Apply 50% alpha by modifying the alpha channel
-            pixels = alert_icon.load()
-            for y_pixel in range(new_height):
-                for x_pixel in range(new_width):
-                    r, g, b, a = pixels[x_pixel, y_pixel]
-                    # Reduce alpha to 50% of its original value
-                    pixels[x_pixel, y_pixel] = (r, g, b, int(a * 0.75))
+            alpha = alert_icon.getchannel("A").point(lambda value: int(value * 0.75))
+            alert_icon.putalpha(alpha)
 
             # Calculate position for alert overlay
             # Place alert in top-right corner of entity
@@ -474,33 +483,33 @@ class Renderer:
     def _set_position(self, item: Any, x: float, y: float) -> Any:
         """Set position on an item, handling both dict and object formats.
 
-        Returns a copy of the item with updated position.
+        Returns a shallow copy of the item with updated position.
         """
-        item_copy = copy.deepcopy(item)
-
         # Handle water tiles which have x,y directly
         if (
-            isinstance(item_copy, dict)
-            and "x" in item_copy
-            and "y" in item_copy
-            and "position" not in item_copy
+            isinstance(item, dict)
+            and "x" in item
+            and "y" in item
+            and "position" not in item
         ):
-            item_copy["x"] = x
-            item_copy["y"] = y
+            return {**item, "x": x, "y": y}
         # Handle items with position attribute
-        elif hasattr(item_copy, "position"):
-            if hasattr(item_copy.position, "x") and hasattr(item_copy.position, "y"):
-                item_copy.position.x = x
-                item_copy.position.y = y
-            elif isinstance(item_copy.position, dict):
-                item_copy.position["x"] = x
-                item_copy.position["y"] = y
+        if hasattr(item, "position"):
+            position = item.position
+            if hasattr(position, "x") and hasattr(position, "y"):
+                if hasattr(item, "model_copy"):
+                    return item.model_copy(update={"position": Position(x=x, y=y)})
+            elif isinstance(position, dict):
+                item_copy = copy.copy(item)
+                item_copy.position = {**position, "x": x, "y": y}
+                return item_copy
         # Handle dict items with position key
-        elif isinstance(item_copy, dict) and "position" in item_copy:
-            item_copy["position"]["x"] = x
-            item_copy["position"]["y"] = y
+        if isinstance(item, dict) and "position" in item:
+            position = item["position"]
+            if isinstance(position, dict):
+                return {**item, "position": {**position, "x": x, "y": y}}
 
-        return item_copy
+        return copy.deepcopy(item)
 
     def _find_min_coordinates(
         self, entities: List[Any], resources: List[Any], water_tiles: List[Any]
@@ -699,8 +708,7 @@ class Renderer:
                 # input
                 entities.append(entity)
                 # output
-                output = copy.deepcopy(entity)
-                output.is_input = False
+                output = entity.model_copy(update={"is_input": False})
                 # output.position = output.output_position
 
                 output.position = Position(
@@ -874,7 +882,12 @@ class Renderer:
                 pos["x"], pos["y"], max_variants=DEFAULT_ROCK_VARIANTS
             )
 
-            sprite_name = f"{decorative['name']}_{variant}"
+            asset_name = {
+                "big-rock": "rock-big",
+                "huge-rock": "rock-huge",
+                "big-sand-rock": "sand-rock",
+            }.get(decorative["name"], decorative["name"])
+            sprite_name = f"{asset_name}_{variant}"
             image = image_resolver(sprite_name, False)
 
             if image:
@@ -882,7 +895,7 @@ class Renderer:
             else:
                 while not image and variant < DEFAULT_ROCK_VARIANTS:
                     variant = variant + 1
-                    sprite_name = f"{decorative['name']}_{variant}"
+                    sprite_name = f"{asset_name}_{variant}"
                     image = image_resolver(sprite_name, False)
                     if image:
                         self._paste_image(img, image, relative_x, relative_y, scaling)
@@ -1059,32 +1072,32 @@ class Renderer:
     ) -> None:
         """Render rail entities with multiple passes."""
         passes = [1, 2, 3, 3.5, 4, 5]
+        rail_names = (
+            "straight-rail",
+            "curved-rail",
+            "rail-signal",
+            "rail-chain-signal",
+        )
+        rails = []
+        for entity in non_tree_entities:
+            entity = entity.model_dump() if hasattr(entity, "model_dump") else entity
+            if entity["name"] in rail_names:
+                rails.append(entity)
 
         for pass_num in passes:
-            for entity in non_tree_entities:
-                entity = (
-                    entity.model_dump() if hasattr(entity, "model_dump") else entity
-                )
-                if entity["name"] not in [
-                    "straight-rail",
-                    "curved-rail",
-                    "rail-signal",
-                    "rail-chain-signal",
-                ]:
-                    continue
-
+            for entity in rails:
                 pos = entity["position"]
                 relative_x = pos["x"] + abs(size["minX"])
                 relative_y = pos["y"] + abs(size["minY"])
                 direction = entity.get("direction", 0)
                 image = None
 
-                if entity.name == "straight-rail":
-                    if direction in [0, 4]:
+                if entity["name"] == "straight-rail":
+                    if direction in [0, 8]:
                         image = image_resolver(
                             f"{entity.name}_vertical_pass_{int(pass_num)}", False
                         )
-                    elif direction in [2, 6]:
+                    elif direction in [4, 12]:
                         image = image_resolver(
                             f"{entity.name}_horizontal_pass_{int(pass_num)}", False
                         )
@@ -1126,6 +1139,14 @@ class Renderer:
 
             if image:
                 self._paste_image(img, image, relative_x, relative_y, scaling)
+            else:
+                # Missing artwork must not make a real obstacle invisible.
+                # A labelled position marker carries only grounded entity facts.
+                x, y = relative_x * scaling, relative_y * scaling
+                draw = ImageDraw.Draw(img)
+                draw.line((x - 4, y, x + 4, y), fill="#e0ca9b", width=2)
+                draw.line((x, y - 4, x, y + 4), fill="#e0ca9b", width=2)
+                draw.text((x + 5, y + 4), entity.name, fill="#e0ca9b")
 
     @profile_method()
     def _paste_image(
@@ -1156,7 +1177,16 @@ class Renderer:
         if scale_ratio != 1.0:
             new_width = max(1, int(sprite.width * scale_ratio))
             new_height = max(1, int(sprite.height * scale_ratio))
-            sprite = sprite.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            cache_key = (id(sprite), new_width, new_height)
+            cached = self._scaled_sprites.get(cache_key)
+            if cached is not None and cached[0] is sprite:
+                sprite = cached[1]
+            else:
+                source = sprite
+                sprite = source.resize(
+                    (new_width, new_height), Image.Resampling.LANCZOS
+                )
+                self._scaled_sprites[cache_key] = (source, sprite)
             # Scale offsets proportionally
             offset_x = int(offset_x * scale_ratio)
             offset_y = int(offset_y * scale_ratio)
@@ -1171,12 +1201,10 @@ class Renderer:
                 sprite = sprite.convert("RGBA")
 
             # Adjust the alpha channel
-            pixels = sprite.load()
-            for y in range(sprite.height):
-                for x in range(sprite.width):
-                    r, g, b, a = pixels[x, y]
-                    # Reduce alpha by the shadow intensity factor
-                    pixels[x, y] = (r, g, b, int(a * SHADOW_INTENSITY))
+            alpha = sprite.getchannel("A").point(
+                lambda value: int(value * SHADOW_INTENSITY)
+            )
+            sprite.putalpha(alpha)
 
         start_x = (
             int((relative_x * scaling + scaling / 2) - sprite.width / 2) + offset_x

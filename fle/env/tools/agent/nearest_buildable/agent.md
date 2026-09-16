@@ -30,6 +30,12 @@ Returns a BoundingBox with these attributes:
 - `right_top`: Top-right corner Position
 - `center`: Center position
 
+Convention: `left_top`, `right_bottom`, `left_bottom` and `right_top` are the corners of
+the verified buildable area. `center` is the position to pass to `place_entity` or
+`move_to` when one entity should sit centered in that area. Treat `left_top` as the
+corner to start from when laying out several entities inside the area, then place each
+entity at its own tile center inside the box.
+
 ## Common Use Cases
 
 ### 1. Basic Entity Placement

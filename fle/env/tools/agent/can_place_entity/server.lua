@@ -1,81 +1,82 @@
 storage.actions.can_place_entity = function(player_index, entity, direction, x, y)
     local player = storage.agent_characters[player_index]
-    local position = {x = x, y = y}
-    
-    ---- Check player's reach distance
-    local dx = player.position.x - x
-    local dy = player.position.y - y
-    local distance = math.sqrt(dx * dx + dy * dy)
-
-    -- Check entity prototype exists
+    if not player then
+        error("Player not found")
+    end
     if prototypes.entity[entity] == nil then
         local name = entity:gsub(" ", "_"):gsub("-", "_")
         error(name .. " isn't a valid entity prototype. Did you make a typo?")
     end
 
-    if distance > player.reach_distance then
-        error("The distance to the target position is too far away to place the entity (" ..distance.."). Move closer.")
+    if direction == nil then
+        direction = defines.direction.north
+    end
+    local entity_direction = storage.utils.inserter_engine_direction(entity,
+        storage.utils.get_entity_direction(entity, direction))
+
+    local position = {x = x, y = y}
+    local dx = player.position.x - x
+    local dy = player.position.y - y
+    local distance = math.sqrt(dx * dx + dy * dy)
+    local max_distance = player.reach_distance or player.build_distance
+    if distance > max_distance then
+        return false
     end
 
-    -- Check inventory for the entity
     if player.get_item_count(entity) == 0 then
-        local name = entity:gsub(" ", "_"):gsub("-", "_")
-        local inv_contents = storage.utils.format_inventory_for_error(player)
-        error("No " .. name .. " in inventory. Current inventory: " .. inv_contents)
+        return false
     end
 
-    -- Get entity direction and collision box
-    local direction_enum = get_entity_direction(entity, direction)
-    local prototype = prototypes.entity[entity]
-    local collision_box = prototype.collision_box
-    local width = math.abs(collision_box.right_bottom.x - collision_box.left_top.x)
-    local height = math.abs(collision_box.right_bottom.y - collision_box.left_top.y)
-
-    -- Define the area where the entity will be placed
-    local target_area = {
-        {x = position.x - width / 2, y = position.y - height / 2},
-        {x = position.x + width / 2, y = position.y + height / 2}
-    }
-
-    -- Check for collision with other entities
-    local entities = player.surface.find_entities_filtered{area = target_area, force = player.force}
-
-    -- iterate over entities and remove any with the player_character name
-    for i = #entities, 1, -1 do
-        if entities[i].name == "character" or entities[i].name == 'item-on-ground' then
-            table.remove(entities, i)
-        end
-    end
-    if #entities > 1 then
-        error("Cannot place the entity at the specified location due to collision with other entities.")
-    end
-
-    -- Additional checks for specific entities like offshore-pump
-    if entity == "offshore-pump" then
-        local tile = player.surface.get_tile(x, y)
-        if not tile.prototype.name:match("water") then
-            error("Cannot place the entity at the specified position due to lack of water.")
-        end
-    end
-
-    ---- Check if the entity can be placed
-    ---  if placement fails, it tries 11 different positions (i=0 to 10) by moving the player diagonally
-    local can_build = storage.utils.avoid_entity(player_index, entity, position, direction)
-    if not can_build then
-        error("Cannot place the entity at the specified position: x="..position.x..", y="..position.y)
+    if not storage.utils.can_place_entity(player, entity, position, entity_direction) then
+        return false
     end
     return true
 end
 
-function get_entity_direction(entity, direction)
-    if direction == nil then
-        return defines.direction.north
+storage.actions.plan_placement = function(player_index, entity, direction, x, y)
+    local player = storage.agent_characters[player_index]
+    if not player then
+        error("Player not found")
     end
     local prototype = prototypes.entity[entity]
-    local cardinals = {defines.direction.north, defines.direction.east, defines.direction.south, defines.direction.west}
-    if prototype and prototype.type == "inserter" then
-        return cardinals[(direction % 4) + 1]
-    else
-        return cardinals[direction % 4]
+    if prototype == nil then
+        local name = entity:gsub(" ", "_"):gsub("-", "_")
+        error(name .. " isn't a valid entity prototype. Did you make a typo?")
     end
+
+    if direction == nil then
+        direction = defines.direction.north
+    end
+    local entity_direction = storage.utils.inserter_engine_direction(entity,
+        storage.utils.get_entity_direction(entity, direction))
+
+    local position = {x = x, y = y}
+    local placeable = storage.utils.can_place_entity(
+        player, entity, position, entity_direction)
+    local dx = player.position.x - x
+    local dy = player.position.y - y
+    local distance = math.sqrt(dx * dx + dy * dy)
+    local max_distance = player.reach_distance or player.build_distance
+
+    local result = {
+        prototype = entity,
+        position = position,
+        direction = direction,
+        engine_direction = entity_direction,
+        building = prototype.type,
+        placeable = placeable,
+        within_reach = distance <= max_distance,
+        inventory_count = player.get_item_count(entity),
+    }
+    if not placeable then
+        local diagnostic = storage.utils.spatial_diagnostics(player.surface, position,
+            prototype.collision_box, entity_direction, prototype.collision_mask, nil,
+            prototype)
+        result.reason = diagnostic.reason
+        result.footprint = diagnostic.footprint
+        result.blocked_by = diagnostic.blocked_by
+        result.overlapping_entities = diagnostic.overlapping_entities
+        result.colliding_tiles = diagnostic.colliding_tiles
+    end
+    return result
 end

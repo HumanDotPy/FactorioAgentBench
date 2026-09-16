@@ -407,16 +407,11 @@ def build_capability_ladder(
     )
     for condition_key, participants in groups.items():
         for participant in participants:
-            attempt_plan = {
-                (item["task_id"], item["seed"]): item
-                for item in per_model[participant]["attempt_condition"]
-            }
+            attempt_plan: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+            for item in per_model[participant]["attempt_condition"]:
+                attempt_plan[item["task_id"]].append(item)
             for task_id, reward in per_model[participant]["task_best"].items():
-                matching = [
-                    item
-                    for (planned_task, _seed), item in attempt_plan.items()
-                    if planned_task == task_id
-                ]
+                matching = attempt_plan.get(task_id, [])
                 if len(matching) != 1:
                     continue
                 plan = matching[0]

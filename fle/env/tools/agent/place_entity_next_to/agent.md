@@ -22,6 +22,11 @@ Returns the placed Entity object.
 - `direction`: Which direction to place from reference (UP/DOWN/LEFT/RIGHT)
 - `spacing`: Additional tiles of space between entities (0 or more)
 
+For inserter prototypes, `direction` names the DROP side: the inserter is
+placed on that side of the reference and drops in that direction, so it takes
+from the reference entity. To bridge two placed entities, use
+`insert_between(source, target)`, which checks both sides.
+
 ### Examples
 
 ```python
@@ -87,10 +92,13 @@ The tool provides feedback about placement decisions:
 ```python
 inserter = place_entity_next_to(Prototype.BurnerInserter, assembler.position, Direction.LEFT)
 
-# Check if placement was optimal
+# Check how the placement was performed
 if hasattr(inserter, '_placement_feedback'):
     feedback = inserter._placement_feedback
     print(f"Placement: {feedback['reason']}")
-    if feedback['auto_oriented']:
-        print("Inserter was auto-oriented for optimal flow")
+    print(f"Placed exactly as requested: {feedback['optimal']}")
 ```
+
+## Failure Behavior
+
+The entity is placed at the requested position and direction, or the call fails with an error describing the blockers. The tool never relocates the entity to an alternative tile and never rotates it silently. The only automatic action is stepping the agent character out of the requested tile when the character is the sole blocker; that case is reported in `placement_feedback` with `optimal=False`. Items on the ground at the target tile are left in place and can be picked up later.

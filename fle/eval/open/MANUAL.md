@@ -1,5 +1,37 @@
 # Manual
 
+## Direction and tool selection
+
+`Direction` is agent-facing everywhere. For inserters it names the DROP side
+(the engine stores the pickup side, so `place_entity(..., Direction.RIGHT)`
+drops to the east); for belts, underground belts and mining drills it names
+item flow and output. `+y` points south. Belt tiles are walkable: a walk can
+start on or cross them.
+
+```python
+# Inserter directions are the DROP side: this one takes from the chest and
+# drops into the machine east of it.
+inserter = place_entity(Prototype.BurnerInserter, Direction.RIGHT, Position(x=0, y=0))
+# insert_between picks the tile and rotation for you:
+inserter = insert_between(source, target)
+```
+
+Useful accessors: `player_position` (the character's current Position),
+`get_entities(...).ground_items` (dropped stacks that explain catch failures),
+`move_to(target, waypoints=[...])` for explicit corners, and `trace_belt` to
+audit a belt line.
+
+| Intent | Tool |
+| --- | --- |
+| One exact entity on a tile | `place_entity(exact=True)` |
+| Link two placed entities point-to-point | `connect_entities` |
+| Exact axis-aligned polyline | `place_path` |
+| Probe before building | `plan_placement`, `plan_path` |
+| Repeated pattern / grid | `repeat_pattern`, `place_grid` |
+| Receiver on a machine drop tile | `catch_output` |
+| Inserter bridge between two machines | `insert_between` |
+| Partial `place_path` receipt | resume from `resume_from`, clear `blocker` |
+
 ## Core Interaction Patterns
 
 ### 0. Material Processing Requirements
@@ -165,13 +197,14 @@ steam_engine = place_entity_next_to(
 1. **Entity Rotation**
 
 - Some entities (like steam engines) auto-rotate based on connection points
-- Others need manual rotation after placement:
+- Others need manual rotation after placement. Rotating an inserter sets its
+  DROP side; rotating a belt or drill sets its flow/output side:
 
 ```python
 drill = place_entity_next_to(Prototype.ElectricMiningDrill,
     reference_position=position,
-    direction=Direction.RIGHT) # This places the drill to the RIGHT the position
-drill = rotate_entity(drill, Direction.DOWN) # This orients the drill downwards
+    direction=Direction.RIGHT) # This places the drill to the RIGHT of the position
+drill = rotate_entity(drill, Direction.DOWN) # This orients the drill output downwards
 ```
 
 2. **Entity Dimensions**
@@ -430,14 +463,15 @@ move_to(coal_patch.bounding_box.center)
 # 2. Place mining drill
 drill = place_entity(Prototype.BurnerMiningDrill, Direction.DOWN, coal_patch.bounding_box.center)
 
-# 3. Place inserter to feed coal back into drill
+# 3. Place inserter to feed coal back into drill. Direction is the DROP side;
+# placing it north of the drill and rotating to DOWN points the drop at the drill.
 inserter = place_entity_next_to(
     Prototype.BurnerInserter,
     drill.position,
     direction=Direction.UP,
     spacing=0
 )
-rotate_entity(inserter, Direction.DOWN)  # Face inserter toward drill
+inserter = rotate_entity(inserter, Direction.DOWN)  # Drop side faces drill
 
 # 4. Connect with transport belt
 belts = connect_entities(
@@ -447,7 +481,7 @@ belts = connect_entities(
 )
 
 # 5. Bootstrap system with initial fuel
-insert_item(Prototype.Coal, drill, quantity=5)
+refuel(drill)
 ```
 
 #### Multi-Drill Self-Fueling Systems

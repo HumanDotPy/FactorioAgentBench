@@ -157,8 +157,7 @@ def _assemble(args: argparse.Namespace) -> None:
     started_at = min(starts)
     run = BenchmarkRun(
         run_id=(
-            f"{args.slug}-blind-{args.split}-"
-            f"{started_at.strftime('%Y%m%dT%H%M%SZ')}"
+            f"{args.slug}-blind-{args.split}-{started_at.strftime('%Y%m%dT%H%M%SZ')}"
         ),
         model=ModelIdentity(
             name=args.model,

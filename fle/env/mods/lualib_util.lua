@@ -142,7 +142,7 @@ end
 
 function util.oppositedirection(direction)
   if not tonumber(direction) then error(direction .. " is not a valid direction") end
-  return (direction + 4) % 8
+  return (direction + 8) % 16
 end
 
 function util.multiplystripes(count, stripes)
@@ -303,7 +303,6 @@ util.string_starts_with = function(str, start)
 end
 
 util.online_players = function()
-  log("But why?")
   return game.connected_players
 end
 
@@ -320,9 +319,15 @@ local is_walkable = function(mask)
   return true
 end
 
+local walkable_tile_name = nil
+
 util.get_walkable_tile = function()
+  if walkable_tile_name then
+    return walkable_tile_name
+  end
   for name, tile in pairs (prototypes.tile) do
     if is_walkable(tile.collision_mask) and not tile.items_to_place_this then
+      walkable_tile_name = name
       return name
     end
   end

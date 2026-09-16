@@ -8,6 +8,7 @@ calibrated for a frozen benchmark release.
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Literal
 
 from pydantic import Field
@@ -18,7 +19,7 @@ from fle.envd.models import FactorioTaskSpec, WireModel
 from fle.envd.task_builder import build_task_spec
 from fle.eval.tasks.task_definitions.task_registry import list_tasks_by_category
 
-BENCHMARK_VERSION = "0.2.0-dev"
+BENCHMARK_VERSION = "0.3.0-dev"
 
 BenchmarkStatus = Literal["ready", "calibration_required", "spec_only", "planned"]
 BenchmarkHorizon = Literal["short", "medium", "long", "persistent"]
@@ -450,18 +451,24 @@ def _microtask_catalog() -> list[BenchmarkTask]:
     return tasks
 
 
+@lru_cache(maxsize=1)
+def _benchmark_catalog() -> tuple[BenchmarkTask, ...]:
+    tasks = [*_throughput_catalog(), *_builtin_catalog(), *_microtask_catalog()]
+    return tuple(sorted(tasks, key=lambda task: (task.suite, task.tier, task.task_id)))
+
+
 def benchmark_catalog() -> list[BenchmarkTask]:
     """Return the deterministic development benchmark manifest."""
 
-    tasks = [*_throughput_catalog(), *_builtin_catalog(), *_microtask_catalog()]
-    return sorted(tasks, key=lambda task: (task.suite, task.tier, task.task_id))
+    return list(_benchmark_catalog())
 
 
 def get_benchmark_task(task_id: str) -> BenchmarkTask:
-    for task in benchmark_catalog():
+    tasks = benchmark_catalog()
+    for task in tasks:
         if task.task_id == task_id:
             return task
-    available = ", ".join(task.task_id for task in benchmark_catalog())
+    available = ", ".join(task.task_id for task in tasks)
     raise KeyError(f"Unknown benchmark task {task_id!r}; available: {available}")
 
 

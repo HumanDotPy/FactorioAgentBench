@@ -107,10 +107,10 @@ def build_task_spec(
     task_id: str,
     *,
     seed: int = 0,
-    scenario: str = "default_lab_scenario",
-    factorio_version: str = "2.0.73",
-    checkpoint_id: str = "scenario:default_lab_scenario",
-    action_profile: str = "fle-program-v1",
+    scenario: str = "open_world",
+    factorio_version: str = "2.0.77",
+    checkpoint_id: str = "scenario:open_world",
+    action_profile: str = "semantic-motor-v1",
     max_interventions: int = 8,
     holdout_seconds: int | None = None,
 ) -> FactorioTaskSpec:
@@ -209,5 +209,7 @@ def render_task_prompt(task: FactorioTaskSpec) -> str:
         f"\n\nConstraints:\n{constraint_lines or '- None'}\n\n"
         "Use factorio_observe_factory to inspect the simulation and "
         "factorio_execute_program for one short intervention at a time. "
+        "For this task, use no host/file/network access; interact only through "
+        "the provided Factorio tools. "
         f"{verification}\n\nAction profile reference:\n{ACTION_PROFILE_REFERENCE}"
     )

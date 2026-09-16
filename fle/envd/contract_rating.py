@@ -137,8 +137,8 @@ def _feature_vector(
     features: ContractDifficultyFeatures,
     keys: tuple[str, ...],
 ) -> dict[str, float]:
-    values = features.model_dump()
-    vector = {key: float(values[key]) for key in keys if key in values}
+    fields = type(features).model_fields
+    vector = {key: float(getattr(features, key)) for key in keys if key in fields}
     if "supply_pressure_ratio" in keys:
         vector["supply_pressure_ratio"] = supply_pressure_ratio(features)
     return vector
@@ -249,11 +249,13 @@ class CalibratedDifficultyModel:
         if template_id:
             intercept_keys.append(f"template:{template_id}")
             intercept_keys.append(template_id)
-        intercept_keys.extend(
-            [f"template:{features.product_id}", features.product_id]
-        )
+        intercept_keys.extend([f"template:{features.product_id}", features.product_id])
         raw = next(
-            (manifest.template_intercepts[key] for key in intercept_keys if key in manifest.template_intercepts),
+            (
+                manifest.template_intercepts[key]
+                for key in intercept_keys
+                if key in manifest.template_intercepts
+            ),
             0.0,
         )
         for key, weight in manifest.beta_raw.items():
@@ -271,21 +273,28 @@ class CalibratedDifficultyModel:
 
     def extrapolation_distance(self, features: ContractDifficultyFeatures) -> float:
         """How far order features sit outside the supported envelope (0 in)."""
-        values = _feature_vector(features, tuple(self.manifest.supported_ranges))
-        worst = 0.0
-        for key, (low, high) in self.manifest.supported_ranges.items():
-            value = values.get(key)
-            if not isinstance(value, (int, float)):
-                continue
-            span = max(high - low, 1e-9)
-            if value < low:
-                worst = max(worst, (low - value) / span)
-            elif value > high:
-                worst = max(worst, (value - high) / span)
-        return worst
+        return _extrapolation_distance(self.manifest, features)
 
     def out_of_envelope(self, features: ContractDifficultyFeatures) -> bool:
         return self.extrapolation_distance(features) > 0.0
+
+
+def _extrapolation_distance(
+    manifest: CalibrationManifest,
+    features: ContractDifficultyFeatures,
+) -> float:
+    values = _feature_vector(features, tuple(manifest.supported_ranges))
+    worst = 0.0
+    for key, (low, high) in manifest.supported_ranges.items():
+        value = values.get(key)
+        if not isinstance(value, (int, float)):
+            continue
+        span = max(high - low, 1e-9)
+        if value < low:
+            worst = max(worst, (low - value) / span)
+        elif value > high:
+            worst = max(worst, (value - high) / span)
+    return worst
 
 
 def contract_uncertainty(
@@ -302,7 +311,7 @@ def contract_uncertainty(
     if manifest is None or features is None:
         return 1.5
     base = 0.5
-    distance = CalibratedDifficultyModel(manifest).extrapolation_distance(features)
+    distance = _extrapolation_distance(manifest, features)
     growth = (
         math.exp(max(distance - extrapolation_limit, 0.0))
         if (distance > extrapolation_limit)

@@ -135,10 +135,13 @@ class PythonParser:
         # Remove any leading/trailing whitespace while preserving internal indentation
         lines = chunk.splitlines()
         # Remove empty lines at start and end
-        while lines and not lines[0].strip():
-            lines.pop(0)
-        while lines and not lines[-1].strip():
-            lines.pop()
+        start = 0
+        end = len(lines)
+        while start < end and not lines[start].strip():
+            start += 1
+        while end > start and not lines[end - 1].strip():
+            end -= 1
+        lines = lines[start:end]
         return "\n".join(lines) if lines else ""
 
     @staticmethod

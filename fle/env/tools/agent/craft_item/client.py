@@ -10,6 +10,24 @@ class CraftItem(Tool):
         super().__init__(connection, game_state)
         self.inspect_inventory = InspectInventory(connection, game_state)
 
+    def _action_expression(self, name: str, *args) -> str:
+        parameters = ", ".join(str(arg) for arg in args)
+        if self.lua_script_manager.runtime_bundled:
+            suffix = f", {parameters}" if parameters else ""
+            return f"remote.call('fle_runtime', 'dispatch', '{name}'{suffix})"
+        return f"storage.actions.{name}({parameters})"
+
+    def _crafting_status(self, name: str):
+        raw = self.connection.rcon_client.send_command(
+            "/sc rcon.print("
+            + self._action_expression(
+                "get_crafting_status", self.player_index, f'"{name}"'
+            )
+            + ")"
+        )
+        tick, count = (int(part) for part in str(raw).split(","))
+        return tick, count
+
     def __call__(self, entity: Prototype, quantity: int = 1) -> int:
         """
         Craft an item from a Prototype if the ingredients exist in your inventory.
@@ -18,6 +36,8 @@ class CraftItem(Tool):
         :return: Number of items crafted
         """
 
+        if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0:
+            raise ValueError("quantity must be a positive integer")
         if hasattr(entity, "value"):
             name, _ = entity.value
         else:
@@ -50,14 +70,15 @@ class CraftItem(Tool):
             sleep(real_world_sleep)
 
         if not self.game_state.instance.fast:
-            sleep(0.5)
-            attempt = 0
-            max_attempts = 10
-            while (
-                self.inspect_inventory()[entity] - count_in_inventory < quantity
-                and attempt < max_attempts
-            ):
-                sleep(0.5)
-                attempt += 1
+            # Compatibility action: wait for the native crafting queue rather
+            # than pretending recipe duration elapsed. New programs should use
+            # queue_craft so crafting can overlap movement and other options.
+            now, count = self._crafting_status(name)
+            timeout_tick = now + 60 * 60 * 10
+            while count - count_in_inventory < success:
+                if now >= timeout_tick:
+                    raise TimeoutError(f"Timed out crafting {quantity}x {name}")
+                sleep(0.1)
+                now, count = self._crafting_status(name)
 
         return success

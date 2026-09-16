@@ -66,10 +66,28 @@ def test_execute_request_id_replays_exact_result_without_mutating(task_spec):
         )
 
 
+def test_execute_replay_preserves_non_json_types(task_spec):
+    class TupleWorker(FakeWorker):
+        def execute(self, lease_id, code, sequence, template=None):
+            result = super().execute(lease_id, code, sequence, template=template)
+            result.status_changes["marker"] = (1, 2)
+            return result
+
+    service = EnvironmentService([TupleWorker()])
+    lease = service.lease(task_spec)
+
+    first = service.execute(lease.lease_id, "go()", request_id="tuple-1")
+    replay = service.execute(lease.lease_id, "go()", request_id="tuple-1")
+
+    assert isinstance(first.status_changes["marker"], tuple)
+    assert replay == first
+    assert isinstance(replay.status_changes["marker"], tuple)
+
+
 def test_terminal_execute_can_be_replayed_by_request_id(task_spec):
     class TerminalWorker(FakeWorker):
-        def execute(self, lease_id, code, sequence):
-            result = super().execute(lease_id, code, sequence)
+        def execute(self, lease_id, code, sequence, template=None):
+            result = super().execute(lease_id, code, sequence, template=template)
             result.terminal_reason = "contract_fulfilled"
             return result
 
@@ -115,8 +133,8 @@ def test_adaptive_contract_tracks_interventions_without_a_hard_limit():
 
 def test_engine_error_retry_does_not_consume_scored_intervention_budget(task_spec):
     class ErrorWorker(FakeWorker):
-        def execute(self, lease_id, code, sequence):
-            result = super().execute(lease_id, code, sequence)
+        def execute(self, lease_id, code, sequence, template=None):
+            result = super().execute(lease_id, code, sequence, template=template)
             result.event.error = code == "bad()"
             return result
 
@@ -137,8 +155,8 @@ def test_engine_error_retry_does_not_consume_scored_intervention_budget(task_spe
 
 def test_terminal_environment_state_blocks_more_actions_but_can_finalize(task_spec):
     class TerminalWorker(FakeWorker):
-        def execute(self, lease_id, code, sequence):
-            result = super().execute(lease_id, code, sequence)
+        def execute(self, lease_id, code, sequence, template=None):
+            result = super().execute(lease_id, code, sequence, template=template)
             result.terminal_reason = "character_died"
             return result
 

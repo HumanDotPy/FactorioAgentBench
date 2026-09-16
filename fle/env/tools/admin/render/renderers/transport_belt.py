@@ -78,7 +78,7 @@ def render(entity: Dict, grid, image_resolver: Callable) -> Optional[Image.Image
         return None
 
     # Rotate image based on direction
-    rotation = (direction * 45) - degree_offset
+    rotation = (direction * 22.5) - degree_offset
     if rotation != 0:
         image = image.rotate(-rotation, expand=True)
 
@@ -166,7 +166,7 @@ def render_inventory(
             belt_type = "horizontal"
 
     # Calculate final rotation
-    rotation = (direction * 45) - degree_offset
+    rotation = (direction * 22.5) - degree_offset
 
     # Create overlay (64x64 to match sprite size)
     overlay = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
@@ -393,7 +393,7 @@ def render_inventory2(
             degree_offset = -90
 
     # Calculate the rotation that will be applied to match the belt sprite
-    rotation = (direction * 45) - degree_offset
+    rotation = (direction * 22.5) - degree_offset
 
     # Belt items are roughly 16x16 pixels
     item_size = 16
@@ -614,7 +614,7 @@ def render_inventory2(
 #             degree_offset = -90
 #
 #     # Calculate the rotation that will be applied to match the belt sprite
-#     rotation = (direction * 45) - degree_offset
+#     rotation = (direction * 22.5) - degree_offset
 #
 #     # Belt items are roughly 16x16 pixels (smaller to fit on belt)
 #     item_size = 16

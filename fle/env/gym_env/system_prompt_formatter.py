@@ -8,8 +8,11 @@ class SystemPromptFormatter:
     def format(self, task, instructions=None):
         parts = []
         if self.include_task and task:
-            # Try to get a string description
-            desc = getattr(task, "goal_description", str(task))
+            desc = (
+                getattr(task, "goal", None)
+                or getattr(task, "goal_description", None)
+                or str(task)
+            )
             parts.append(f"## Task\n{desc}")
         if self.include_instructions and instructions:
             parts.append(f"## Instructions\n{instructions}")

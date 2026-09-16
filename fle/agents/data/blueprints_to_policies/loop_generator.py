@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from typing import List, Dict, Tuple, Set
 import json
 from fle.env.game_types import prototype_by_name
+from fle.agents.data.blueprints_to_policies.direction_semantics import (
+    agent_direction,
+)
 
 
 @dataclass
@@ -40,9 +43,10 @@ class BlueprintAnalyzer:
         self.offset_x = abs(self.min_x) if self.min_x < 0 else -abs(self.min_x)
         self.offset_y = abs(self.min_y) if self.min_y < 0 else -abs(self.min_y)
 
-    def _direction_to_enum(self, direction: int) -> str:
+    def _direction_to_enum(self, direction: int, name: str = None) -> str:
         """Convert numeric direction to Direction enum name."""
-        direction_map = {0: "UP", 2: "RIGHT", 4: "DOWN", 6: "LEFT"}
+        direction = agent_direction(name, direction)
+        direction_map = {0: "UP", 4: "RIGHT", 8: "DOWN", 12: "LEFT"}
         return "Direction." + direction_map.get(direction, "UP")
 
     def _name_to_prototype_string(self, name: str) -> str:
@@ -305,7 +309,7 @@ class BlueprintAnalyzer:
                 code_lines.append(
                     f"    game.place_entity({self._name_to_prototype_string(pattern['type'])}, "
                     f"position=Position(x=world_x, y=world_y), "
-                    f"direction={self._direction_to_enum(pattern['orientation'] if 'orientation' in pattern else 0)})"
+                    f"direction={self._direction_to_enum(pattern['orientation'] if 'orientation' in pattern else 0, pattern['type'])})"
                 )
             elif pattern["direction"] == "vertical":
                 world_x = self._grid_to_world_coords(pattern["x"], 0)[0]
@@ -322,7 +326,7 @@ class BlueprintAnalyzer:
                 code_lines.append(
                     f"    game.place_entity({self._name_to_prototype_string(pattern['type'])}, "
                     f"position=Position(x=world_x, y=world_y), "
-                    f"direction={self._direction_to_enum(pattern['orientation'] if 'orientation' in pattern else 0)})"
+                    f"direction={self._direction_to_enum(pattern['orientation'] if 'orientation' in pattern else 0, pattern['type'])})"
                 )
             else:  # single placement
                 entity = self.entities_by_id[pattern["entities"][0]]
@@ -333,19 +337,20 @@ class BlueprintAnalyzer:
                 code_lines.append(
                     f"game.place_entity({self._name_to_prototype_string(pattern['type'])}, "
                     f"position=Position(x=origin.x+{entity.position['x']}, y=origin.y+{entity.position['y']}), "
-                    f"direction={self._direction_to_enum(entity.direction)})"
+                    f"direction={self._direction_to_enum(entity.direction, entity.name)})"
                 )
             code_lines.append("")
 
         return "\n".join(code_lines)
 
 
-# get execution dir dynamically
-execution_dir = os.path.dirname(os.path.realpath(__file__)) + "/blueprints/mining/"
-filename = "1a. Mining"
+if __name__ == "__main__":
+    # get execution dir dynamically
+    execution_dir = os.path.dirname(os.path.realpath(__file__)) + "/blueprints/mining/"
+    filename = "1a. Mining"
 
-with open(execution_dir + filename + ".json", "r") as f:
-    blueprint_json = f.read()
-    analyzer = BlueprintAnalyzer(blueprint_json)
-    code = analyzer.generate_placement_code()
-    print(code)
+    with open(execution_dir + filename + ".json", "r") as f:
+        blueprint_json = f.read()
+        analyzer = BlueprintAnalyzer(blueprint_json)
+        code = analyzer.generate_placement_code()
+        print(code)

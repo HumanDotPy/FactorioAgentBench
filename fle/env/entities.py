@@ -149,15 +149,17 @@ class EntityStatus(Enum):
     NO_SPOT_SEEDABLE_BY_INPUTS = "no_spot_seedable_by_inputs"
     WAITING_FOR_PLANTS_TO_GROW = "waiting_for_plants_to_grow"
 
+    # Public observations use this sentinel when Factorio exposes no mapped state.
+    UNKNOWN = "unknown"
+
     def __repr__(self):
         return f"EntityStatus.{self.name}"
 
     @classmethod
     def from_string(cls, status_string):
-        for status in cls:
-            if status.value == status_string:
-                return status
-        return None
+        if not isinstance(status_string, str):
+            return None
+        return cls._value2member_map_.get(status_string.strip().strip('"'))
 
     @classmethod
     def from_int(cls, status_int):
@@ -303,7 +305,7 @@ class Position(BaseModel):
         return values
 
     def __hash__(self):
-        return hash(f"{self.x},{self.y}")
+        return hash((self.x, self.y))
 
     def __add__(self, other) -> "Position":
         return Position(x=self.x + other.x, y=self.y + other.y)
@@ -359,7 +361,7 @@ class Position(BaseModel):
     def __eq__(self, other) -> bool:
         if not isinstance(other, Position):
             return NotImplemented
-        return self.is_close(other, tolerance=1)
+        return self.is_close(other, tolerance=1e-6)
 
 
 class IndexedPosition(Position):

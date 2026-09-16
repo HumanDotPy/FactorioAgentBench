@@ -20,7 +20,7 @@ from fle.env.game_types import Prototype, RecipeName
 
 @pytest.fixture()
 def game(configure_game):
-    return configure_game(
+    game = configure_game(
         inventory={
             "assembling-machine-2": 10,
             "assembling-machine-3": 5,
@@ -41,6 +41,8 @@ def game(configure_game):
         },
         reset_position=True,
     )
+    game.instance.set_speed(100)
+    return game
 
 
 def setup_power(game, target_entity):
@@ -120,7 +122,9 @@ def test_speed_module_increases_production_rate(game):
 
     # Set same recipe for both
     assembler_base = game.set_entity_recipe(assembler_base, RecipeName.IronGearWheel)
-    assembler_modded = game.set_entity_recipe(assembler_modded, RecipeName.IronGearWheel)
+    assembler_modded = game.set_entity_recipe(
+        assembler_modded, RecipeName.IronGearWheel
+    )
 
     # Add speed modules to modded assembler (2 slots for AM2)
     game.insert_item(Prototype.SpeedModule, assembler_modded, 1)

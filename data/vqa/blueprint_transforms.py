@@ -1,7 +1,7 @@
 """Blueprint transformation utilities for data augmentation using flips instead of rotations."""
 
 import copy
-from typing import Dict, Any, List, Tuple, Set, Optional
+from typing import Dict, Any, List, Tuple, Optional
 from enum import Enum
 
 
@@ -23,9 +23,12 @@ class DirectionSystem(Enum):
 
 def detect_direction_system(blueprint: Dict[str, Any]) -> DirectionSystem:
     """
-    Detect which direction system a blueprint uses by analyzing entity directions.
+    Detect which direction system a blueprint uses.
 
-    The old system uses values 0-7, while the new system uses 0-15.
+    Factorio 1.1 blueprints encode directions 0-7 (cardinals at 0/2/4/6), while
+    2.0 blueprints encode 0-15 (cardinals at 0/4/8/12). Values alone cannot
+    distinguish a blueprint whose only directions are 0 and 4, so the embedded
+    blueprint version is authoritative and 2.0 is the default for this pipeline.
 
     Args:
         blueprint: Blueprint dictionary
@@ -33,22 +36,11 @@ def detect_direction_system(blueprint: Dict[str, Any]) -> DirectionSystem:
     Returns:
         DirectionSystem enum indicating which system is in use
     """
-    if "entities" not in blueprint:
-        return DirectionSystem.OLD_SYSTEM  # Default to old system if no entities
+    version = blueprint.get("version")
+    if isinstance(version, int) and version < (2 << 48):
+        return DirectionSystem.OLD_SYSTEM
 
-    directions_found: Set[int] = set()
-
-    for entity in blueprint["entities"]:
-        if "direction" in entity and entity["direction"] is not None:
-            direction = int(entity["direction"])
-            directions_found.add(direction)
-
-    # If any direction >= 8, it's definitely the new system
-    if any(d >= 8 for d in directions_found):
-        return DirectionSystem.NEW_SYSTEM
-
-    # If all directions are 0-7, assume old system
-    return DirectionSystem.OLD_SYSTEM
+    return DirectionSystem.NEW_SYSTEM
 
 
 def flip_direction_old_system(direction: int, flip_type: FlipType) -> int:
@@ -440,20 +432,6 @@ def flip_blueprint(
         flipped_blueprint["metadata"] = {}
     flipped_blueprint["metadata"]["flip_type"] = flip_type.value
     flipped_blueprint["metadata"]["direction_system"] = direction_system.value
-
-    if direction_system == DirectionSystem.NEW_SYSTEM:
-        n_entities = []
-        for entity in flipped_entities:
-            if entity["direction"] == 12:
-                entity["direction"] = 6
-            elif entity["direction"] == 8:
-                entity["direction"] = 4
-            elif entity["direction"] == 4:
-                entity["direction"] = 2
-            else:
-                entity["direction"] = 0
-            n_entities.append(entity)
-        flipped_blueprint["entities"] = n_entities
 
     return flipped_blueprint
 

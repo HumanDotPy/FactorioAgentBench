@@ -58,6 +58,7 @@ class Renderer:
             self.config, self.color_manager, self.categorizer, self.shape_renderer
         )
         self.image_calculator = ImageCalculator(self.config)
+        self._font_cache: Dict[int, ImageFont.ImageFont] = {}
 
         # Initialize layer renderers
         self.layer_renderers = {
@@ -281,33 +282,30 @@ class Renderer:
             natural_elements_present,
             statuses_present,
             network_colors,
+            dimensions=legend_dimensions,
         )
 
         return img
 
     def _load_font(self) -> ImageFont.ImageFont:
         """Load a font for text rendering with fallbacks"""
-        try:
-            font = ImageFont.truetype("arial.ttf", size=10)
-        except IOError:
-            try:
-                # Try another common font on different systems
-                font = ImageFont.truetype("DejaVuSans.ttf", size=10)
-            except IOError:
-                # Fallback to default font
-                font = ImageFont.load_default()
-        return font
+        return self._load_cached_font(10)
 
     def _load_legend_font(self) -> ImageFont.ImageFont:
         """Load a font specifically for the legend with a consistent size"""
-        legend_font_size = self.config.style.get("legend_font_size", 10)
+        return self._load_cached_font(self.config.style.get("legend_font_size", 10))
+
+    def _load_cached_font(self, size: int) -> ImageFont.ImageFont:
+        if size in self._font_cache:
+            return self._font_cache[size]
         try:
-            font = ImageFont.truetype("arial.ttf", size=legend_font_size)
+            font = ImageFont.truetype("arial.ttf", size=size)
         except IOError:
             try:
                 # Try another common font on different systems
-                font = ImageFont.truetype("DejaVuSans.ttf", size=legend_font_size)
+                font = ImageFont.truetype("DejaVuSans.ttf", size=size)
             except IOError:
                 # Fallback to default font
                 font = ImageFont.load_default()
+        self._font_cache[size] = font
         return font

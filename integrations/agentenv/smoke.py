@@ -26,9 +26,9 @@ async def run(base_url: str) -> None:
                 raise RuntimeError(f"AgentENV fork was incomplete: {forked}")
             lease_ids.extend(branch.lease_id for branch in forked.branches)
 
-            branch_observations = [
-                await client.observe(branch.lease_id) for branch in forked.branches
-            ]
+            branch_observations = await asyncio.gather(
+                *(client.observe(branch.lease_id) for branch in forked.branches)
+            )
             hashes = {
                 source_observation.state_hash,
                 *(observation.state_hash for observation in branch_observations),

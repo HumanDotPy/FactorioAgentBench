@@ -5,10 +5,6 @@ from fle.env.game_types import Prototype, RecipeName
 from fle.env.utils.controller_loader.type_definition_processor import (
     TypeDefinitionProcessor,
 )
-from fle.envd.action_reference import (
-    ACTION_PROFILE_REFERENCE_ID,
-    ACTION_PROFILE_REFERENCE_SHA256,
-)
 from fle.envd.models import (
     ConstraintSpec,
     CurriculumSpec,
@@ -174,17 +170,19 @@ def test_rendered_prompt_includes_public_action_and_lookup_reference():
     prompt = render_task_prompt(automation_research_milestone_task())
 
     assert "get_prototype_recipe" in prompt
-    assert "get_entity(Prototype.X, position: Position)" in prompt
+    assert "get_entity(Prototype.X, position)" in prompt
     assert "nearest(Prototype.X or Resource.X) -> Position" in prompt
-    assert "set_entity_recipe(entity: Entity, RecipeName.X)" in prompt
-    assert "Technology.Automation" in prompt
+    assert "set_entity_recipe(entity, RecipeName.X)" in prompt
+    assert "set_research(Technology.X)" in prompt
     assert "Do not import FLE or use reflection" in prompt
-    assert "nearest_buildable" not in prompt
-    assert "Call move_to(target)" in prompt
-    assert "do not build production chains" in prompt
-    assert "Prototype.Lab" in prompt
-    assert "fill-lubricant-barrel" in prompt
-    assert "petroleum-gas" in prompt
+    assert "nearest_buildable" in prompt
+    assert "are rejected here" in prompt
+    assert "do not build production chains" not in prompt
+    assert "place_path(prototype, points" in prompt
+    assert "route around obstacles" in prompt
+    assert "set_delivery_chest" in prompt
+    assert "queue_craft" in prompt
+    assert "production_rate" in prompt
 
 
 def test_recipe_name_is_a_distinct_canonical_recipe_namespace():
@@ -193,11 +191,6 @@ def test_recipe_name_is_a_distinct_canonical_recipe_namespace():
     assert RecipeName.PlasticBar is not Prototype.PlasticBar
     assert isinstance(RecipeName.AutomationSciencePack, RecipeName)
     assert RecipeName.BasicOilProcessing.value == "basic-oil-processing"
-
-
-def test_action_reference_has_a_stable_comparison_identity():
-    assert ACTION_PROFILE_REFERENCE_ID == "fle-program-v1/reference-v5"
-    assert len(ACTION_PROFILE_REFERENCE_SHA256) == 64
 
 
 def test_full_prompt_types_render_concrete_canonical_recipe_members():

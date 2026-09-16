@@ -50,6 +50,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PYTHON = str(REPO_ROOT / ".venv" / "Scripts" / "python.exe")
 MCP_SERVER = str(REPO_ROOT / "scripts" / "factorio_codex_mcp.py")
 CODEX = r"C:\Users\WillR\AppData\Roaming\npm\codex.cmd"
+IN_FACTORY_PROGRAM_TOOLS = (
+    "inspect_inventory, get_entities, nearest, move_to, harvest_resource, "
+    "craft_item, place_entity, place_path, rotate_entities, belt_line_report, "
+    "insert_item, insert_between, refuel, extract_item, extract_area, "
+    "catch_output, can_place_entity, plan_placement, plan_path, "
+    "set_entity_recipe, and blueprint('save'|'place'|'list'|'get')"
+)
 
 
 def _write_codex_home(
@@ -70,8 +77,8 @@ requires_openai_auth = false
 wire_api = "responses"
 
 [mcp_servers.factorio]
-command = "{PYTHON.replace(chr(92), '/')}"
-args = ["{MCP_SERVER.replace(chr(92), '/')}"]
+command = "{PYTHON.replace(chr(92), "/")}"
+args = ["{MCP_SERVER.replace(chr(92), "/")}"]
 env = {{ ENVD_URL = "{envd_url}", LEASE_ID = "{lease_id}" }}
 '''
     codex_home.mkdir(parents=True, exist_ok=True)
@@ -123,14 +130,12 @@ async def run_attempt(
     args: argparse.Namespace,
 ) -> tuple[BenchmarkAttempt, dict]:
     spec = _task_spec(task_id)
-    started_at = datetime.now(timezone.utc)
     async with HTTPEnvironmentClient(args.envd_url) as env_client:
         lease = await env_client.lease(spec)
         lease_id = lease.lease_id
         try:
             codex_home = Path(tempfile.mkdtemp(prefix="codex-home-"))
             _write_codex_home(codex_home, model, args.envd_url, lease_id)
-            goal_line = spec.goal.splitlines()[0] if spec.goal else task_id
             prompt = (
                 f"Objective: {spec.goal}\n\n"
                 "You control a real Factorio factory exclusively through two "
@@ -140,9 +145,8 @@ async def run_attempt(
                 "`factorio__factorio_observe_factory` first. Then intervene "
                 "with short Python programs passed as the `code` argument of "
                 "`factorio__factorio_execute_program`; available in-factory "
-                "names include inspect_inventory, get_entities, nearest, "
-                "move_to, harvest_resource, craft_item, place_entity, "
-                "insert_item, extract_item, set_entity_recipe. Prefer the "
+                f"names include {IN_FACTORY_PROGRAM_TOOLS} for reusable factory "
+                "fragments. Prefer the "
                 "supplied inventory over gathering. When the objective is "
                 "met, or no useful action remains, stop calling tools."
             )
@@ -236,9 +240,7 @@ async def run_attempt(
         "contracts_fulfilled": float(
             snapshot.metrics.get("customer_orders_fulfilled", 0.0)
         ),
-        "contracts_total": float(
-            snapshot.metrics.get("customer_orders_total", 0.0)
-        ),
+        "contracts_total": float(snapshot.metrics.get("customer_orders_total", 0.0)),
         "final_inventory": dict(snapshot.privileged_diagnostics.inventory)
         if snapshot.privileged_diagnostics is not None
         else {},
@@ -272,9 +274,7 @@ async def main_async(args: argparse.Namespace) -> None:
         for task_id in task_ids:
             for attempt_index in range(args.attempts):
                 print(f"[codex-bench] {model} :: {task_id} :: attempt {attempt_index}")
-                attempt, detail = await run_attempt(
-                    model, task_id, attempt_index, args
-                )
+                attempt, detail = await run_attempt(model, task_id, attempt_index, args)
                 attempts.append(attempt)
                 details.append(detail)
                 print(
@@ -289,7 +289,8 @@ async def main_async(args: argparse.Namespace) -> None:
             suite="api_microtasks_v1",
             benchmark_split="development",
             started_at=started_at,
-            completed_at=started_at + timedelta(seconds=int(time.time()) - int(started_at.timestamp())),
+            completed_at=started_at
+            + timedelta(seconds=int(time.time()) - int(started_at.timestamp())),
             repository_commit="unknown",
             generation_config={
                 "harness": "codex-cli",
@@ -313,7 +314,9 @@ async def main_async(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--models", required=True, help="comma-separated OpenRouter slugs")
+    parser.add_argument(
+        "--models", required=True, help="comma-separated OpenRouter slugs"
+    )
     parser.add_argument("--task-id", action="append", default=[], dest="task_id")
     parser.add_argument("--attempts", type=int, default=1)
     parser.add_argument("--envd-url", default="http://127.0.0.1:8172")

@@ -119,17 +119,20 @@ class DBClient(ABC):
 
                     results = cur.fetchall()
                     if not results:
-                        logger.warning(f"No programs found for version {version}")
+                        logger.warning("No programs found for version %s", version)
                         return []
 
                     programs = [Program.from_row(dict(row)) for row in results]
                     depths = [p.depth for p in programs]
                     logger.info(
-                        f"Found {len(programs)} beam heads for version {version} - {depths}"
+                        "Found %s beam heads for version %s - %s",
+                        len(programs),
+                        version,
+                        depths,
                     )
                     return programs
         except Exception as e:
-            logger.error(f"Error fetching beam heads: {e}", exc_info=True)
+            logger.error("Error fetching beam heads: %s", e, exc_info=True)
             return []
 
     async def version_exists(self, version: int) -> bool:
@@ -176,6 +179,7 @@ class DBClient(ABC):
     )
     async def create_program(self, program: Program) -> Program:
         """Create a new program, now with connection management"""
+        conn = None
         try:
             with self.get_connection() as conn:
                 with conn.cursor() as cur:
@@ -222,7 +226,14 @@ class DBClient(ABC):
                     program.created_at = created_at
                     return program
         except Exception as e:
-            conn.rollback()
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except Exception as rollback_error:
+                    logger.error(
+                        "Error rolling back PostgreSQL transaction: %s",
+                        rollback_error,
+                    )
             print(f"Error creating program: {e}")
             raise e
 
@@ -234,7 +245,7 @@ class DBClient(ABC):
                     try:
                         self._pool.closeall()
                     except Exception as e:
-                        logger.error(f"Error closing connection pool: {e}")
+                        logger.error("Error closing connection pool: %s", e)
                     finally:
                         self._pool = None
 
@@ -569,6 +580,9 @@ class SQLliteDBClient(DBClient):
             max_conversation_length, min_connections, max_connections, **db_config
         )
         self.database_file = self.db_config.get("database_file")
+        self._local = threading.local()
+        self._connections = set()
+        self._connections_lock = threading.Lock()
 
     async def initialize(self):
         """Initialize the connection pool"""
@@ -579,16 +593,72 @@ class SQLliteDBClient(DBClient):
                         self.min_connections, self.max_connections, **self.db_config
                     )
 
+    def _connection_signature(self):
+        try:
+            stat = os.stat(self.database_file)
+        except OSError:
+            return None
+        return (stat.st_dev, stat.st_ino)
+
+    def _close_connection(self, conn) -> None:
+        with self._connections_lock:
+            self._connections.discard(conn)
+        try:
+            conn.close()
+        except Exception as e:
+            logger.error("Error closing SQLite connection: %s", e)
+
+    def _local_connection(self):
+        signature = self._connection_signature()
+        conn = getattr(self._local, "connection", None)
+        if (
+            conn is not None
+            and getattr(self._local, "database_file", None) == self.database_file
+            and getattr(self._local, "signature", None) == signature
+        ):
+            return conn
+        if conn is not None:
+            self._close_connection(conn)
+            self._local.connection = None
+        conn = sqlite3.connect(self.database_file)
+        conn.execute("PRAGMA journal_mode=WAL")
+        with self._connections_lock:
+            self._connections.add(conn)
+        self._local.connection = conn
+        self._local.database_file = self.database_file
+        self._local.signature = signature
+        return conn
+
+    async def cleanup(self):
+        """Clean up database resources"""
+        conn = getattr(self._local, "connection", None)
+        if conn is not None:
+            self._close_connection(conn)
+            self._local.connection = None
+        with self._connections_lock:
+            connections = list(self._connections)
+            self._connections.clear()
+        for connection in connections:
+            try:
+                connection.close()
+            except Exception as e:
+                logger.error("Error closing SQLite connection: %s", e)
+        await super().cleanup()
+
     @contextmanager
     def get_connection(self):
         """Context manager for SQLite database connections"""
-        conn = None
+        conn = self._local_connection()
         try:
-            conn = sqlite3.connect(self.database_file)
             yield conn
-        finally:
-            if conn:
-                conn.close()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception as rollback_error:
+                logger.error(
+                    "Error rolling back SQLite transaction: %s", rollback_error
+                )
+            raise
 
     @tenacity.retry(
         retry=retry_if_exception_type(get_sqlite_exceptions()),
@@ -665,6 +735,7 @@ class SQLliteDBClient(DBClient):
     )
     async def create_program(self, program: Program) -> Program:
         """Create a new program, now with connection management"""
+        conn = None
         try:
             with self.get_connection() as conn:
                 cur = conn.cursor()
@@ -718,7 +789,13 @@ class SQLliteDBClient(DBClient):
                 # Return the updated program object
                 return program
         except Exception as e:
-            conn.rollback()
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except Exception as rollback_error:
+                    logger.error(
+                        "Error rolling back SQLite transaction: %s", rollback_error
+                    )
             print(f"Error creating program: {e}")
             raise e
 
@@ -741,6 +818,9 @@ class SQLliteDBClient(DBClient):
             return []
 
 
+_initialized_sqlite_lock = threading.Lock()
+
+
 def create_default_sqlite_db(db_file: str) -> None:
     """Create SQLite database with required schema if it doesn't exist"""
     db_path = Path(db_file)
@@ -748,52 +828,55 @@ def create_default_sqlite_db(db_file: str) -> None:
     # Create directory if it doesn't exist
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Create database and table if they don't exist
-    conn = sqlite3.connect(db_file)
-    try:
-        cursor = conn.cursor()
+    with _initialized_sqlite_lock:
+        conn = sqlite3.connect(db_file)
+        try:
+            cursor = conn.cursor()
 
-        # Check if programs table exists
-        cursor.execute("""
-            SELECT name FROM sqlite_master 
-            WHERE type='table' AND name='programs'
-        """)
-
-        if not cursor.fetchone():
-            print(f"Creating SQLite database schema in {db_file}")
+            # Check if programs table exists
             cursor.execute("""
-                CREATE TABLE programs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    code TEXT NOT NULL,
-                    value REAL DEFAULT 0.0,
-                    visits INTEGER DEFAULT 0,
-                    parent_id INTEGER,
-                    state_json TEXT,
-                    conversation_json TEXT NOT NULL,
-                    completion_token_usage INTEGER,
-                    prompt_token_usage INTEGER,
-                    token_usage INTEGER,
-                    response TEXT,
-                    holdout_value REAL,
-                    raw_reward REAL,
-                    version INTEGER DEFAULT 1,
-                    version_description TEXT DEFAULT '',
-                    model TEXT DEFAULT 'gpt-4o',
-                    meta TEXT,
-                    achievements_json TEXT,
-                    instance INTEGER DEFAULT -1,
-                    depth REAL DEFAULT 0.0,
-                    advantage REAL DEFAULT 0.0,
-                    ticks INTEGER DEFAULT 0,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    timing_metrics_json TEXT
-                )
+                SELECT name FROM sqlite_master
+                WHERE type='table' AND name='programs'
             """)
-            conn.commit()
-            print("SQLite database schema created successfully!")
 
-    finally:
-        conn.close()
+            if not cursor.fetchone():
+                print(f"Creating SQLite database schema in {db_file}")
+                cursor.execute("""
+                    CREATE TABLE programs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        code TEXT NOT NULL,
+                        value REAL DEFAULT 0.0,
+                        visits INTEGER DEFAULT 0,
+                        parent_id INTEGER,
+                        state_json TEXT,
+                        conversation_json TEXT NOT NULL,
+                        completion_token_usage INTEGER,
+                        prompt_token_usage INTEGER,
+                        token_usage INTEGER,
+                        response TEXT,
+                        holdout_value REAL,
+                        raw_reward REAL,
+                        version INTEGER DEFAULT 1,
+                        version_description TEXT DEFAULT '',
+                        model TEXT DEFAULT 'gpt-4o',
+                        meta TEXT,
+                        achievements_json TEXT,
+                        instance INTEGER DEFAULT -1,
+                        depth REAL DEFAULT 0.0,
+                        advantage REAL DEFAULT 0.0,
+                        ticks INTEGER DEFAULT 0,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        timing_metrics_json TEXT
+                    )
+                """)
+                conn.commit()
+                print("SQLite database schema created successfully!")
+
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.commit()
+
+        finally:
+            conn.close()
 
 
 def create_default_postgres_db(**db_config) -> None:

@@ -56,7 +56,13 @@ end
 
 -- Timestamped provenance used by the privileged rolling-rate detector.
 -- It is intentionally separate from the cumulative achievement ledgers.
-storage.manual_production_events = {}
+if not storage.manual_production_events then
+    storage.manual_production_events = {}
+end
+
+if not storage.entity_handles then
+    storage.entity_handles = {}
+end
 
 if not storage.walking_queues then
     storage.walking_queues = {}
@@ -79,7 +85,15 @@ storage.utils.get_contents_compat = function(inventory)
     if not inventory then return {} end
     local contents = {}
     for _, item in pairs(inventory.get_contents()) do
-        contents[item.name] = (contents[item.name] or 0) + item.count
+        local quality = item.quality
+        if type(quality) ~= "string" and quality then
+            quality = quality.name
+        end
+        local key = item.name
+        if quality and quality ~= "normal" then
+            key = key .. "@" .. quality
+        end
+        contents[key] = (contents[key] or 0) + item.count
     end
     return contents
 end

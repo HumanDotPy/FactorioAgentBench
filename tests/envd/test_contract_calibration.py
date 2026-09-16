@@ -89,8 +89,7 @@ def _synthetic_records(
 # ---------------------------------------------------------------------------
 
 
-def test_grouped_split_never_splits_a_group():
-    records = _synthetic_records(seed=3)
+def test_grouped_split_never_splits_a_group(records):
     train, test = grouped_split(records, holdout_fraction=0.25)
     assert train and test
     train_groups = {(r.factory_seed, r.participant_id) for r in train}
@@ -98,9 +97,9 @@ def test_grouped_split_never_splits_a_group():
     assert not (train_groups & test_groups), "group leaked across the split"
 
 
-def test_fit_requires_minimum_records():
+def test_fit_requires_minimum_records(records):
     with pytest.raises(ValueError):
-        fit_contextual_model(_synthetic_records()[:4])
+        fit_contextual_model(records[:4])
 
 
 # ---------------------------------------------------------------------------
@@ -109,8 +108,12 @@ def test_fit_requires_minimum_records():
 
 
 @pytest.fixture(scope="module")
-def fitted():
-    records = _synthetic_records()
+def records():
+    return _synthetic_records()
+
+
+@pytest.fixture(scope="module")
+def fitted(records):
     train, _test = grouped_split(records, holdout_fraction=0.2)
     outcome = fit_contextual_model(train)
     return outcome
@@ -159,12 +162,12 @@ def test_controlled_monotonicity_gates_pass(fitted):
 # ---------------------------------------------------------------------------
 
 
-def test_manifest_contains_frozen_policy(fitted):
+def test_manifest_contains_frozen_policy(fitted, records):
     manifest = build_manifest(
         fit=fitted,
         benchmark_version="bv-test",
         game_versions=("2.0.73",),
-        training_records=_synthetic_records(),
+        training_records=records,
         implementation_commit="deadbeef",
     )
     assert isinstance(manifest, CalibrationManifest)
@@ -188,41 +191,40 @@ def test_feature_row_separates_raw_and_state():
     assert "supply_pressure_ratio" not in state
 
 
-def test_anchor_centering_fixes_location():
+@pytest.mark.parametrize(
+    ("case", "seed", "template_intercept"),
+    [
+        pytest.param("anchor_mean_is_zero", 5, None, id="anchor_mean_is_zero"),
+        pytest.param("margins_preserved", 7, 1.25, id="margins_preserved"),
+    ],
+)
+def test_anchor_centering_invariants(case, seed, template_intercept):
     from fle.envd.contract_calibration import DesignMatrix, _Model, _fix_identifiability
     import numpy as np
 
-    records = _synthetic_records(n_per_participant=12, seed=5)
-    design = DesignMatrix(records)
+    design = DesignMatrix(_synthetic_records(n_per_participant=12, seed=seed))
     model = _Model(design, fit_threshold=False)
     params = np.zeros(model.packed_size())
     params[: model.n_participants] = [5.0, 2.0, 8.0][: model.n_participants]
+    if template_intercept is not None:
+        params[model.n_participants : model.n_participants + model.n_templates] = (
+            template_intercept
+        )
+        before = model.margins(model.unpack(params)).copy()
     _fix_identifiability(model, params)
     view = model.unpack(params)
-    anchor_mean = float(
-        np.mean(
-            [
-                view["abilities"][design.participant_index[p]]
-                for p in ("p_strong", "p_mid", "p_weak")
-            ]
+    if case == "anchor_mean_is_zero":
+        anchor_mean = float(
+            np.mean(
+                [
+                    view["abilities"][design.participant_index[p]]
+                    for p in ("p_strong", "p_mid", "p_weak")
+                ]
+            )
         )
-    )
-    assert anchor_mean == pytest.approx(0.0, abs=1e-9)
-
-
-def test_anchor_centering_preserves_fitted_margins():
-    from fle.envd.contract_calibration import DesignMatrix, _Model, _fix_identifiability
-    import numpy as np
-
-    design = DesignMatrix(_synthetic_records(n_per_participant=12, seed=7))
-    model = _Model(design, fit_threshold=False)
-    params = np.zeros(model.packed_size())
-    params[: model.n_participants] = [5.0, 2.0, 8.0][: model.n_participants]
-    params[model.n_participants : model.n_participants + model.n_templates] = 1.25
-    before = model.margins(model.unpack(params)).copy()
-    _fix_identifiability(model, params)
-    after = model.margins(model.unpack(params))
-    assert np.allclose(before, after)
+        assert anchor_mean == pytest.approx(0.0, abs=1e-9)
+    else:
+        assert np.allclose(before, model.margins(view))
 
 
 def test_manifest_threshold_validation():

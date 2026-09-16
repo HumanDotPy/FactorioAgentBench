@@ -14,9 +14,19 @@ Invariants tested:
 
 import pytest
 
-from fle.env import Direction, EntityStatus, Position
+from fle.env import Direction, DirectionInternal, EntityStatus, Position
 from fle.env.entities import BuildingBox, PipeGroup
 from fle.env.game_types import Prototype, Resource
+
+
+def _output_position(pump, distance: float = 2) -> Position:
+    offsets = {
+        Direction.UP.value: Position(x=0, y=-distance),
+        Direction.RIGHT.value: Position(x=distance, y=0),
+        Direction.DOWN.value: Position(x=0, y=distance),
+        Direction.LEFT.value: Position(x=-distance, y=0),
+    }
+    return pump.position + offsets[DirectionInternal.opposite(pump.direction).value]
 
 
 @pytest.fixture()
@@ -35,7 +45,6 @@ def game(instance):
     }
     instance.reset()
     yield instance.namespace
-    instance.reset()
 
 
 def test_offshore_pump_requires_water_tile(game):
@@ -51,12 +60,7 @@ def test_offshore_pump_requires_water_tile(game):
     game.move_to(water_pos)
 
     # Place offshore pump at water - should succeed
-    pump = game.place_entity(
-        Prototype.OffshorePump,
-        position=water_pos,
-        direction=Direction.DOWN,
-        exact=False,
-    )
+    pump = game.place_offshore_pump(water_pos)
 
     assert pump is not None, "Invariant: Offshore pump should be placeable near water"
 
@@ -157,12 +161,7 @@ def test_boiler_separates_water_and_steam(game):
     game.move_to(water_pos)
 
     # Place offshore pump
-    pump = game.place_entity(
-        Prototype.OffshorePump,
-        position=water_pos,
-        direction=Direction.DOWN,
-        exact=False,
-    )
+    pump = game.place_offshore_pump(water_pos)
 
     # Place boiler
     boiler_box = BuildingBox(width=5, height=5)
@@ -225,20 +224,15 @@ def test_pump_working_status_when_connected(game):
     game.move_to(water_pos)
 
     # Place offshore pump
-    pump = game.place_entity(
-        Prototype.OffshorePump,
-        position=water_pos,
-        direction=Direction.DOWN,
-        exact=False,
-    )
+    pump = game.place_offshore_pump(water_pos)
 
     # Initially NOT_CONNECTED
     assert pump.status == EntityStatus.NOT_CONNECTED, (
         f"Pump without connections should be NOT_CONNECTED, got {pump.status}"
     )
 
-    # Connect a pipe to the pump
-    pipe_pos = pump.position.down(2)
+    # Connect a pipe to the pump output
+    pipe_pos = _output_position(pump)
     game.move_to(pipe_pos)
 
     # Use connect_entities to properly connect
