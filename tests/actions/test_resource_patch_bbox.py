@@ -9,8 +9,15 @@ def server_runtime():
     return lua_stub(
         """
         storage={actions={},agent_characters={}}
-        rendering={is_valid=function() return false end,
-            destroy=function() end, draw_circle=function() end}
+        destroyed=0
+        rendering={
+            destroy=function(object)
+                assert(object.valid)
+                object.valid=false
+                destroyed=destroyed+1
+            end,
+            draw_circle=function() return {valid=true} end,
+        }
         water_tiles={
             {position={x=0,y=0}}, {position={x=1,y=0}},
         }
@@ -75,3 +82,12 @@ def test_wood_bbox_uses_tree_bounds():
         return 'ok'
     """)
     assert result == "ok"
+
+
+def test_repeated_resource_patch_reads_clean_up_valid_render_objects():
+    lua = server_runtime()
+    lua.execute("""
+        storage.actions.get_resource_patch(1,'water',0.5,0.0,5)
+        storage.actions.get_resource_patch(1,'water',0.5,0.0,5)
+        assert(destroyed == 4)
+    """)

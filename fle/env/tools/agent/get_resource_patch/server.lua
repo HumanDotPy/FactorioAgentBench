@@ -2,7 +2,7 @@ local patch_renderings = {}
 
 local function render_box(player_index, surface, box)
     for _, object in ipairs(patch_renderings[player_index] or {}) do
-        if rendering.is_valid(object) then
+        if object.valid then
             rendering.destroy(object)
         end
     end
