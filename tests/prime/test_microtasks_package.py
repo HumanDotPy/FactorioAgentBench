@@ -14,7 +14,7 @@ sys.path.insert(0, str(PACKAGE_ROOT))
 
 from factorio_microtasks import FactorioMicrotasksTaskset  # noqa: E402
 from factorio_microtasks.taskset import FactorioMicrotasksConfig  # noqa: E402
-from verifiers.v1.utils.loaders import taskset_config_type  # noqa: E402
+from verifiers.v1.loaders import taskset_config_type  # noqa: E402
 
 pytestmark = [pytest.mark.no_factorio]
 
