@@ -4,6 +4,7 @@ import pytest
 
 from fle.env.entities import Position
 from fle.env.game_types import Prototype
+from fle.env.tools.agent.get_entities.client import EntityList, GroundItem
 from fle.envd.backend import FLEWorker
 from fle.envd.models import DepotDeliveryTelemetry
 
@@ -17,6 +18,18 @@ class _StateNamespace:
         self.inventory = {"iron-plate": 10}
         self.stats = {"input": {}, "output": {}}
         self.census = {"assembling-machine-1": {"working": 1}}
+        self.stalls = {
+            "by_status": {},
+            "by_product": {},
+            "by_name": {},
+            "buffer_full": 0,
+            "detail": [],
+        }
+        self.ground_items = {}
+        self.ground_item_stacks = 0
+        self.ground_item_positions = []
+        self.missing_drop_targets = []
+        self.missing_drop_target_count = 0
         self.research = {"researched": {"automation": 1}}
 
     def inspect_inventory(self):
@@ -26,7 +39,15 @@ class _StateNamespace:
         return self.stats
 
     def _entity_census(self):
-        return {"census": self.census}
+        return {
+            "census": self.census,
+            "stalls": self.stalls,
+            "ground_items": self.ground_items,
+            "ground_item_stacks": self.ground_item_stacks,
+            "ground_item_positions": self.ground_item_positions,
+            "missing_drop_targets": self.missing_drop_targets,
+            "missing_drop_target_count": self.missing_drop_target_count,
+        }
 
     def _save_research_state(self, *, compact=False):
         assert compact is True
@@ -35,7 +56,18 @@ class _StateNamespace:
     def get_entities(self, prototype=None, **kwargs):
         assert prototype is Prototype.AssemblingMachine1
         assert kwargs == {}
-        return [_EntityRecord()]
+        return EntityList(
+            [_EntityRecord()],
+            ground_items=[
+                GroundItem(
+                    name="iron-ore",
+                    count=7,
+                    position=Position(x=1.5, y=2.5),
+                )
+            ],
+            ground_item_stacks=1,
+            ground_item_totals={"iron-ore": 7},
+        )
 
 
 class _EntityRecord:
@@ -47,6 +79,9 @@ class _EntityRecord:
             "position": Position(x=4, y=-2),
             "recipe": "transport-belt",
             "inventory": {"iron-plate": 10_000},
+            "tile_size": {"width": 3, "height": 3},
+            "snapped_center": {"x": 3.5, "y": -2.5},
+            "center_parity": {"x": 1, "y": 0},
         }
 
 
@@ -153,6 +188,74 @@ def test_observe_emits_absolute_inventory_and_revisioned_delta():
     }
 
 
+def test_observation_surfaces_stalls_and_ground_items():
+    worker, namespace = _worker()
+    namespace.stalls = {
+        "by_status": {"waiting_for_space_in_destination": 2},
+        "by_product": {"iron-ore": 2},
+        "by_name": {
+            "electric-mining-drill": {"waiting_for_space_in_destination": 2}
+        },
+        "buffer_full": 2,
+        "detail": [
+            {
+                "name": "electric-mining-drill",
+                "drop_target": None,
+                "tile_size": {"width": 3, "height": 3},
+                "center_parity": {"x": 1, "y": 1},
+            }
+        ],
+    }
+    namespace.ground_items = {"iron-ore": 7}
+    namespace.ground_item_stacks = 3
+    namespace.ground_item_positions = [
+        {"name": "iron-ore", "count": 7, "position": {"x": 1.5, "y": 2.5}}
+    ]
+    namespace.missing_drop_targets = [
+        {"name": "electric-mining-drill", "drop_position": {"x": 2, "y": 2}}
+    ]
+    namespace.missing_drop_target_count = 1
+
+    observation = worker.observe("lease-1")
+
+    assert observation.entities["stalls"]["buffer_full"] == 2
+    assert observation.entities["stalls"]["by_product"] == {"iron-ore": 2}
+    assert observation.entities["stalls"]["detail"][0]["tile_size"] == {
+        "width": 3,
+        "height": 3,
+    }
+    assert observation.entities["stalls"]["detail"][0]["center_parity"] == {
+        "x": 1,
+        "y": 1,
+    }
+    assert observation.entities["ground_items"] == {"iron-ore": 7}
+    assert observation.entities["ground_item_stacks"] == 3
+    assert observation.entities["ground_item_positions"] == [
+        {"name": "iron-ore", "count": 7, "position": {"x": 1.5, "y": 2.5}}
+    ]
+    assert observation.entities["missing_drop_targets"] == [
+        {"name": "electric-mining-drill", "drop_position": {"x": 2, "y": 2}}
+    ]
+    assert observation.entities["missing_drop_target_count"] == 1
+
+
+def test_filtered_entity_query_discloses_totals_and_truncation():
+    worker, _ = _worker()
+    worker.observe("lease-1")
+
+    result = worker.query_state(
+        "lease-1",
+        kind="entities",
+        entity_type="assembling-machine-1",
+        limit=1,
+    )
+
+    assert result["returned"] == 1
+    assert result["total"] == 1
+    assert result["truncated"] is False
+    assert result["mutation_count"] == 0
+
+
 def test_filtered_entity_query_serializes_pydantic_prototype_classes():
     worker, _ = _worker()
     worker.observe("lease-1")
@@ -172,8 +275,19 @@ def test_filtered_entity_query_serializes_pydantic_prototype_classes():
             "status": "working",
             "position": {"x": 4.0, "y": -2.0},
             "recipe": "transport-belt",
+            "tile_size": {"width": 3, "height": 3},
+            "snapped_center": {"x": 3.5, "y": -2.5},
+            "center_parity": {"x": 1, "y": 0},
         }
     ]
+    assert result["ground_items"] == [
+        {
+            "name": "iron-ore",
+            "count": 7,
+            "position": {"x": 1.5, "y": 2.5},
+        }
+    ]
+    assert result["ground_item_count"] == 1
     assert "error" not in result
 
 

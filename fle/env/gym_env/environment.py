@@ -471,11 +471,14 @@ class FactorioGymEnv(gym.Env):
             )
             terminated = task_success.success
 
-        cached_score = getattr(namespace, "_last_score", None)
-        if cached_score is not None:
-            production_score, automated_production_score = cached_score
+        if self.task:
+            production_score, automated_production_score = namespace._refresh_score()
         else:
-            production_score, automated_production_score = namespace.score()
+            cached_score = getattr(namespace, "_last_score", None)
+            if cached_score is not None:
+                production_score, automated_production_score = cached_score
+            else:
+                production_score, automated_production_score = namespace.score()
         if not automated_production_score:
             automated_production_score = 0
         # Calculate reward

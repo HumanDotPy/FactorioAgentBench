@@ -18,6 +18,32 @@ def _format_pickled_function(name: str, pickled_function: str) -> str:
         return f"\n- {name}: [Error unpickling function: {str(e)}]"
 
 
+def _produced_without_manual_harvest(flows: Dict[str, Any]):
+    """Return (item, amount, manual_only) for measured output items.
+
+    Harvested amounts are subtracted from the matching produced item to expose
+    automated production. The harvested figure can describe a different window
+    than the measured production delta, so a harvest larger than the measured
+    output must never erase it: the measured amount is kept and flagged.
+    """
+
+    harvested_by_type = {}
+    for item in flows.get("harvested", []):
+        harvested_by_type[item["type"]] = item.get("amount", 0)
+
+    produced = []
+    for item in flows.get("output", []):
+        rate = item.get("rate", 0)
+        if rate <= 0:
+            continue
+        adjusted = rate - harvested_by_type.get(item["type"], 0)
+        if adjusted > 0:
+            produced.append((item["type"], adjusted, False))
+        else:
+            produced.append((item["type"], rate, True))
+    return produced
+
+
 @dataclass
 class FormattedObservation:
     """Container for formatted observation strings"""
@@ -374,11 +400,6 @@ class BasicObservationFormatter:
 
         flow_str = "### Production Flows (for *entire* previous step)\n"
 
-        # Build harvested lookup to subtract from production
-        harvested_by_type = {}
-        for item in flows.get("harvested", []):
-            harvested_by_type[item["type"]] = item.get("amount", 0)
-
         # Format input flows
         if flows.get("input"):
             flow_str += "#### Inputs\n"
@@ -386,17 +407,13 @@ class BasicObservationFormatter:
                 if item["rate"] > 0:
                     flow_str += f"- {item['type']}: {item['rate']:.2f}\n"
 
-        # Format output flows (subtract harvested since production includes both automated and harvested)
         if flows.get("output"):
             if flows.get("input"):
                 flow_str += "\n"
             flow_str += "#### Outputs\n"
-            for item in flows["output"]:
-                # Subtract harvested amount from production
-                harvested_amount = harvested_by_type.get(item["type"], 0)
-                adjusted_rate = item["rate"] - harvested_amount
-                if adjusted_rate > 0:
-                    flow_str += f"- {item['type']}: {adjusted_rate:.2f}\n"
+            for name, amount, manual_only in _produced_without_manual_harvest(flows):
+                suffix = " (manual harvest)" if manual_only else ""
+                flow_str += f"- {name}: {amount:.2f}{suffix}\n"
 
         # Format crafted items
         if flows.get("crafted"):
@@ -464,11 +481,6 @@ class BasicObservationFormatter:
         """
         lines = []
 
-        # Build harvested lookup to subtract from production
-        harvested_by_type = {}
-        for item in flows.get("harvested", []):
-            harvested_by_type[item["type"]] = item.get("amount", 0)
-
         # Consumed (input)
         consumed = flows.get("input", [])
         if consumed:
@@ -481,19 +493,12 @@ class BasicObservationFormatter:
         else:
             lines.append("  - Consumed: none")
 
-        # Produced (output) - subtract harvested since production includes both automated and harvested
-        produced = flows.get("output", [])
-        if produced:
-            adjusted_items = []
-            for item in produced:
-                harvested_amount = harvested_by_type.get(item["type"], 0)
-                adjusted_rate = item.get("rate", 0) - harvested_amount
-                if adjusted_rate > 0:
-                    adjusted_items.append(f"{item['type']}: {adjusted_rate:.1f}")
-            items = ", ".join(adjusted_items)
-            lines.append(f"  - Produced: {items}" if items else "  - Produced: none")
-        else:
-            lines.append("  - Produced: none")
+        adjusted_items = []
+        for name, amount, manual_only in _produced_without_manual_harvest(flows):
+            suffix = " (manual harvest)" if manual_only else ""
+            adjusted_items.append(f"{name}: {amount:.1f}{suffix}")
+        items = ", ".join(adjusted_items)
+        lines.append(f"  - Produced: {items}" if items else "  - Produced: none")
 
         # Crafted - aggregate by item type
         crafted = flows.get("crafted", [])

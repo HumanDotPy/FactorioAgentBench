@@ -112,6 +112,32 @@ def test_flows_formatting():
     assert "Inputs" in formatted and "Outputs" in formatted
 
 
+def test_manual_harvest_does_not_hide_measured_production():
+    formatter = BasicObservationFormatter()
+    flows = {
+        "input": [],
+        "output": [{"type": "iron-ore", "rate": 20.0}],
+        "crafted": [],
+        "harvested": [{"type": "iron-ore", "amount": 20.0}],
+    }
+    compact = formatter.format_flows_compact(flows)
+    assert "Produced: none" not in compact
+    assert "iron-ore: 20.0 (manual harvest)" in compact
+    assert "iron-ore: 20.00 (manual harvest)" in formatter.format_flows(flows)
+
+
+def test_harvest_is_subtracted_from_matching_automated_production():
+    formatter = BasicObservationFormatter()
+    flows = {
+        "input": [],
+        "output": [{"type": "iron-plate", "rate": 30.0}],
+        "crafted": [],
+        "harvested": [{"type": "iron-plate", "amount": 5.0}],
+    }
+    assert "iron-plate: 25.0" in formatter.format_flows_compact(flows)
+    assert "iron-plate: 25.00" in formatter.format_flows(flows)
+
+
 def test_research_formatting():
     make_minimal_observation()
     formatter = BasicObservationFormatter()

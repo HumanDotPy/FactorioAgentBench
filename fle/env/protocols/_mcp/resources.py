@@ -246,9 +246,7 @@ async def render_at(center_x: str, center_y: str, radius: int = 32) -> ImageCont
         try:
             img = instance.namespace._render(position=Position(cx, cy), radius=radius)
         except Exception:
-            img = instance.namespace._render_simple(
-                position=Position(cx, cy), radius=radius
-            )
+            img = instance.namespace._render_simple(position=Position(cx, cy))
 
         if img is None:
             raise Exception(

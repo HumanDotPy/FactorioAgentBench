@@ -49,6 +49,20 @@ def test_native_sampler_captures_stall_without_observation_and_tracks_removal():
     """)
 
 
+def test_current_refreshes_position_without_emitting_a_transition():
+    lua = runtime()
+    lua.execute("""
+        storage.utils.track_public_status(entity)
+        game.tick=60; entity.position={x=-20,y=-69}; sample_tick()
+        result=storage.utils.read_public_status(1, -1)
+        assert(#result.samples==1)
+        assert(result.samples[1].position.x==-23)
+        assert(#result.current==1)
+        assert(result.current[1].position.x==-20)
+        assert(result.current[1].status=='working')
+    """)
+
+
 def test_engine_ring_reports_overrun_and_force_scoped_keyframe():
     lua = runtime()
     lua.execute("""

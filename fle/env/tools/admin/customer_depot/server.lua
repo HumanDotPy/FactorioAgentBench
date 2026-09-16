@@ -12,7 +12,6 @@ storage.customer = storage.customer or {
     delta_index = {},      -- start_tick -> bucket (index into delta_log)
     tamper_events = {},    -- array of {tick, unit_number, reason}
     tamper_reported = {},  -- unit_number -> true (dedupe)
-    handlers_installed = false,
     epoch_tick = nil,      -- absolute game.tick at episode start
     mode = "fixed",       -- fixed | designated
     active_products = {},  -- product -> {limit, accepted}
@@ -300,14 +299,15 @@ local function drain_depots(tick)
                 name = spec.entity_name or "steel-chest",
                 position = spec.position,
                 force = game.forces.player,
+                build_check_type = defines.build_check_type.manual,
             }) then
             make_depot(surface, spec.position)
         end
     end
 end
 
-local HANDLER_VERSION = 5
-if storage.customer.handler_version ~= HANDLER_VERSION then
+if not fle_depot_drain_handler_installed then
+    fle_depot_drain_handler_installed = true
     script.on_nth_tick(DRAIN_EVERY_TICKS, function(event)
         -- A telemetry bug must degrade to missing data, never kill the
         -- simulation: an unhandled error inside a scenario event handler is
@@ -321,8 +321,6 @@ if storage.customer.handler_version ~= HANDLER_VERSION then
             storage.customer.last_error = tostring(err)
         end
     end)
-    storage.customer.handlers_installed = true
-    storage.customer.handler_version = HANDLER_VERSION
 end
 
 storage.actions.customer_depot = function(player_index, command, x, y, chest_count, relative)
@@ -349,7 +347,11 @@ storage.actions.customer_depot = function(player_index, command, x, y, chest_cou
         local slot = 0
         while placed < chest_count and slot < chest_count * 8 do
             local position = {x = anchor_x + slot * 2, y = anchor_y}
-            if surface.can_place_entity({name = "steel-chest", position = position}) then
+            if surface.can_place_entity({
+                    name = "steel-chest",
+                    position = position,
+                    build_check_type = defines.build_check_type.manual,
+                }) then
                 if make_depot(surface, position) then
                     placed = placed + 1
                 end
@@ -368,6 +370,13 @@ storage.actions.customer_depot = function(player_index, command, x, y, chest_cou
         return {mode = storage.customer.mode}
     elseif command == "configure" then
         unbind_all_designated_depots()
+        storage.customer.delivered_total = {}
+        storage.customer.manual_delivered_total = {}
+        storage.customer.delta_log = {}
+        storage.customer.delta_index = {}
+        storage.customer.tamper_events = {}
+        storage.customer.tamper_reported = {}
+        storage.customer.last_error = nil
         storage.customer.mode = "designated"
         storage.customer.active_products = {}
         for _, product in pairs(x or {}) do

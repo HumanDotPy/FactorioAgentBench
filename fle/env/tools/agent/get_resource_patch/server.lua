@@ -23,17 +23,38 @@ storage.actions.get_resource_patch = function(player_index, resource, x, y, radi
     local surface = player.surface
 
     -- Function to expand bounding box
-    local function expand_bounding_box(box, pos)
-        box.left_top.x = math.min(box.left_top.x, pos.x)
-        box.left_top.y = math.min(box.left_top.y, pos.y)
-        box.right_bottom.x = math.max(box.right_bottom.x, pos.x)
-        box.right_bottom.y = math.max(box.right_bottom.y, pos.y)
-
-
+    local bounding_box = nil
+    local function expand_bounding_box(other)
+        if not other or not other.left_top or not other.right_bottom then
+            return
+        end
+        if not bounding_box then
+            bounding_box = {
+                left_top = {x = other.left_top.x, y = other.left_top.y},
+                right_bottom = {x = other.right_bottom.x, y = other.right_bottom.y},
+            }
+            return
+        end
+        bounding_box.left_top.x = math.min(bounding_box.left_top.x, other.left_top.x)
+        bounding_box.left_top.y = math.min(bounding_box.left_top.y, other.left_top.y)
+        bounding_box.right_bottom.x = math.max(bounding_box.right_bottom.x, other.right_bottom.x)
+        bounding_box.right_bottom.y = math.max(bounding_box.right_bottom.y, other.right_bottom.y)
     end
 
-    -- Initialize bounding box
-    local bounding_box = {left_top = {x = x, y = y}, right_bottom = {x = x, y = y}}
+    local function tile_box(position)
+        return {
+            left_top = {x = position.x - 0.5, y = position.y - 0.5},
+            right_bottom = {x = position.x + 0.5, y = position.y + 0.5},
+        }
+    end
+
+    local function entity_box(entity)
+        local ok, box = pcall(function() return entity.bounding_box end)
+        if ok and box and box.left_top and box.right_bottom then
+            return box
+        end
+        return tile_box(entity.position)
+    end
 
     if resource == "water" then
         local water_tiles = surface.find_tiles_filtered{position = position, name = "water", radius = radius}
@@ -43,13 +64,9 @@ storage.actions.get_resource_patch = function(player_index, resource, x, y, radi
 
         local total_water_tiles = 0
         for _, tile in pairs(water_tiles) do
-            expand_bounding_box(bounding_box, tile.position)
+            expand_bounding_box(tile_box(tile.position))
             total_water_tiles = total_water_tiles + 1
         end
-        bounding_box.left_top.x = bounding_box.left_top.x - 0.5
-        bounding_box.left_top.y = bounding_box.left_top.y - 0.5
-        bounding_box.right_bottom.y = bounding_box.right_bottom.y + 1.5
-        bounding_box.right_bottom.x = bounding_box.right_bottom.x + 1.5
         render_box(player_index, surface, bounding_box)
         return {bounding_box = bounding_box, size = total_water_tiles}
     elseif resource == "wood" then
@@ -63,7 +80,7 @@ storage.actions.get_resource_patch = function(player_index, resource, x, y, radi
         end
         local total_wood = 0
         for _, tree in pairs(trees) do
-            expand_bounding_box(bounding_box, tree.position)
+            expand_bounding_box(entity_box(tree))
             -- Estimate wood amount based on tree prototype
             local tree_product = tree.prototype.mineable_properties.products[1]
             if tree_product and tree_product.name == "wood" then
@@ -107,7 +124,7 @@ storage.actions.get_resource_patch = function(player_index, resource, x, y, radi
                 local entity = queue[head]
                 head = head + 1
                 total_resource = total_resource + entity.amount
-                expand_bounding_box(bounding_box, entity.position)
+                expand_bounding_box(entity_box(entity))
 
                 local ex, ey = entity.position.x, entity.position.y
                 if math.abs(ex - position.x) >= search_radius - 1

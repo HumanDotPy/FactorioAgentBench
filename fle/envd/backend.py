@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import math
 import secrets
 import time
@@ -97,6 +98,8 @@ from fle.envd.camera import (
 )
 from fle.eval.tasks import TaskFactory
 
+logger = logging.getLogger(__name__)
+
 
 def _autonomous_throughput_score(
     audit: ThroughputAuditResult | None,
@@ -148,7 +151,39 @@ MODEL_OBSERVATION_HISTORY_LIMIT = 256
 MODEL_OBSERVATION_KEYFRAME_INTERVAL = 20
 MODEL_OBSERVATION_KEYFRAME_TICKS = 5 * 60 * 60
 MODEL_HISTORY_QUERY_LIMIT = 128
-PRODUCTION_HISTORY_LIMIT = 256
+PRODUCTION_HISTORY_RETENTION_TICKS = 18000
+PRODUCTION_HISTORY_LIMIT = 4096
+ENTITY_DETAILS_QUERY_RADIUS = 32.0
+
+# Program failures are reported by the evaluator as a leading diagnostic line,
+# not as arbitrary text inside tool payloads. Only these prefixes mark an
+# intervention as invalid, so an item named "error" cannot fail a program.
+_ERROR_RESULT_PREFIXES = (
+    "error:",
+    "error occurred",
+    "exception:",
+    "traceback (most recent call last)",
+    "assertionerror",
+    "nameerror",
+    "syntaxerror",
+    "typeerror",
+    "valueerror",
+    "indexerror",
+    "keyerror",
+    "attributeerror",
+    "importerror",
+    "modulenotfounderror",
+    "zerodivisionerror",
+    "runtimeerror",
+    "timeouterror",
+    "stopiteration",
+    "memoryerror",
+    "recursionerror",
+    "filenotfounderror",
+    "permissionerror",
+    "connectionerror",
+    "luaerror",
+)
 
 
 @dataclass(frozen=True)
@@ -1739,7 +1774,13 @@ class FLEWorker(FactorioWorker):
         if scope:
             try:
                 store = BlueprintStore(scope=scope)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001 - keep the lease alive on a store failure
+                logger.warning(
+                    "Blueprint store unavailable for scope %s; blueprint saves "
+                    "fall back to ephemeral storage and will not persist: %s",
+                    scope,
+                    exc,
+                )
                 store = None
         namespace._blueprint_store = store
 
@@ -1763,7 +1804,8 @@ class FLEWorker(FactorioWorker):
             return []
         try:
             summaries = active.list_summaries()
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - degrade to an empty library
+            logger.warning("Blueprint summary listing failed: %s", exc)
             return []
         return [BlueprintSummary(**summary) for summary in summaries]
 
@@ -2476,7 +2518,12 @@ class FLEWorker(FactorioWorker):
         result_text = str(result)
         if control is not None and control.blocked():
             result_text += "\nError: " + control.blocked()
-        error = "error" in result_text.lower() or "exception:" in result_text.lower()
+        error = any(
+            (
+                '"action_failure"' in result_text,
+                result_text.lstrip().startswith(_ERROR_RESULT_PREFIXES),
+            )
+        )
         forbidden_actions = {
             str(action)
             for constraint in (self.task_spec.constraints if self.task_spec else [])
@@ -2709,6 +2756,23 @@ class FLEWorker(FactorioWorker):
             }
             journal.evicted_revision = revision
             samples = []
+        for sample in samples:
+            if not isinstance(sample, dict) or not sample.get("warning_key"):
+                continue
+            entity_id = str(sample.get("entity_id") or "")
+            if not entity_id or entity_id in journal.current:
+                continue
+            journal.current[entity_id] = {
+                "entity_id": entity_id,
+                "prototype": sample.get("prototype"),
+                "position": sample.get("position"),
+                "surface": sample.get("surface"),
+                "force": sample.get("force"),
+                "tick": int(sample.get("tick", 0)),
+                "status": "normal",
+                "warning_key": None,
+                "seeded": True,
+            }
         journal.publish(samples, revision=revision)
         journal.tick = max(journal.tick, int(response.get("tick", journal.tick)))
         self._status_engine_sequence = int(response.get("engine_sequence", 0))
@@ -2760,6 +2824,13 @@ class FLEWorker(FactorioWorker):
             history[-1]["output"] = sample["output"]
         else:
             history.append(sample)
+        latest_tick = int(sample["tick"])
+        while (
+            len(history) > 2
+            and int(history[1].get("tick", 0))
+            < latest_tick - PRODUCTION_HISTORY_RETENTION_TICKS
+        ):
+            del history[0]
         if len(history) > PRODUCTION_HISTORY_LIMIT:
             del history[: len(history) - PRODUCTION_HISTORY_LIMIT]
         # Contract-feature capture uses the older output-only history. Keep it
@@ -2773,9 +2844,15 @@ class FLEWorker(FactorioWorker):
         window_seconds: int,
         *,
         ordered: bool = False,
-    ) -> dict[str, int | float]:
+    ) -> tuple[dict[str, int | float], float]:
+        """Return (per-minute rates, effective span in seconds).
+
+        The effective span can be shorter than the requested window when
+        history does not reach back far enough; callers must label the rate
+        with this span rather than claiming the requested window.
+        """
         if len(samples) < 2:
-            return {}
+            return {}, 0.0
         if not ordered:
             samples = sorted(samples, key=lambda sample: int(sample.get("tick", 0)))
         latest = samples[-1]
@@ -2792,7 +2869,7 @@ class FLEWorker(FactorioWorker):
         baseline_tick = int(baseline.get("tick", 0))
         span_ticks = latest_tick - baseline_tick
         if span_ticks <= 0:
-            return {}
+            return {}, 0.0
         latest_values = _numeric_mapping(latest.get(field, {}))
         baseline_values = _numeric_mapping(baseline.get(field, {}))
         minutes = span_ticks / 3600.0
@@ -2805,7 +2882,7 @@ class FLEWorker(FactorioWorker):
                 continue
             rate = amount / minutes
             values[item] = int(rate) if rate.is_integer() else round(rate, 6)
-        return values
+        return values, round(span_ticks / 60.0, 3)
 
     @staticmethod
     def _recent_rate_number(response: Any) -> float | None:
@@ -2842,22 +2919,33 @@ class FLEWorker(FactorioWorker):
             "_contract_production_baseline",
             {"input": {}, "output": {}},
         )
-        raw_rates = {
-            "5s": self._window_counter_rate(history, "output", 5, ordered=True),
-            "60s": self._window_counter_rate(history, "output", 60, ordered=True),
-            "300s": self._window_counter_rate(history, "output", 300, ordered=True),
-        }
+        raw_rates: dict[str, dict[str, int | float]] = {}
+        raw_rate_spans: dict[str, float] = {}
+        for label, window in (("5s", 5), ("60s", 60), ("300s", 300)):
+            values, span_seconds = self._window_counter_rate(
+                history, "output", window, ordered=True
+            )
+            raw_rates[label] = values
+            raw_rate_spans[label] = span_seconds
         automated_rates: dict[str, dict[str, int | float]] = {
             "5s": {},
             "60s": {},
             "300s": {},
         }
         automated_available = False
+        automated_items_truncated = False
+        automated_items_omitted = 0
         recent_rate = getattr(self.instance.first_namespace, "_get_recent_rate", None)
         if recent_rate is not None:
             # Keep this bounded: the model needs rates for the active output
             # frontier, not a second serialization of every production item.
-            items = sorted(counters["output"])[:32]
+            ranked = sorted(
+                counters["output"].items(),
+                key=lambda pair: (-float(pair[1]), str(pair[0])),
+            )
+            items = [name for name, _ in ranked[:32]]
+            automated_items_truncated = len(ranked) > len(items)
+            automated_items_omitted = max(0, len(ranked) - len(items))
             windows = (5, 60, 300)
             batched: dict[str, Any] | None = None
             if items:
@@ -2895,10 +2983,13 @@ class FLEWorker(FactorioWorker):
             "raw_rates_5s": raw_rates["5s"],
             "raw_rates_60s": raw_rates["60s"],
             "raw_rates_300s": raw_rates["300s"],
+            "raw_rate_spans_seconds": raw_rate_spans,
             "automated_rates_5s": automated_rates["5s"],
             "automated_rates_60s": automated_rates["60s"],
             "automated_rates_300s": automated_rates["300s"],
             "automated_rates_available": automated_available,
+            "automated_rates_items_truncated": automated_items_truncated,
+            "automated_rates_items_omitted": automated_items_omitted,
             "since_contract": {
                 "raw_input": _counter_delta(
                     baseline.get("input", {}), counters["input"]
@@ -2933,6 +3024,40 @@ class FLEWorker(FactorioWorker):
                 clean_name = str(name)
                 counts[clean_name] = sum(per_name.values())
                 status_by_name[clean_name] = per_name
+        empty_stalls = {
+            "by_status": {},
+            "by_product": {},
+            "by_name": {},
+            "buffer_full": 0,
+            "detail": [],
+        }
+        stalls = response.get("stalls") if isinstance(response, dict) else None
+        ground_items = response.get("ground_items") if isinstance(response, dict) else None
+        ground_item_positions: list[dict[str, Any]] = []
+        raw_positions = (
+            response.get("ground_item_positions") if isinstance(response, dict) else None
+        )
+        if isinstance(raw_positions, (list, tuple)):
+            for entry in raw_positions[:32]:
+                raw_entry = _jsonable(entry)
+                if isinstance(raw_entry, dict):
+                    ground_item_positions.append(raw_entry)
+        missing_drop_targets: list[dict[str, Any]] = []
+        raw_missing = (
+            response.get("missing_drop_targets") if isinstance(response, dict) else None
+        )
+        if isinstance(raw_missing, (list, tuple)):
+            for entry in raw_missing[:32]:
+                raw_entry = _jsonable(entry)
+                if isinstance(raw_entry, dict):
+                    missing_drop_targets.append(raw_entry)
+
+        def _counter(value: Any) -> int:
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+
         return {
             "total": sum(counts.values()),
             "counts": dict(sorted(counts.items())),
@@ -2940,6 +3065,23 @@ class FLEWorker(FactorioWorker):
             "status_by_name": {
                 name: status_by_name[name] for name in sorted(status_by_name)
             },
+            "stalls": stalls if isinstance(stalls, dict) else empty_stalls,
+            "ground_items": _normalise_counter_mapping(ground_items or {}),
+            "ground_item_stacks": _counter(
+                response.get("ground_item_stacks") if isinstance(response, dict) else 0
+            ),
+            "ground_item_positions": ground_item_positions,
+            "ground_items_truncated": bool(
+                response.get("ground_items_truncated")
+                if isinstance(response, dict)
+                else False
+            ),
+            "missing_drop_targets": missing_drop_targets,
+            "missing_drop_target_count": _counter(
+                response.get("missing_drop_target_count")
+                if isinstance(response, dict)
+                else 0
+            ),
         }
 
     def _research_summary(
@@ -3583,19 +3725,37 @@ class FLEWorker(FactorioWorker):
             if area:
                 x = float(area.get("x", 0.0))
                 y = float(area.get("y", 0.0))
-                radius = max(0.0, min(float(area.get("radius", 1000.0)), 1000.0))
+                requested_radius = area.get("radius")
+                if requested_radius is None:
+                    radius = ENTITY_DETAILS_QUERY_RADIUS
+                else:
+                    radius = max(0.0, min(float(requested_radius), 1000.0))
                 kwargs.update(position=Position(x=x, y=y), radius=radius)
             if prototype is None:
-                values = self.instance.first_namespace.get_entities(**kwargs)
+                raw_values = self.instance.first_namespace.get_entities(**kwargs)
             else:
-                values = self.instance.first_namespace.get_entities(prototype, **kwargs)
+                raw_values = self.instance.first_namespace.get_entities(
+                    prototype, **kwargs
+                )
+            ground_items: list[dict[str, Any]] = []
+            for item in list(getattr(raw_values, "ground_items", []) or [])[:limit]:
+                raw_item = _jsonable(item)
+                if isinstance(raw_item, dict):
+                    ground_items.append(raw_item)
+            try:
+                ground_item_count = int(
+                    getattr(raw_values, "ground_item_stacks", 0) or 0
+                )
+            except (TypeError, ValueError):
+                ground_item_count = 0
+            values = list(raw_values or [])
             result: list[dict[str, Any]] = []
-            for value in list(values or [])[:limit]:
+            for value in values[:limit]:
                 raw = _jsonable(value)
                 if not isinstance(raw, dict):
                     continue
                 # Entity inventories and nested prototype payloads can be very
-                # large; queries return identity/status/location only.
+                # large; queries return identity/status/location/drop state only.
                 result.append(
                     {
                         key: raw[key]
@@ -3608,11 +3768,26 @@ class FLEWorker(FactorioWorker):
                             "direction",
                             "unit_number",
                             "recipe",
+                            "drop_position",
+                            "pickup_position",
+                            "tile_size",
+                            "snapped_center",
+                            "center_parity",
                         )
                         if key in raw
                     }
                 )
-            return {"entities": result, "returned": len(result)}
+            return {
+                "entities": result,
+                "returned": len(result),
+                "total": len(values),
+                "truncated": len(values) > limit,
+                "effective_radius": (
+                    radius if area else ENTITY_DETAILS_QUERY_RADIUS
+                ),
+                "ground_items": ground_items,
+                "ground_item_count": ground_item_count,
+            }
         except Exception as exc:  # noqa: BLE001 - query is best effort
             return {"entities": [], "error": f"entity query unavailable: {exc}"}
 
@@ -3822,6 +3997,7 @@ class FLEWorker(FactorioWorker):
             result["current"] = current.get("entities", {})
             result["mutations"] = mutations[-limit:]
             result["history_truncated"] = len(mutations) > limit
+            result["mutation_count"] = len(mutations)
             result.update(
                 self._query_entity_details(
                     entity_type=entity_type, area=area, limit=limit

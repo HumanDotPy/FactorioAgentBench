@@ -48,7 +48,16 @@ local function sample_entity(state, id, entity)
         return
     end
     local status = status_name(entity)
-    if previous and previous.status == status then return end
+    if previous and previous.status == status then
+        state.current[id] = {
+            entity_id=id, prototype=entity.name,
+            position={x=entity.position.x, y=entity.position.y},
+            surface=entity.surface.index, force=entity.force.index,
+            tick=game.tick, status=status,
+            warning_key=previous.warning_key,
+        }
+        return
+    end
     local sample = {
         entity_id=id, prototype=entity.name,
         position={x=entity.position.x, y=entity.position.y},

@@ -1,5 +1,42 @@
 -- Public map context. Counts stay in the engine; only bounded cells and tooltips
 -- cross RCON. This read neither generates chunks nor advances simulation time.
+local ENTITY_STATUS_NAMES = nil
+
+local function status_name(entity_status)
+    if ENTITY_STATUS_NAMES == nil then
+        ENTITY_STATUS_NAMES = {}
+        for name, value in pairs(defines.entity_status or {}) do
+            ENTITY_STATUS_NAMES[value] = name
+        end
+    end
+    if entity_status == nil then
+        return "unknown"
+    end
+    return ENTITY_STATUS_NAMES[entity_status] or "unknown"
+end
+
+local function entity_at(surface, position)
+    if not position then
+        return nil
+    end
+    local ok, found = pcall(function()
+        return surface.find_entities_filtered{
+            position = {x = position.x, y = position.y},
+            radius = 0.5,
+            limit = 4,
+        }
+    end)
+    if not ok or not found then
+        return nil
+    end
+    for _, other in pairs(found) do
+        if other.valid ~= false and other.name ~= "character" then
+            return other
+        end
+    end
+    return nil
+end
+
 storage.actions.public_view = function(player_index, radius, entity_limit)
     local character = storage.agent_characters[player_index]
     if not character or not character.valid then
@@ -57,13 +94,61 @@ storage.actions.public_view = function(player_index, radius, entity_limit)
     local entities = {}
     for index, entity in ipairs(candidates) do
         if index > entity_limit then break end
+        local entity_key
+        if entity.unit_number then
+            entity_key = tostring(entity.unit_number)
+        else
+            entity_key = string.format("%s@%.1f,%.1f", entity.name,
+                entity.position.x, entity.position.y)
+        end
         local data = {name=entity.name,position={x=entity.position.x,y=entity.position.y},
-            entity_id=tostring(surface.index)..":"..tostring(entity.unit_number or entity.name),
+            entity_id=tostring(surface.index)..":"..entity_key,
             direction=entity.direction}
         if radius < 96 then
-            data.status = storage.utils.entity_status_names(entity.status)
+            data.status = status_name(entity.status)
             data.warnings = storage.utils.get_issues(entity)
             data.energy = entity.energy
+            if entity.type == "item-on-ground" then
+                local stack = entity.stack
+                if stack and stack.valid_for_read then
+                    data.item = stack.name
+                    data.count = stack.count
+                end
+            elseif entity.type == "inserter" or entity.type == "mining-drill" then
+                if entity.drop_position then
+                    data.drop_position = {
+                        x = entity.drop_position.x,
+                        y = entity.drop_position.y,
+                    }
+                    local drop_target = entity_at(surface, entity.drop_position)
+                    data.drop_target = drop_target and drop_target.name or nil
+                end
+                if entity.type == "inserter"
+                    and entity.status == defines.entity_status.waiting_for_source_items then
+                    local pickup_target = entity_at(surface, entity.pickup_position)
+                    data.pickup_target = pickup_target and pickup_target.name or nil
+                    data.source_inventory = {}
+                    if pickup_target then
+                        for _, key in ipairs({"crafter_input", "furnace_source", "chest", "fuel"}) do
+                            if defines.inventory[key] then
+                                local ok, inventory = pcall(function()
+                                    return pickup_target.get_inventory(defines.inventory[key])
+                                end)
+                                if ok and inventory then
+                                    for slot=1,math.min(#inventory,64) do
+                                        local stack = inventory[slot]
+                                        if stack.valid_for_read then
+                                            data.source_inventory[stack.name] =
+                                                (data.source_inventory[stack.name] or 0)
+                                                + stack.count
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
             -- Do not serialize topology or recipe graphs for hover state.
             local inventory_keys = {}
             if entity.burner then inventory_keys[#inventory_keys+1] = "fuel" end

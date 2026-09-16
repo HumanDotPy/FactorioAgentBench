@@ -58,6 +58,49 @@ def test_receipts_share_observation_revisions_and_queries_recover_transitions():
     assert calls == [-1, 1, 2]
 
 
+def test_first_stalled_observation_becomes_a_transition_event():
+    worker = FLEWorker.__new__(FLEWorker)
+    stalled = {
+        "entity_id": "1:9",
+        "prototype": "electric-mining-drill",
+        "status": "waiting_for_space_in_destination",
+        "warning_key": "waiting_for_space_in_destination",
+        "tick": 60,
+        "surface": 1,
+        "force": 1,
+        "position": {"x": 1, "y": 2},
+    }
+
+    def read(after):
+        if after == -1:
+            return {
+                "engine_sequence": 0,
+                "retained_after_sequence": 0,
+                "tick": 0,
+                "current": [],
+                "samples": [],
+                "coverage": "registered_player_machines",
+                "sample_interval_ticks": 60,
+            }
+        return {
+            "engine_sequence": 1,
+            "retained_after_sequence": 0,
+            "tick": 60,
+            "current": None,
+            "samples": [stalled],
+            "coverage": "registered_player_machines",
+            "sample_interval_ticks": 60,
+        }
+
+    worker.instance = SimpleNamespace(
+        first_namespace=SimpleNamespace(_public_status=read)
+    )
+    assert not worker._public_status_receipt()["events"]
+    receipt = worker._public_status_receipt()
+    assert receipt["events"][0]["from_status"] == "normal"
+    assert receipt["events"][0]["to_status"] == "waiting_for_space_in_destination"
+
+
 def test_status_read_failure_is_explicit_and_does_not_break_mutation_receipt():
     worker = FLEWorker.__new__(FLEWorker)
 

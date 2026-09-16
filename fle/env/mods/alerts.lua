@@ -1,4 +1,6 @@
-storage.alerts = {}
+if not storage.alerts then
+    storage.alerts = {}
+end
 
 local belt_direction_vector = {
     [0] = {x = 0, y = -1},   -- North

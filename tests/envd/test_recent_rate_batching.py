@@ -9,6 +9,7 @@ pytestmark = pytest.mark.no_factorio
 RATES = {5: 12.5, 60: 120.0, 300: 299.5}
 WINDOWS = [5, 60, 300]
 ITEMS = ["copper-plate", "iron-plate"]
+RANKED_ITEMS = ["iron-plate", "copper-plate"]
 STATS = {"input": {}, "output": {"iron-plate": 100, "copper-plate": 50}}
 
 
@@ -82,10 +83,10 @@ def test_snapshot_batches_all_items_and_windows_into_one_query():
 
     production, _ = worker._compact_production_snapshot(STATS, 600)
 
-    assert namespace.calls == [(ITEMS, WINDOWS)]
+    assert namespace.calls == [(RANKED_ITEMS, WINDOWS)]
     for field, expected in _expected_rates().items():
         assert production[field] == expected
-        assert list(production[field]) == ITEMS
+        assert list(production[field]) == RANKED_ITEMS
     assert production["automated_rates_available"] is True
 
 
@@ -95,12 +96,12 @@ def test_snapshot_falls_back_to_per_item_queries_with_identical_values():
 
     production, _ = worker._compact_production_snapshot(STATS, 600)
 
-    assert namespace.calls == [(ITEMS, WINDOWS)] + [
-        (item, window) for item in ITEMS for window in WINDOWS
+    assert namespace.calls == [(RANKED_ITEMS, WINDOWS)] + [
+        (item, window) for item in RANKED_ITEMS for window in WINDOWS
     ]
     for field, expected in _expected_rates().items():
         assert production[field] == expected
-        assert list(production[field]) == ITEMS
+        assert list(production[field]) == RANKED_ITEMS
     assert production["automated_rates_available"] is True
 
 
@@ -110,8 +111,8 @@ def test_snapshot_falls_back_when_batched_query_raises():
 
     production, _ = worker._compact_production_snapshot(STATS, 600)
 
-    assert namespace.calls == [(ITEMS, WINDOWS)] + [
-        (item, window) for item in ITEMS for window in WINDOWS
+    assert namespace.calls == [(RANKED_ITEMS, WINDOWS)] + [
+        (item, window) for item in RANKED_ITEMS for window in WINDOWS
     ]
     for field, expected in _expected_rates().items():
         assert production[field] == expected
@@ -127,3 +128,69 @@ def test_snapshot_without_rate_endpoint_reports_unavailable():
     assert production["automated_rates_60s"] == {}
     assert production["automated_rates_300s"] == {}
     assert production["automated_rates_available"] is False
+    assert production["raw_rate_spans_seconds"]["300s"] == 0.0
+
+
+def test_snapshot_ranks_items_by_counter_and_flags_truncation():
+    namespace = _BatchNamespace()
+    worker = _worker(namespace)
+    stats = {"input": {}, "output": {f"item-{index:02d}": index for index in range(40)}}
+
+    production, _ = worker._compact_production_snapshot(stats, 600)
+
+    assert production["automated_rates_items_truncated"] is True
+    assert production["automated_rates_items_omitted"] == 8
+    assert "item-39" in production["automated_rates_300s"]
+    assert "item-00" not in production["automated_rates_300s"]
+    items, _ = namespace.calls[0]
+    assert len(items) == 32
+    assert items[0] == "item-39"
+
+
+def test_short_history_exposes_the_effective_rate_span():
+    worker = _worker(object())
+    worker._record_production_sample(0, {"input": {}, "output": {}})
+    worker._record_production_sample(300, {"input": {}, "output": {"iron-plate": 30}})
+
+    production, _ = worker._compact_production_snapshot(
+        {"input": {}, "output": {"iron-plate": 60}}, 600
+    )
+
+    assert production["raw_rate_spans_seconds"]["300s"] == 10.0
+    assert production["raw_rates_300s"]["iron-plate"] == 360.0
+
+
+def test_history_retention_keeps_more_than_the_old_sample_cap():
+    worker = _worker(object())
+    for tick in range(301):
+        worker._record_production_sample(
+            tick, {"input": {}, "output": {"iron-plate": tick}}
+        )
+
+    assert len(worker._production_history) == 301
+
+
+def test_300s_window_spans_the_requested_window_with_one_hz_samples():
+    worker = _worker(object())
+    for tick in range(0, 400 * 60, 60):
+        worker._record_production_sample(
+            tick, {"input": {}, "output": {"iron-plate": tick // 60}}
+        )
+
+    production, _ = worker._compact_production_snapshot(
+        {"input": {}, "output": {"iron-plate": 400}}, 400 * 60
+    )
+
+    assert production["raw_rate_spans_seconds"]["300s"] == 300.0
+
+
+def test_history_drops_samples_older_than_retention_but_keeps_baseline():
+    worker = _worker(object())
+    for tick in range(0, 600 * 60, 60):
+        worker._record_production_sample(
+            tick, {"input": {}, "output": {"iron-plate": tick // 60}}
+        )
+
+    latest = worker._production_history[-1]["tick"]
+    assert worker._production_history[0]["tick"] <= latest - 18000
+    assert worker._production_history[1]["tick"] >= latest - 18000

@@ -16,12 +16,21 @@ storage.utils.spatial_diagnostics = function(surface, position, box, direction, 
     for name, enabled in pairs((mask and mask.layers) or {}) do
         if enabled then layers[#layers+1] = name end
     end
+    local function collides_with_player(entity)
+        local prototype = entity.prototype
+        if prototype == nil then return true end
+        local mask = prototype.collision_mask
+        if type(mask) ~= "table" then return true end
+        local mask_layers = mask.layers or mask
+        return mask_layers.player == true
+    end
     local entities, terrain = {}, {}
     local candidates = #layers > 0 and surface.find_entities_filtered{
         area=area, collision_mask=layers, limit=18
     } or {}
     for _, entity in ipairs(candidates) do
-        if entity.valid and entity ~= ignored and #entities < 16 then
+        if entity.valid and entity ~= ignored and #entities < 16
+            and collides_with_player(entity) then
             local dx, dy = entity.position.x - position.x, entity.position.y - position.y
             entities[#entities+1] = {prototype=entity.name,
                 position={x=entity.position.x,y=entity.position.y},
