@@ -36,6 +36,7 @@ def runtime():
             e.mined=false
             e.destroyed=false
             e.mine=function(options)
+                if e.mine_raises then error('mine failed') end
                 e.mined=true
                 e.mine_options=options
                 e.valid=false
@@ -49,6 +50,8 @@ def runtime():
         end
 
         insert_blocked={}
+        insert_returns={}
+        removed_entries={}
         inventory={can_insert=function(stack) return not insert_blocked[stack.name] end}
         surface={find_entities_filtered=function(query) return found end}
         player={
@@ -59,7 +62,18 @@ def runtime():
             get_main_inventory=function() return inventory end,
             insert=function(stack)
                 if insert_blocked[stack.name] then return 0 end
-                inserted[#inserted+1]={name=stack.name,count=stack.count}
+                local count=stack.count
+                if insert_returns[stack.name]~=nil then
+                    count=math.min(count,insert_returns[stack.name])
+                end
+                if count>0 then
+                    inserted[#inserted+1]={name=stack.name,count=count}
+                end
+                return count
+            end,
+            remove_item=function(stack)
+                removed_entries[#removed_entries+1]={
+                    name=stack.name,count=stack.count}
                 return stack.count
             end,
         }
@@ -164,7 +178,7 @@ def test_missing_target_returns_actionable_error():
             return storage.actions.mine_entity(1,5,5,'tree-01')
         end)
         assert(ok==false)
-        assert(string.find(message,'Nothing neutral to mine',1,true)~=nil)
+        assert(string.find(message,'No neutral tree-01',1,true)~=nil)
         assert(string.find(message,'5.0, 5.0',1,true)~=nil)
     """)
 
@@ -249,6 +263,88 @@ def test_named_entity_is_preferred_over_closer_neutral():
         assert(result.name=='tree-01')
         assert(result.items.wood==2)
         assert(tree.mined and not rock.mined)
+    """)
+
+
+def test_missing_named_target_is_refused_instead_of_mining_nearest():
+    lua = runtime()
+    lua.execute("""
+        rock=make_entity({
+            name='big-rock', type='simple-entity', position={x=0.4,y=0},
+            force='neutral', minable=true,
+            prototype={mineable_properties={mining_time=0.75,
+                products={{name='stone',amount=20}}}},
+        })
+        found[1]=rock
+        local ok,message=pcall(function()
+            return storage.actions.mine_entity(1,0,0,'tree-01')
+        end)
+        assert(ok==false)
+        assert(string.find(message,'refusing to mine a different entity',1,true)~=nil)
+        assert(not rock.mined and not rock.destroyed)
+        assert(#inserted==0)
+    """)
+
+
+def test_unnamed_target_still_mines_nearest_neutral():
+    lua = runtime()
+    lua.execute("""
+        rock=make_entity({
+            name='big-rock', type='simple-entity', position={x=0.4,y=0},
+            force='neutral', minable=true,
+            prototype={mineable_properties={mining_time=0.75,
+                products={{name='stone',amount=20}}}},
+        })
+        found[1]=rock
+        result=storage.actions.mine_entity(1,0,0,nil)
+        assert(result.name=='big-rock')
+        assert(rock.mined)
+    """)
+
+
+def test_partial_product_insert_is_rolled_back_before_mining():
+    lua = runtime()
+    lua.execute("""
+        insert_returns.wood=1
+        tree=make_entity({
+            name='tree-01', type='tree', position={x=0,y=0}, force='neutral',
+            minable=true,
+            prototype={mineable_properties={mining_time=0.5,
+                products={{name='wood',amount=2}}}},
+        })
+        found[1]=tree
+        local ok,message=pcall(function()
+            return storage.actions.mine_entity(1,0,0,'tree-01')
+        end)
+        assert(ok==false)
+        assert(string.find(message,'could only take 1 of 2 wood',1,true)~=nil)
+        assert(not tree.mined and tree.destroyed==false)
+        assert(storage.elapsed_ticks==0)
+        assert(#flow==0 and storage.harvested_items.wood==nil)
+        assert(#inserted==1 and inserted[1].count==1)
+        assert(#removed_entries==1 and removed_entries[1].count==1)
+    """)
+
+
+def test_mine_failure_rolls_back_inserted_products_and_ticks():
+    lua = runtime()
+    lua.execute("""
+        tree=make_entity({
+            name='tree-01', type='tree', position={x=0,y=0}, force='neutral',
+            minable=true, mine_raises=true,
+            prototype={mineable_properties={mining_time=0.5,
+                products={{name='wood',amount=2}}}},
+        })
+        found[1]=tree
+        local ok,message=pcall(function()
+            return storage.actions.mine_entity(1,0,0,'tree-01')
+        end)
+        assert(ok==false)
+        assert(string.find(message,'Mining tree-01 failed',1,true)~=nil)
+        assert(#inserted==1 and inserted[1].count==2)
+        assert(#removed_entries==1 and removed_entries[1].count==2)
+        assert(storage.elapsed_ticks==0)
+        assert(#flow==0)
     """)
 
 

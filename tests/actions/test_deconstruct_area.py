@@ -21,7 +21,9 @@ def runtime():
         player_entities={}
         neutral_entities={}
         inserted={}
+        removed_items={}
         insert_blocked={}
+        insert_room={}
 
         function make_entity(props)
             local e=props
@@ -29,6 +31,7 @@ def runtime():
             e.destroyed=false
             e.can_be_destroyed=function() return e.destroyable~=false end
             e.destroy=function(opts)
+                if e.destroy_raises then error('destroy failed') end
                 e.valid=false
                 e.destroyed=true
                 e.destroy_options=opts
@@ -52,7 +55,21 @@ def runtime():
                 force='player',
                 get_main_inventory=function() return inventory end,
                 insert=function(stack)
-                    inserted[#inserted+1]={name=stack.name,count=stack.count}
+                    if insert_blocked[stack.name] then return 0 end
+                    local count=stack.count
+                    if insert_room[stack.name]~=nil then
+                        count=math.min(count,insert_room[stack.name])
+                        insert_room[stack.name]=insert_room[stack.name]-count
+                    end
+                    if count>0 then
+                        inserted[#inserted+1]={name=stack.name,count=count}
+                    end
+                    return count
+                end,
+                remove_item=function(stack)
+                    removed_items[#removed_items+1]={
+                        name=stack.name,count=stack.count}
+                    return stack.count
                 end,
             }
         end
@@ -191,7 +208,57 @@ def test_inventory_full_stops_before_removal():
         assert(result.inventory_full.position.y==0.5)
         assert(chest.valid and not chest.destroyed)
         assert(belt.valid and not belt.destroyed)
-        assert(#inserted==0)
+        assert(#inserted==1)
+        assert(inserted[1].name=='iron-plate' and inserted[1].count==5)
+        assert(#removed_items==1)
+        assert(removed_items[1].name=='iron-plate' and removed_items[1].count==5)
+    """)
+
+
+def test_overflow_rolls_back_and_lists_unreturned_items():
+    lua = runtime()
+    lua.execute("""
+        insert_room['iron-plate']=3
+        chest=make_entity({
+            name='wooden-chest', type='container', unit_number=61,
+            position={x=0.5,y=0.5},
+            inventories={[1]={['iron-plate']=5}},
+        })
+        player_entities[1]=chest
+        result=storage.actions.deconstruct_area(1,0,0,2,2,nil,true,512)
+        assert(result.status=='inventory_full')
+        assert(result.removed==0)
+        assert(next(result.items_returned)==nil)
+        assert(chest.valid and not chest.destroyed)
+        local overflow={}
+        for _,entry in ipairs(result.overflow) do
+            overflow[entry.name]=(overflow[entry.name] or 0)+entry.count
+        end
+        assert(overflow['iron-plate']==2)
+        assert(overflow['wooden-chest']==1)
+        assert(#inserted==1 and inserted[1].count==3)
+        assert(#removed_items==1 and removed_items[1].count==3)
+    """)
+
+
+def test_destroy_failure_keeps_entity_and_rolls_back_returns():
+    lua = runtime()
+    lua.execute("""
+        chest=make_entity({
+            name='wooden-chest', type='container', unit_number=62,
+            position={x=0.5,y=0.5}, destroy_raises=true,
+        })
+        player_entities[1]=chest
+        result=storage.actions.deconstruct_area(1,0,0,2,2,nil,true,512)
+        assert(result.status=='completed')
+        assert(result.removed==0)
+        assert(next(result.items_returned)==nil)
+        assert(chest.valid and not chest.destroyed)
+        assert(#result.skipped==1)
+        assert(result.skipped[1].reason=='destroy_failed')
+        assert(#inserted==1 and inserted[1].name=='wooden-chest')
+        assert(#removed_items==1 and removed_items[1].name=='wooden-chest')
+        assert(#result.overflow==0)
     """)
 
 

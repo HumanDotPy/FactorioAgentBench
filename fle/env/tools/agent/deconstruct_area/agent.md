@@ -25,7 +25,11 @@ deconstruct_area(
 
 - `status` is `"completed"` or `"inventory_full"`. On `"inventory_full"` the
   entity named in `inventory_full` and every later target are untouched, so
-  free inventory space and call again with the same rectangle.
+  free inventory space and call again with the same rectangle. Anything the
+  inventory could not take is listed in `overflow`
+  (`[{name, count, position}]`); it stays inside the still-intact entity, never
+  dropped or lost. An entity whose destruction fails is left in `skipped`
+  with reason `destroy_failed` and its items are not reported as returned.
 - `requested` counts matching targets before the `max_entities` (1-2048) cap;
   `truncated` is true when the cap was exceeded and only the first
   `max_entities` targets (sorted by row, then column) were processed.

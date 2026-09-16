@@ -48,6 +48,17 @@ chest_inventory = inspect_inventory(entity=chest)
 items_in_chest = chest_inventory[Prototype.IronPlate]
 ```
 
+For furnaces, assembling machines and rocket silos the flat inventory is the
+combined contents, and the input and output stacks stay separated on the
+returned object:
+
+```python
+machine_inventory = inspect_inventory(entity=assembling_machine)
+machine_inventory[Prototype.IronGearWheel]          # combined
+machine_inventory.input_inventory[Prototype.IronPlate]
+machine_inventory.output_inventory[Prototype.IronGearWheel]
+```
+
 ### 3. Labs
 
 ```python

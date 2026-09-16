@@ -52,7 +52,10 @@ class DeconstructArea(Tool):
         :param max_entities: Maximum entities to remove in one call (1-2048)
         :example deconstruct_area(Position(x=0, y=0), Position(x=8, y=8))
         :return: {status, area, removed, requested, items_returned, skipped,
-                  truncated, inventory_full, tick}
+                  overflow, truncated, inventory_full, tick}. `overflow` lists
+                  the items (with counts and positions) that could not be
+                  returned to the inventory; when it is non-empty the affected
+                  entity is left intact and the player inventory is unchanged.
         """
         if not isinstance(top_left, Position):
             raise ValueError("top_left must be a Position")  # noqa: TRY004

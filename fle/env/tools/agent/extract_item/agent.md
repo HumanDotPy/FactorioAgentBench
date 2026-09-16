@@ -24,6 +24,11 @@ The function returns the number of items successfully extracted. The extracted i
 
 - If requested quantity exceeds available items, it extracts all available items
 - Returns actual number of items extracted
+- Only the entity at the requested target position (within about 2.5 tiles) is
+  used; a different nearby machine holding the same item is ignored
+- The extraction is clipped to the room left in your inventory, so nothing is
+  silently removed and then reinserted elsewhere; free space first, or the call
+  fails with an inventory-full message
 
 ## Examples
 

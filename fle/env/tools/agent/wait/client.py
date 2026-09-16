@@ -85,7 +85,12 @@ class Wait(Tool):
             "inventory": {"entity", "item", "at_least"},
             "research": {"technology"},
             "craft_queue": {"active"},
-            "production_rate": {"item", "at_least", "window_seconds"},
+            "production_rate": {
+                "item",
+                "at_least",
+                "window_seconds",
+                "include_manual_production",
+            },
             "machine_status": {"entity", "status"},
             "delivery": {"item", "at_least"},
             "event": {"type"},
@@ -133,6 +138,9 @@ class Wait(Tool):
             result.setdefault("window_seconds", 60)
             if result["window_seconds"] not in {5, 60, 600, 3600}:
                 raise ValueError("window_seconds must be 5, 60, 600, or 3600")
+            result.setdefault("include_manual_production", False)
+            if not isinstance(result["include_manual_production"], bool):
+                raise ValueError("include_manual_production must be boolean")
         if kind == "event" and result.get("type") not in {
             "new_order",
             "research_completed",

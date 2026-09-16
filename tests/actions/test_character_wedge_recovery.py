@@ -1,10 +1,11 @@
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
 from lupa.lua54 import LuaError, LuaRuntime
 
 from fle.env.entities import Position
+from fle.env.instance import NONE
 from fle.env.tools.agent.move_to.client import MoveTo
 
 pytestmark = pytest.mark.no_factorio
@@ -49,7 +50,9 @@ def runtime():
             end})
         end
         character={valid=true,unit_number=14,position={x=0,y=0},force='player',
-            reach_distance=10,walking_state={walking=false}}
+            reach_distance=10,walking_state={walking=false},
+            prototype={collision_box={left_top={x=-0.35,y=-0.35},
+                right_bottom={x=0.35,y=0.35}}}}
         function character.get_item_count(name) return 5 end
         function character.remove_item(params) removed_item=params end
         function character.teleport(position)
@@ -73,8 +76,15 @@ def runtime():
                     direction=params.direction,unit_number=1,valid=true}
             end,
             find_entities_filtered=function(query)
-                if query.area~=nil and query.limit==18 then
-                    return blocker_entities
+                if query.area~=nil then
+                    if #blocker_entities>0 then return blocker_entities end
+                    local cx=(query.area[1][1]+query.area[2][1])/2
+                    local cy=(query.area[1][2]+query.area[2][2])/2
+                    if probe_blocked({x=cx,y=cy}) then
+                        return {{name='tree-04',type='tree',valid=true,
+                            position={x=cx,y=cy},unit_number=99}}
+                    end
+                    return {}
                 end
                 if query.position~=nil and query.radius~=nil then
                     if probe_blocked(query.position) then
@@ -111,6 +121,12 @@ def runtime():
         storage.agent_characters[1]=character
         storage.utils.get_entity_direction=function(entity,direction)
             return direction or 0
+        end
+        storage.utils.inserter_engine_direction=function(entity,direction)
+            return direction or 0
+        end
+        storage.utils.inserter_direction_report=function(serialized)
+            return serialized
         end
         storage.utils.serialize_entity=function(entity)
             return {name=entity.name,position={x=entity.position.x,y=entity.position.y},
@@ -238,8 +254,10 @@ def test_move_to_escape_takes_a_validated_free_step():
         assert(#storage.walking_queues[1].positions==0)
         assert(character.walking_state.walking==false)
         assert(#teleports==1)
-        assert(teleports[1].to.y==1 or teleports[1].to.y==-1)
-        assert(teleports[1].to.x==1)
+        assert(teleports[1].to.x==character.position.x)
+        assert(teleports[1].to.y==character.position.y)
+        assert(math.abs(teleports[1].to.x-1)<=2 and math.abs(teleports[1].to.y)<=2)
+        assert(not probe_blocked(teleports[1].to))
         """)
 
 
@@ -258,6 +276,36 @@ def test_move_to_escape_fails_cleanly_when_boxed_in():
         assert(storage.walking_queues[1].current_target==nil)
         assert(#teleports==0)
         assert(character.position.x==1 and character.position.y==0)
+        """)
+
+
+def test_move_to_unstick_steps_to_nearest_free_tile():
+    lua = runtime()
+    lua.execute("""
+        blocked_positions['0.00,0.00']=true
+        result=storage.actions.move_to(1,'__unstick__','nil','nil',2)
+        assert(result.moved==true)
+        assert(result.steps==1)
+        assert(result.reason=='start_free')
+        assert(result.position.x==1 and result.position.y==0)
+        assert(#teleports==1)
+        assert(teleports[1].to.x==1 and teleports[1].to.y==0)
+        assert(character.position.x==1 and character.position.y==0)
+        """)
+
+
+def test_move_to_unstick_reports_failure_when_boxed_in():
+    lua = runtime()
+    lua.execute("""
+        blocked_positions['0.00,0.00']=true
+        tile_blocks_player=true
+        result=storage.actions.move_to(1,'__unstick__','nil','nil',2)
+        assert(result.moved==false)
+        assert(result.steps==0)
+        assert(result.reason=='tree-04')
+        assert(result.position.x==0 and result.position.y==0)
+        assert(#teleports==0)
+        assert(character.position.x==0 and character.position.y==0)
         """)
 
 
@@ -285,6 +333,7 @@ def _move_client(status: dict) -> MoveTo:
     tool.game_state.player_location = Position(x=0.0, y=0.0)
     tool.game_state.instance.fast = False
     tool.game_state._program_runtime = None
+    tool.refresh_player_location = Mock(return_value=Position(x=0.0, y=0.0))
     tool.request_path = Mock(return_value="handle")
     tool.get_path = Mock()
     tool.execute = Mock(side_effect=[({"ok": True}, 0), (status, 0)])
@@ -324,3 +373,101 @@ def test_move_to_client_blocked_reports_current_and_destination():
     assert "Movement blocked near (1.00, 0.50)" in message
     assert "could not escape toward (10.00, 0.00)" in message
     assert "requested destination may be occupied" in message
+
+
+def _unstick_client() -> MoveTo:
+    tool = MoveTo.__new__(MoveTo)
+    tool.player_index = 1
+    tool.game_state = Mock()
+    tool.game_state.player_location = Position(x=0.0, y=0.0)
+    tool.game_state.instance.fast = False
+    tool.game_state._program_runtime = None
+    tool.refresh_player_location = Mock(return_value=Position(x=0.0, y=0.0))
+    tool._game_tick = Mock(return_value=100)
+    return tool
+
+
+def _move_one(tool, goal):
+    return tool._move_one(
+        goal,
+        laying=None,
+        leading=None,
+        stop_distance=0,
+        interrupt_on=set(),
+        timeout_ticks=100,
+    )
+
+
+def test_move_to_client_unsticks_occupied_start_and_retries_once():
+    tool = _unstick_client()
+    tool.request_path = Mock(side_effect=["first", "second", "third"])
+    not_found = RuntimeError(
+        '{"status": "not_found", "diagnostics": {"start": {"reason": "occupied"}}}'
+    )
+    tool.get_path = Mock(side_effect=[not_found, [], ["waypoint"]])
+    tool.execute = Mock(
+        side_effect=[
+            (
+                {
+                    "moved": True,
+                    "steps": 1,
+                    "reason": "small-electric-pole",
+                    "position": {"x": 1.0, "y": 0.0},
+                },
+                0,
+            ),
+            ({"x": 1.0, "y": 0.0}, 0),
+            ({"active": False, "x": 5.0, "y": 0.0, "stop_reason": "arrived"}, 0),
+        ]
+    )
+    final, receipt = _move_one(tool, Position(x=5.0, y=0.0))
+    assert (final.x, final.y) == (5.0, 0.0)
+    assert receipt["status"] == "completed"
+    assert tool.get_path.call_count == 3
+    assert tool.execute.call_args_list[0] == call(1, "__unstick__", NONE, NONE, 2)
+
+
+def test_move_to_client_bounded_unstick_failure_reports_position_and_reason():
+    tool = _unstick_client()
+    tool.request_path = Mock(return_value="handle")
+    tool.get_path = Mock(side_effect=RuntimeError('{"status": "not_found"}'))
+    tool.execute = Mock(
+        side_effect=[
+            (
+                {
+                    "moved": True,
+                    "steps": 1,
+                    "reason": "terrain",
+                    "position": {"x": 1.0, "y": 0.0},
+                },
+                0,
+            ),
+            (
+                {
+                    "moved": True,
+                    "steps": 1,
+                    "reason": "terrain",
+                    "position": {"x": 2.0, "y": 0.0},
+                },
+                0,
+            ),
+        ]
+    )
+    with pytest.raises(RuntimeError) as error:
+        _move_one(tool, Position(x=5.0, y=0.0))
+    assert tool.execute.call_count == 2
+    message = str(error.value)
+    assert "blocking reason: terrain" in message
+    assert "(2.00, 0.00)" in message
+
+
+def test_move_to_client_target_on_own_tile_is_already_reached():
+    tool = _unstick_client()
+    tool.request_path = Mock()
+    tool.get_path = Mock()
+    tool.execute = Mock()
+    final, receipt = _move_one(tool, Position(x=0.4, y=0.2))
+    assert (final.x, final.y) == (0.0, 0.0)
+    assert receipt["stop_reason"] == "already_in_range"
+    tool.request_path.assert_not_called()
+    tool.execute.assert_not_called()

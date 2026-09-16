@@ -1,6 +1,76 @@
 import pytest
+from lupa.lua54 import LuaError
 
-from fle.env.game_types import Prototype, Resource
+from fle.env.game_types import Prototype
+from tests.actions.lua_stub_helpers import load_env, lua_stub
+
+CRAFT_STUB = """
+    game = {tick = 0, surfaces = {}}
+    storage = {
+        actions = {},
+        utils = {},
+        agent_characters = {},
+        elapsed_ticks = 0,
+        crafted_items = {},
+    }
+    prototypes = {item = {}}
+    inventory = {}
+    for i = 1, 40 do
+        inventory[i] = {valid_for_read = false}
+    end
+    local function recipe(name, product_amount, ingredients)
+        return {
+            name = name,
+            enabled = true,
+            category = "crafting",
+            energy = 0.5,
+            products = {{name = name, type = "item", amount = product_amount}},
+            ingredients = ingredients,
+        }
+    end
+    recipes = {
+        ["iron-chest"] = recipe("iron-chest", 1, {{name = "iron-plate", type = "item", amount = 8}}),
+        ["iron-gear-wheel"] = recipe("iron-gear-wheel", 1, {{name = "iron-plate", type = "item", amount = 2}}),
+        ["copper-cable"] = recipe("copper-cable", 2, {{name = "copper-plate", type = "item", amount = 1}}),
+        ["gear-case"] = recipe("gear-case", 1, {{name = "iron-gear-wheel", type = "item", amount = 1}}),
+    }
+    for name in pairs(recipes) do
+        prototypes.item[name] = {stack_size = 100}
+    end
+    prototypes.item["iron-plate"] = {stack_size = 100}
+    prototypes.item["copper-plate"] = {stack_size = 100}
+    character = {
+        valid = true,
+        position = {x = 0, y = 0},
+        prototype = {crafting_categories = {crafting = true}},
+        force = {
+            recipes = recipes,
+            technologies = {},
+            get_item_production_statistics = function(surface)
+                return {on_flow = function() end}
+            end,
+        },
+        get_item_count = function(name) return counts[name] or 0 end,
+        get_main_inventory = function() return inventory end,
+        remove_item = function(item)
+            counts[item.name] = math.max(0, (counts[item.name] or 0) - item.count)
+        end,
+        insert = function(item) return item.count end,
+    }
+    character.surface = {spill_item_stack = function() end}
+    storage.agent_characters[1] = character
+    storage.utils.ensure_valid_character = function() return character end
+    storage.utils.begin_native_crafting = function(_, name, count) return queued end
+"""
+
+
+def craft_runtime(*, counts=None, fast=True, queued=None):
+    lua = lua_stub(CRAFT_STUB, unpack=True)
+    lua.globals().counts = lua.table_from(counts or {})
+    lua.globals().storage.fast = fast
+    lua.globals().queued = queued
+    load_env(lua, "tools/agent/craft_item/server.lua")
+    return lua
 
 
 @pytest.fixture()
@@ -31,14 +101,8 @@ def test_craft_with_full_inventory(game):
     Test crafting when inventory is full
     """
     game._set_inventory({"iron-plate": 100, "coal": 10000})
-    try:
-        result = game.craft_item(Prototype.IronGearWheel, 1)
-        assert False, (
-            f"Expected crafting to fail due to full inventory, but got result: {result}"
-        )
-    except Exception as e:
-        print(e)
-        assert True
+    with pytest.raises(Exception):
+        game.craft_item(Prototype.IronGearWheel, 1)
 
 
 def test_craft_item(game):
@@ -106,23 +170,6 @@ def test_craft_entity_with_missing_intermediate_resources(game):
     assert crafted == 1
 
 
-def test_craft_uncraftable_entity(game):
-    # Find and move to the nearest iron ore patch
-    iron_ore_position = game.nearest(Resource.IronOre)
-    print(f"Moving to iron ore patch at {iron_ore_position}")
-    game.move_to(iron_ore_position)
-
-    # Mine iron ore (we need at least 8 iron plates, so mine a bit more to be safe)
-    print("Mining iron ore...")
-    game.harvest_resource(iron_ore_position, quantity=10)
-    print(f"Mined iron ore. Current inventory: {game.inspect_inventory()}")
-
-    # Craft iron gear wheels (each requires 2 iron plates)
-    print("Crafting iron gear wheels...")
-    game.craft_item(Prototype.IronGearWheel, quantity=3)
-    print(f"Crafted iron gear wheels. Current inventory: {game.inspect_inventory()}")
-
-
 def test_craft_no_technology(game):
     game.instance.reset(all_technologies_researched=False)
     try:
@@ -131,3 +178,36 @@ def test_craft_no_technology(game):
         assert True
         return
     assert False, "Should not be able to craft without technology."
+
+
+@pytest.mark.no_factorio
+def test_non_fast_craft_failure_names_missing_ingredients():
+    lua = craft_runtime(counts={"iron-plate": 25}, fast=False, queued=0)
+    with pytest.raises(LuaError) as error:
+        lua.execute("storage.actions.craft_item(1, 'iron-chest', 5)")
+    message = str(error.value)
+    assert "Unable to begin crafting" in message
+    assert "inspect ingredients and inventory space" in message
+    assert "iron-plate" in message
+
+
+@pytest.mark.no_factorio
+def test_fast_sub_ingredient_failure_names_parent_and_child_missing():
+    lua = craft_runtime(counts={}, fast=True)
+    with pytest.raises(LuaError) as error:
+        lua.execute("storage.actions.craft_item(1, 'gear-case', 1)")
+    message = str(error.value)
+    assert "couldn't craft a required sub-ingredient" in message
+    assert "iron-gear-wheel" in message
+    assert "iron-plate" in message
+
+
+@pytest.mark.no_factorio
+def test_fast_still_missing_names_parent_and_child_missing():
+    lua = craft_runtime(counts={"iron-plate": 2}, fast=True)
+    with pytest.raises(LuaError) as error:
+        lua.execute("storage.actions.craft_item(1, 'gear-case', 1)")
+    message = str(error.value)
+    assert "still missing ingredients" in message
+    assert "iron-gear-wheel" in message
+    assert "iron-plate" in message

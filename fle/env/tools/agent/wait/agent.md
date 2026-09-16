@@ -18,8 +18,9 @@ wait(1800, until={"event": {"type": "research_completed"}})
 Inventory without `entity` means the character's inventory. Machine references
 require a stable entity id; removal ends with an error. Delivery means accepted
 items for that product in the currently configured public order. Production rates
-include manual production, matching the public statistics window; supported native
-windows are 5, 60, 600, and 3600 seconds.
+count automated production only; hand-harvested and hand-crafted items are
+subtracted from the native window unless `include_manual_production=True` is set
+on the condition. Supported native windows are 5, 60, 600, and 3600 seconds.
 
 Event types are `research_completed`, `under_attack`, and `new_order`. Only events
 after the wait starts count. New orders become visible when the controller

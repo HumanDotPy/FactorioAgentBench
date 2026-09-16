@@ -10,6 +10,8 @@ from fle.env.tools import Tool
 
 
 class HarvestResource(Tool):
+    SELF_UNSTICK_ATTEMPTS = 2
+
     def __init__(self, connection, game_state):
         super().__init__(connection, game_state)
         self.move_to = MoveTo(connection, game_state)
@@ -53,6 +55,13 @@ class HarvestResource(Tool):
         ticks_before = self.game_state.instance.get_elapsed_ticks()
 
         response, elapsed = self.execute(self.player_index, x, y, quantity, radius)
+        recovery = None
+        if response == 0 or isinstance(response, str):
+            recovery = self._recover_blocked_start(position)
+            if recovery is not None:
+                response, elapsed = self.execute(
+                    self.player_index, x, y, quantity, radius
+                )
 
         # Sleep for the appropriate real-world time based on elapsed ticks
         ticks_after = self.game_state.instance.get_elapsed_ticks()
@@ -64,7 +73,9 @@ class HarvestResource(Tool):
 
         if response == 0 or isinstance(response, str):
             msg = str(response).split(":")[-1].strip()
-            raise Exception(f"Could not harvest. {msg}")
+            raise Exception(
+                self._harvest_failure_message(None, position, msg, recovery)
+            )
 
         return response
 
@@ -85,6 +96,48 @@ class HarvestResource(Tool):
         count = self.inspect_inventory()[item]
         return tick, queue, count
 
+    def _reach_with_recovery(self, position):
+        last_error = None
+        for attempt in range(self.SELF_UNSTICK_ATTEMPTS + 1):
+            try:
+                self.ensure_reachable(position, stop_distance=1.5)
+                return
+            except Exception as exc:
+                last_error = exc
+                if attempt >= self.SELF_UNSTICK_ATTEMPTS:
+                    raise
+                if self._recover_blocked_start(position) is None:
+                    raise
+        raise last_error
+
+    def _recover_blocked_start(self, position) -> dict | None:
+        move = getattr(self, "move_to", None)
+        if move is None or not hasattr(move, "self_unstick"):
+            return None
+        try:
+            info = move.self_unstick(position, attempts=self.SELF_UNSTICK_ATTEMPTS)
+        except Exception:
+            return None
+        if not isinstance(info, dict) or not info.get("moved"):
+            return None
+        return info
+
+    def _harvest_failure_message(self, item, position, response, recovery) -> str:
+        state = getattr(self, "game_state", None)
+        location = getattr(state, "player_location", None)
+        if isinstance(location, Position):
+            where = f"character at ({location.x:.2f}, {location.y:.2f})"
+        else:
+            where = "character position unavailable"
+        reason = (recovery or {}).get("reason") or "unknown"
+        if reason == "start_free":
+            reason = "start_free (no blocking entity or terrain found)"
+        label = f" {item}" if item else ""
+        return (
+            f"Could not harvest{label} at ({position.x}, {position.y}): {response}; "
+            f"{where}; start blocking reason: {reason}"
+        )
+
     def _harvest_native(self, position, quantity, radius):
         resource = self.get_resource_type_at_position(position)
         item = resource[0]
@@ -92,16 +145,31 @@ class HarvestResource(Tool):
         harvested = 0
         while harvested < quantity:
             previous_harvested = harvested
-            self.ensure_reachable(position, stop_distance=1.5)
+            self._reach_with_recovery(position)
             response, _ = self.execute(
                 self.player_index, position.x, position.y, quantity - harvested, radius
             )
+            recovery = None
+            if isinstance(response, str) or response == 0:
+                recovery = self._recover_blocked_start(position)
+                if recovery is not None:
+                    response, _ = self.execute(
+                        self.player_index,
+                        position.x,
+                        position.y,
+                        quantity - harvested,
+                        radius,
+                    )
             if isinstance(response, str):
-                raise RuntimeError(f"Could not harvest {item}: {response}")
+                raise RuntimeError(
+                    self._harvest_failure_message(item, position, response, recovery)
+                )
             last_progress_tick = self._native_tick()
             try:
                 while True:
-                    control = getattr(self.game_state, "_program_runtime", None)
+                    control = getattr(
+                        getattr(self, "game_state", None), "_program_runtime", None
+                    )
                     if control is not None:
                         control.boundary()
                     now, queue, count = self._harvest_status(item)

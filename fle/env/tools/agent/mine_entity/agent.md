@@ -36,11 +36,18 @@ in fast mode.
 
 - The search radius is 1.5 tiles around the requested position. Nothing
   neutral in range is an error; stand or click closer and retry.
+- When a named target is requested (an `Entity`), only that exact name is
+  mined: if no neutral entity of that name is in range, the call is refused
+  rather than mining a different obstacle. Pass a `Position` to mine the
+  nearest neutral tree, rock, stump or corpse.
 - Only neutral entities are eligible. Player-owned corpses and other
   force-owned entities of the same type are refused so their contents are not
   lost; use `insert_item`/`extract_item` or `deconstruct_area` for those.
 - Reach is checked against your resource reach distance. `move_to` closer when
   the error names the distance.
+- Products are inserted before the entity is mined and rolled back if either
+  the insert or the mine fails, so a partial insert cannot destroy the
+  products; the call errors instead.
 - Mining is refused up front when the inventory cannot hold the products.
 - Prefer this over `harvest_resource` when you need one specific entity gone:
   `harvest_resource` queues the nearest matching resource and stops at the

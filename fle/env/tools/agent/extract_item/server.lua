@@ -78,35 +78,32 @@ storage.actions.extract_item = function(player_index, extract_item, count, x, y,
         error("\"Invalid count: must be greater than 0\"")
     end
 
-    -- Find all entities in range
-    local search_radius = 10
-    local area = {{position.x - search_radius, position.y - search_radius},
-                  {position.x + search_radius, position.y + search_radius}}
+    local target_radius = 2.5
     local buildings = nil
 
     if source_name ~= nil then
         buildings = surface.find_entities_filtered{
-            area = area,
+            position = position,
+            radius = target_radius,
             name = source_name
         }
     else
         buildings = surface.find_entities_filtered{
-            area = area
+            position = position,
+            radius = target_radius
         }
     end
 
-    -- Find the closest building with the item we want
     local closest_distance = math.huge
     local closest_entity = nil
-    local found_any_items = false
 
     for _, building in ipairs(buildings) do
-        if building.name ~= 'character' then
+        if building.name ~= 'character' and building.valid then
             local item_count = get_entity_item_count(building, extract_item)
             if item_count > 0 then
-                found_any_items = true
-                local distance = ((position.x - building.position.x) ^ 2 +
-                                (position.y - building.position.y) ^ 2) ^ 0.5
+                local dx = position.x - building.position.x
+                local dy = position.y - building.position.y
+                local distance = math.sqrt(dx * dx + dy * dy)
                 if distance < closest_distance then
                     closest_distance = distance
                     closest_entity = building
@@ -118,51 +115,72 @@ storage.actions.extract_item = function(player_index, extract_item, count, x, y,
     -- Error handling in priority order
 
     if #buildings == 0 then
-        error("\"Could not find any entities in range\"")
+        if source_name then
+            error("\"Could not find a valid "..source_name.." entity at ("
+                ..position.x..", "..position.y..")\"")
+        else
+            error("\"Could not find any entities at ("..position.x..", "..position.y..")\"")
+        end
     end
 
     if not closest_entity then
         if source_name then
-            error("\"Could not find a valid "..source_name.." entity containing " .. extract_item.."\"")
+            error("\"Could not find a valid "..source_name.." entity containing "
+                .. extract_item.." at ("..position.x..", "..position.y..")\"")
         else
-            error("\"Could not find a valid entity containing " .. extract_item .. "\"")
+            error("\"Could not find a valid entity containing " .. extract_item
+                .. " at ("..position.x..", "..position.y..")\"")
         end
     end
 
-    if closest_distance > search_radius then
-        error("\"Entity at ("..closest_entity.position.x..", "..closest_entity.position.y..") is too far away from your position of ("..player.position.x..","..player.position.y.."), move closer.\"")
-    end
-
-    if not found_any_items then
-        error("\"No " .. extract_item .. " found in any nearby entities\"")
+    if not storage.fast then
+        local reach = 10
+        local pdx = player.position.x - closest_entity.position.x
+        local pdy = player.position.y - closest_entity.position.y
+        if math.sqrt(pdx * pdx + pdy * pdy) > reach then
+            error("\"Entity at ("..closest_entity.position.x..", "..closest_entity.position.y
+                ..") is too far away from your position of ("..player.position.x..","
+                ..player.position.y.."), move closer.\"")
+        end
     end
 
     -- Calculate how many items we can actually extract
     local available_count = get_entity_item_count(closest_entity, extract_item)
     local extract_count = math.min(count, available_count)
 
-    -- Create the stack for extraction
-    local stack = {name=extract_item, count=extract_count}
+    local main_inventory = player.get_main_inventory()
+    if main_inventory and main_inventory.can_insert
+        and not main_inventory.can_insert({name = extract_item, count = extract_count})
+    then
+        local low, high = 0, extract_count
+        while low < high do
+            local middle = math.floor((low + high + 1) / 2)
+            if main_inventory.can_insert({name = extract_item, count = middle}) then
+                low = middle
+            else
+                high = middle - 1
+            end
+        end
+        extract_count = low
+    end
 
-    -- Attempt the extraction
-    local number_extracted = remove_items_from_entity(closest_entity, stack)
+    if extract_count <= 0 then
+        error("\"Inventory has no room for " .. extract_item .. "\"")
+    end
+
+    local inserted = player.insert{name=extract_item, count=extract_count}
+    if inserted <= 0 then
+        error("\"Inventory has no room for " .. extract_item .. "\"")
+    end
+
+    local number_extracted = remove_items_from_entity(closest_entity,
+        {name=extract_item, count=inserted})
+    if number_extracted < inserted then
+        player.remove_item{name=extract_item, count=inserted - number_extracted}
+    end
 
     if number_extracted > 0 then
-        -- Insert items into player inventory
-        local transfer_stack = {name=extract_item, count=number_extracted}
-        local inserted = player.insert(transfer_stack)
-
-        -- If we couldn't insert all items, put them back in the container
-        if inserted < number_extracted then
-            stack.count = number_extracted - inserted
-            closest_entity.insert(stack)
-            number_extracted = inserted
-        end
-
-        -- game.print("Extracted " .. number_extracted .. " " .. extract_item)
         return number_extracted
-    else
-        -- This should rarely happen given our prior checks
-        error("\"Failed to extract " .. extract_item .. "\"")
     end
+    error("\"Failed to extract " .. extract_item .. "\"")
 end

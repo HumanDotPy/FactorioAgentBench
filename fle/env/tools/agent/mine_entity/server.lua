@@ -79,17 +79,32 @@ storage.actions.mine_entity = function(player_index, x, y, entity_name)
         end
     end
 
-    local target = named or nearest
+    local target = nil
+    local refusal = nil
+    if entity_name ~= nil then
+        target = named
+        if target == nil then
+            refusal = string.format(
+                "No neutral %s within 1.5 tiles of (%.1f, %.1f); refusing to mine a different entity.",
+                entity_name, requested.x, requested.y
+            )
+        end
+    else
+        target = nearest
+        if target == nil then
+            refusal = string.format(
+                "Nothing neutral to mine at (%.1f, %.1f); no tree, rock, stump or corpse within 1.5 tiles.",
+                requested.x, requested.y
+            )
+        end
+    end
     if target == nil then
         local suffix = ""
         if #skipped > 0 then
             suffix = " Found only non-neutral entities ("
                 .. table.concat(skipped, ", ") .. ")."
         end
-        error(string.format(
-            "Nothing neutral to mine at (%.1f, %.1f); no tree, rock, stump or corpse within 1.5 tiles.%s",
-            requested.x, requested.y, suffix
-        ))
+        error(refusal .. suffix)
     end
 
     local entity = target.entity
@@ -121,37 +136,57 @@ storage.actions.mine_entity = function(player_index, x, y, entity_name)
     local items = {}
     if products ~= nil then
         local main_inventory = player.get_main_inventory()
-        if main_inventory and main_inventory.can_insert then
-            for _, product in pairs(products) do
-                local amount = product.amount or 1
-                if not main_inventory.can_insert({name = product.name, count = amount}) then
-                    error(string.format(
-                        "Inventory is full; cannot mine %s (%s x%d). Free space or deliver items first.",
-                        resolved_name, product.name, amount
-                    ))
+        local inserted_items = {}
+        for _, product in pairs(products) do
+            local amount = product.amount or 1
+            if main_inventory and main_inventory.can_insert
+                and not main_inventory.can_insert({name = product.name, count = amount}) then
+                for _, undo in ipairs(inserted_items) do
+                    player.remove_item{name = undo.name, count = undo.count}
                 end
+                error(string.format(
+                    "Inventory is full; cannot mine %s (%s x%d). Free space or deliver items first.",
+                    resolved_name, product.name, amount
+                ))
             end
+            local inserted = tonumber(player.insert({name = product.name, count = amount})) or 0
+            if inserted < amount then
+                for _, undo in ipairs(inserted_items) do
+                    player.remove_item{name = undo.name, count = undo.count}
+                end
+                if inserted > 0 then
+                    player.remove_item{name = product.name, count = inserted}
+                end
+                error(string.format(
+                    "Inventory could only take %d of %d %s; nothing was mined.",
+                    inserted, amount, product.name
+                ))
+            end
+            table.insert(inserted_items, {name = product.name, count = inserted})
         end
 
+        local charged_ticks = 0
         if storage.fast then
-            storage.elapsed_ticks = (storage.elapsed_ticks or 0)
-                + calculate_mining_ticks(entity)
+            charged_ticks = calculate_mining_ticks(entity)
+            storage.elapsed_ticks = (storage.elapsed_ticks or 0) + charged_ticks
         end
 
         local ok_mine, mine_error = pcall(function()
             entity.mine({ignore_minable = false, raise_destroyed = true})
         end)
         if not ok_mine then
+            for _, undo in ipairs(inserted_items) do
+                player.remove_item{name = undo.name, count = undo.count}
+            end
+            if charged_ticks > 0 then
+                storage.elapsed_ticks = (storage.elapsed_ticks or 0) - charged_ticks
+            end
             error("Mining " .. resolved_name .. " failed; " .. tostring(mine_error))
         end
 
-        for _, product in pairs(products) do
-            local amount = product.amount or 1
-            local inserted = tonumber(player.insert({name = product.name, count = amount})) or 0
-            if inserted > 0 then
-                items[product.name] = (items[product.name] or 0) + inserted
-                update_production_stats(player.force, product.name, inserted)
-            end
+        for _, product in ipairs(inserted_items) do
+            items[product.name] = (items[product.name] or 0) + product.count
+            update_production_stats(player.force, product.name, product.count)
         end
     else
         local ok_destroyable, destroyable = pcall(function()

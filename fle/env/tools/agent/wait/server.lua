@@ -20,18 +20,39 @@ local function check_wait(job)
         return observed.active == c.active, observed
     elseif c.kind == "production_rate" then
         local stats = storage.actions.get_production_statistics(job.player_index,{c.item},c.window_seconds,"item",1)
-        observed.rate_per_minute = stats.entries[1].produced_per_minute
+        local total_rate = stats.entries[1].produced_per_minute
+        local manual_rate = 0
+        if not c.include_manual_production then
+            local cutoff_tick = game.tick - c.window_seconds * 60
+            local manual_count = 0
+            for _, event in ipairs(storage.manual_production_events or {}) do
+                if event.tick >= cutoff_tick then
+                    manual_count = manual_count + ((event.outputs or {})[c.item] or 0)
+                end
+            end
+            manual_rate = manual_count / c.window_seconds * 60
+        end
+        observed.rate_per_minute = math.max(total_rate - manual_rate, 0)
+        observed.total_rate_per_minute = total_rate
         observed.window_seconds, observed.at_least = c.window_seconds, c.at_least
-        observed.includes_manual_production = true
+        observed.includes_manual_production = c.include_manual_production == true
         return observed.rate_per_minute >= c.at_least, observed
     elseif c.kind == "machine_status" then
         local entity = storage.entity_handles and storage.entity_handles[c.entity_id]
         if not entity or not entity.valid then error("Wait entity was removed") end
         local status = "unknown"
-        for name, value in pairs(defines.entity_status) do
-            if value == entity.status then status=name; break end
+        local status_known = false
+        if entity.status ~= nil then
+            for name, value in pairs(defines.entity_status) do
+                if value == entity.status then
+                    status = name
+                    status_known = true
+                    break
+                end
+            end
         end
         observed.entity_id, observed.status = c.entity_id, status
+        observed.status_known = status_known
         return status == c.status, observed
     elseif c.kind == "delivery" then
         local product = storage.customer and storage.customer.active_products and storage.customer.active_products[c.item]

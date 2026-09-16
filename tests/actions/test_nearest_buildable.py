@@ -134,12 +134,10 @@ def test_nearest_buildable_multiple_entities(game):
         center_position=game.nearest(Resource.IronOre),
     )
 
-    # get the top left
-    top_left = coordinates.left_top
+    # place three drills across the verified area, centered on it
     positions = []
-    # iterate from left to right
     for i in range(0, 3):
-        pos = Position(x=top_left.x + 3 * i, y=top_left.y)
+        pos = Position(x=coordinates.center.x + 3 * (i - 1), y=coordinates.center.y)
         game.move_to(pos)
         # Place entity at found position to ensure next search finds different spot
         game.place_entity(Prototype.ElectricMiningDrill, position=pos, exact=True)
@@ -219,9 +217,7 @@ def test_drill_groups(game):
         )
 
         # Place drill at center of buildable area
-        drill_pos = Position(
-            x=buildable_coords.left_top.x + 1.5, y=buildable_coords.left_top.y + 1.5
-        )
+        drill_pos = buildable_coords.center
         game.move_to(drill_pos)
         drill = game.place_entity(
             Prototype.ElectricMiningDrill, position=drill_pos, direction=Direction.DOWN

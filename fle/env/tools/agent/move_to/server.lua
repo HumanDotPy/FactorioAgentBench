@@ -20,10 +20,145 @@
 --end
 
 
+local WALKABLE_ENTITY_TYPES = {
+    ["transport-belt"] = true,
+    ["underground-belt"] = true,
+    ["splitter"] = true,
+    ["lane-splitter"] = true,
+    ["loader"] = true,
+    ["linked-belt"] = true,
+}
+
+local function start_block_reason(player)
+    if not player or not player.valid then
+        return "no_character"
+    end
+    local surface = player.surface
+    local box = player.prototype.collision_box
+    local margin = 0.05
+    local area = {
+        {player.position.x + box.left_top.x - margin,
+         player.position.y + box.left_top.y - margin},
+        {player.position.x + box.right_bottom.x + margin,
+         player.position.y + box.right_bottom.y + margin},
+    }
+    local blockers = surface.find_entities_filtered{
+        area = area, collision_mask = "player", limit = 4
+    }
+    for _, entity in ipairs(blockers or {}) do
+        if entity.valid and entity ~= player
+            and not WALKABLE_ENTITY_TYPES[entity.type] then
+            return entity.name
+        end
+    end
+    local tile = surface.get_tile(player.position.x, player.position.y)
+    if tile and tile.collides_with("player") then
+        return "terrain"
+    end
+    return nil
+end
+
+local function unstick_character(player, attempts)
+    local origin = {x = player.position.x, y = player.position.y}
+    local reason = start_block_reason(player)
+    if not reason then
+        return {moved = false, steps = 0, reason = "start_free",
+            position = {x = origin.x, y = origin.y}}
+    end
+    local steps = 0
+    local limit = math.max(1, tonumber(attempts) or 1)
+    while steps < limit do
+        local escape = storage.utils.escape_character_to_free_tile
+        if not escape then
+            reason = "escape_unavailable"
+            break
+        end
+        local stepped = escape(player, nil, nil, origin)
+        if not stepped then
+            break
+        end
+        steps = steps + 1
+        reason = start_block_reason(player)
+        if not reason then
+            break
+        end
+    end
+    return {moved = steps > 0, steps = steps,
+        reason = reason or "start_free",
+        position = {x = player.position.x, y = player.position.y}}
+end
+
+local WALKABLE_FALLBACK_LIMIT = 8
+
+local function tile_is_walkable(surface, tile_x, tile_y)
+    local tile = surface.get_tile(tile_x, tile_y)
+    if not tile or tile.collides_with("player") then
+        return false
+    end
+    local blockers = surface.find_entities_filtered{
+        position = {x = tile_x + 0.5, y = tile_y + 0.5},
+        radius = 0.45, collision_mask = "player", limit = 1
+    }
+    return not (blockers and #blockers > 0)
+end
+
+local function nearest_walkable(player, x, y, radius)
+    if not player or not player.valid or x == nil or y == nil then
+        return {status = "invalid"}
+    end
+    local surface = player.surface
+    local scan = math.max(1, math.min(math.floor(tonumber(radius) or 8), 32))
+    local base_x, base_y = math.floor(x), math.floor(y)
+    local candidates = {}
+    local order = 0
+    for dx = -scan, scan do
+        for dy = -scan, scan do
+            local tile_x, tile_y = base_x + dx, base_y + dy
+            local px, py = tile_x + 0.5, tile_y + 0.5
+            local ox, oy = px - x, py - y
+            order = order + 1
+            candidates[#candidates + 1] = {
+                x = px, y = py, tile_x = tile_x, tile_y = tile_y,
+                distance = math.sqrt(ox * ox + oy * oy), order = order,
+            }
+        end
+    end
+    table.sort(candidates, function(a, b)
+        if math.abs(a.distance - b.distance) > 1e-9 then
+            return a.distance < b.distance
+        end
+        return a.order < b.order
+    end)
+    local walkable = {}
+    for _, candidate in ipairs(candidates) do
+        if tile_is_walkable(surface, candidate.tile_x, candidate.tile_y) then
+            walkable[#walkable + 1] = {
+                x = candidate.x, y = candidate.y,
+                distance = math.floor(candidate.distance * 100 + 0.5) / 100,
+            }
+            if #walkable >= WALKABLE_FALLBACK_LIMIT then
+                break
+            end
+        end
+    end
+    if #walkable == 0 then
+        return {status = "none", requested = {x = x, y = y}, scanned_radius = scan}
+    end
+    return {status = "ok", requested = {x = x, y = y}, scanned_radius = scan,
+        candidates = walkable}
+end
+
 storage.actions.move_to = function(player_index, path_handle, trailing_entity, is_trailing, stop_distance)
     -- Ensure we have a valid character, recreating if necessary
     local player = storage.utils.ensure_valid_character(player_index)
-    if path_handle == "__status__" then
+    if path_handle == "__position__" then
+        return {x = player.position.x, y = player.position.y}
+    elseif path_handle == "__nearest_walkable__" then
+        return nearest_walkable(player, tonumber(trailing_entity),
+            tonumber(is_trailing), tonumber(stop_distance))
+    elseif path_handle == "__unstick__" then
+        return unstick_character(player, stop_distance)
+    elseif path_handle == "__status__" then
         local queue = storage.walking_queues and storage.walking_queues[player_index]
         local interrupt = nil
         if queue then
@@ -114,24 +249,21 @@ storage.actions.move_to = function(player_index, path_handle, trailing_entity, i
     end
 
     local function rotate_entity(entity, direction)
-        local direction_map = {defines.direction.north, defines.direction.east, defines.direction.south, defines.direction.west}
-        local inserter_direction_map = {defines.direction.south, defines.direction.west, defines.direction.north, defines.direction.east}
-
-        if entity.type == "inserter" then
-            orientation = inserter_direction_map[direction/2+1]
-        else
-            orientation = direction_map[direction/2+1]
-        end
-
-        while entity.direction ~= orientation do
-            entity.rotate()
+        if not direction then return end
+        local cardinal = direction - (direction % 4)
+        local orientation = entity.type == "inserter" and (cardinal + 8) % 16 or cardinal
+        for _ = 1, 4 do
+            if entity.direction == orientation then return end
+            local previous = entity.direction
+            local rotated = pcall(function() entity.rotate() end)
+            if not rotated or entity.direction == previous then return end
         end
     end
 
     local function place(place_position, direction)
         if storage.utils.can_place_entity(player, trailing_entity, place_position, direction) then
             if player.get_item_count(trailing_entity) > 0 then
-                local created = surface.create_entity{name=trailing_entity, position=place_position, direction=direction, force='player', player=player, build_check_type=defines.build_check_type.manual, fast_replace=true}
+                local created = surface.create_entity{name=trailing_entity, position=place_position, direction=direction, force=player.force, player=player, build_check_type=defines.build_check_type.manual, fast_replace=true}
                 if created then
                     player.remove_item({name=trailing_entity, count=1})
                 end
@@ -140,7 +272,7 @@ storage.actions.move_to = function(player_index, path_handle, trailing_entity, i
                 local inv_contents = storage.utils.format_inventory_for_error(player)
                 error("\"No ".. trailing_entity .." in the inventory. Current inventory: " .. inv_contents .. "\"")
             end
-        elseif surface.can_fast_replace{name=trailing_entity, position=place_position, direction=direction, force='player'} then
+        elseif surface.can_fast_replace{name=trailing_entity, position=place_position, direction=direction, force=player.force} then
             local existing_entity = surface.find_entity(trailing_entity, place_position)
             if existing_entity and existing_entity.direction ~= direction then
                 rotate_entity(existing_entity, direction)
@@ -159,7 +291,7 @@ storage.actions.move_to = function(player_index, path_handle, trailing_entity, i
         local dir_y = dy > 0 and defines.direction.south or defines.direction.north
 
         if is_leading then
-            place(to_pos, (dir_x + 4) % 8)
+            place(to_pos, (dir_x + 8) % 16)
 
             local corner_dir
             if (dx > 0 and dy > 0) or (dx < 0 and dy < 0) then
@@ -172,7 +304,7 @@ storage.actions.move_to = function(player_index, path_handle, trailing_entity, i
                 corner_dir = defines.direction.east
             end
 
-            place(mid_pos, (corner_dir + 4) % 8)
+            place(mid_pos, (corner_dir + 8) % 16)
         else
             place(from_pos, dir_y)
 
@@ -231,9 +363,7 @@ storage.actions.move_to = function(player_index, path_handle, trailing_entity, i
                 place_diagonal(prev_pos, target_position, true)
             else
                 -- game.print("Placing at direction: " .. direction .. " Current position: " .. serpent.line(prev_pos) .. " Target position: " .. serpent.line(target_position))
-                directions = {defines.direction.north, defines.direction.east, defines.direction.south, defines.direction.west}
-                opposite_direction = {defines.direction.south, defines.direction.west, defines.direction.north, defines.direction.east}
-                new_direction = opposite_direction[direction/2+1]
+                new_direction = (direction + 8) % 16
                 new_belt = place(target_position, new_direction)
                 if prev_belt then
                     rotate_entity(prev_belt, storage.utils.get_direction(prev_belt.position, current_position))

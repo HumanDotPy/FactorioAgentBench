@@ -51,6 +51,99 @@ def test_wait_samples_at_deadline_even_between_poll_intervals():
     """)
 
 
+def test_machine_status_unknown_is_reported_not_healthy():
+    lua = runtime()
+    lua.execute("""
+        machine.status=nil
+        storage.actions.wait('start',1,{ticks=90,poll_ticks=30,
+            condition={kind='machine_status',entity_id=42,status='normal'}})
+        result=storage.actions.wait('poll',1)
+        assert(result.status=='pending')
+        assert(result.observed.status=='unknown')
+        assert(result.observed.status_known==false)
+    """)
+
+
+def test_machine_status_unmapped_value_is_reported_unknown():
+    lua = runtime()
+    lua.execute("""
+        machine.status=9999
+        storage.actions.wait('start',1,{ticks=90,poll_ticks=30,
+            condition={kind='machine_status',entity_id=42,status='working'}})
+        result=storage.actions.wait('poll',1)
+        assert(result.status=='pending')
+        assert(result.observed.status=='unknown')
+        assert(result.observed.status_known==false)
+    """)
+
+
+def test_production_rate_wait_excludes_manual_production_by_default():
+    lua = runtime()
+    lua.execute("""
+        storage.actions.get_production_statistics=function()
+            return {entries={{produced_per_minute=60}}}
+        end
+        storage.manual_production_events={{tick=50,kind='mined',outputs={['iron-plate']=30}}}
+        game.tick=100
+        storage.actions.wait('start',1,{ticks=90,poll_ticks=30,condition={
+            kind='production_rate',item='iron-plate',at_least=60,window_seconds=60}})
+        result=storage.actions.wait('poll',1)
+        assert(result.status=='pending')
+        assert(result.observed.rate_per_minute==30)
+        assert(result.observed.total_rate_per_minute==60)
+        assert(result.observed.includes_manual_production==false)
+        storage.actions.wait('cancel',1)
+    """)
+
+
+def test_production_rate_wait_can_opt_into_manual_production():
+    lua = runtime()
+    lua.execute("""
+        storage.actions.get_production_statistics=function()
+            return {entries={{produced_per_minute=60}}}
+        end
+        storage.manual_production_events={{tick=50,kind='mined',outputs={['iron-plate']=30}}}
+        game.tick=100
+        storage.actions.wait('start',1,{ticks=90,poll_ticks=30,condition={
+            kind='production_rate',item='iron-plate',at_least=60,window_seconds=60,
+            include_manual_production=true}})
+        result=storage.actions.wait('poll',1)
+        assert(result.status=='condition_met')
+        assert(result.observed.rate_per_minute==60)
+        assert(result.observed.includes_manual_production==true)
+        storage.actions.wait('cancel',1)
+    """)
+
+
+def test_production_rate_condition_validates_manual_flag():
+    condition = Wait._validate(
+        {
+            "production_rate": {
+                "item": "plate",
+                "at_least": 5,
+                "include_manual_production": True,
+            }
+        }
+    )
+    assert condition["include_manual_production"] is True
+    assert (
+        Wait._validate({"production_rate": {"item": "plate", "at_least": 5}})[
+            "include_manual_production"
+        ]
+        is False
+    )
+    with pytest.raises(ValueError):
+        Wait._validate(
+            {
+                "production_rate": {
+                    "item": "plate",
+                    "at_least": 5,
+                    "include_manual_production": "yes",
+                }
+            }
+        )
+
+
 def test_client_reports_transport_latency_and_cleans_up():
     tool = Wait.__new__(Wait)
     tool.player_index = 1

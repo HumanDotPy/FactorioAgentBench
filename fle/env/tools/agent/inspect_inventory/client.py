@@ -4,6 +4,17 @@ from fle.env import Inventory, Entity, Position
 from fle.env.tools import Tool
 
 
+class CrafterInventory(Inventory):
+    """Crafter contents with input and output stacks kept separate.
+
+    Indexing and iteration behave like the merged Inventory; the input and
+    output stacks are available as ``input_inventory`` and ``output_inventory``.
+    """
+
+    input_inventory: Inventory = Inventory()
+    output_inventory: Inventory = Inventory()
+
+
 class InspectInventory(Tool):
     def __init__(self, *args):
         super().__init__(*args)
@@ -16,7 +27,9 @@ class InspectInventory(Tool):
         If all_players is True, returns a list of inventories for all players.
         :param entity: Entity to inspect
         :param all_players: If True, returns inventories for all players
-        :return: Inventory of the given entity or list of inventories for all players
+        :return: Inventory of the given entity, list of inventories for all
+            players, or a CrafterInventory with separate input_inventory and
+            output_inventory stacks for crafting machines.
         """
 
         if all_players:
@@ -43,11 +56,17 @@ class InspectInventory(Tool):
             self.player_index, entity is None, x, y, entity.name if entity else ""
         )
 
+        if isinstance(response, dict) and "items" in response:
+            response["items"] = response.get("items") or {}
+            return CrafterInventory(
+                **response["items"],
+                input_inventory=Inventory(**response.get("input_inventory") or {}),
+                output_inventory=Inventory(**response.get("output_inventory") or {}),
+            )
+
         if not isinstance(response, dict):
             if entity:
                 raise Exception(f"Could not inspect inventory of {entity}.", response)
-            else:
-                # raise Exception("Could not inspect None inventory.", response)
-                return Inventory()
+            raise Exception("Could not inspect player inventory.", response)
 
         return Inventory(**response)

@@ -19,7 +19,10 @@ class ExtractItem(Tool):
         :param quantity: Quantity to extract
         :example extract_item(Prototype.IronPlate, stone_furnace.position, 5)
         :example extract_item(Prototype.CopperWire, stone_furnace, 5)
-        :return The number of items extracted.
+        :return The number of items extracted. Only the entity at the
+            requested target is considered; the count is clipped to what the
+            character inventory can hold and anything that does not fit stays
+            in that entity.
         """
         source_name = None
         if isinstance(source, Position):

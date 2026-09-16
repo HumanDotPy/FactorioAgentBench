@@ -1,20 +1,15 @@
-from pathlib import Path
-from unittest.mock import Mock
-
-from lupa.lua54 import LuaRuntime
 import pytest
 
 from fle.env.tools.agent.get_craft_plan.client import GetCraftPlan
 from fle.env.tools.agent.queue_craft.client import QueueCraft
-
+from tests.actions.lua_stub_helpers import lua_stub, stub_client
 
 pytestmark = pytest.mark.no_factorio
-ROOT = Path(__file__).parents[2]
 
 
 def runtime():
-    lua = LuaRuntime(unpack_returned_tuples=True)
-    lua.execute("""
+    return lua_stub(
+        """
         game={tick=0}
         storage={utils={},actions={},agent_characters={}}
         recipes={
@@ -36,13 +31,11 @@ def runtime():
             last_craft={name=name, count=count}
             return count
         end
-    """)
-    for relative in (
-        "fle/env/mods/crafting_menu.lua",
-        "fle/env/tools/agent/queue_craft/server.lua",
-    ):
-        lua.execute((ROOT / relative).read_text(encoding="utf-8"))
-    return lua
+        """,
+        "mods/crafting_menu.lua",
+        "tools/agent/queue_craft/server.lua",
+        unpack=True,
+    )
 
 
 def test_menu_native_intermediates_batch_rounding_and_depth_bound():
@@ -98,17 +91,15 @@ def test_menu_wire_normalization_and_queue_failure_detail():
         "ingredients": {1: {"item": "plate", "missing": 6}},
         "missing_subrecipes": {},
     }
-    read = GetCraftPlan.__new__(GetCraftPlan)
-    read.player_index = 1
-    read.execute = Mock(return_value=(plan, 0))
+    read = stub_client(GetCraftPlan, response=plan)
     assert read("belt")["ingredients"][0]["missing"] == 6
-    queue = QueueCraft.__new__(QueueCraft)
-    queue.player_index = 1
-    queue.execute = Mock(
-        return_value=(
-            {"error": True, "reason": "insufficient_ingredients", "craft_plan": plan},
-            0,
-        )
+    queue = stub_client(
+        QueueCraft,
+        response={
+            "error": True,
+            "reason": "insufficient_ingredients",
+            "craft_plan": plan,
+        },
     )
     with pytest.raises(ValueError, match='"missing":6'):
         queue("belt", 3)

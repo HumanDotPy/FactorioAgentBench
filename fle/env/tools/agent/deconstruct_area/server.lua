@@ -127,10 +127,10 @@ storage.actions.deconstruct_area = function(player_index, x1, y1, x2, y2, protot
     local requested = #targets
     local truncated = requested > max_entities
     local items_returned = {}
+    local overflow = {}
     local removed = 0
     local inventory_full = nil
     local status = "completed"
-    local main_inventory = player.get_main_inventory()
 
     local function collect_items(entity, kind)
         local items = {}
@@ -181,29 +181,62 @@ storage.actions.deconstruct_area = function(player_index, x1, y1, x2, y2, protot
                 skip(entity, "protected")
             else
                 local items = collect_items(entity, target.kind)
-                local full = nil
-                for _, item in ipairs(items) do
-                    if not main_inventory.can_insert({name = item.name, count = item.count}) then
-                        full = item
+                local inserted_items = {}
+                local inserted_count = {}
+                local blocked_index = nil
+                for item_index, item in ipairs(items) do
+                    local inserted = player.insert(item)
+                    inserted_count[item_index] = inserted
+                    if inserted > 0 then
+                        inserted_items[#inserted_items + 1] = {
+                            name = item.name, count = inserted
+                        }
+                    end
+                    if inserted < item.count then
+                        blocked_index = item_index
                         break
                     end
                 end
-                if full then
+                if blocked_index then
+                    for _, item in ipairs(inserted_items) do
+                        player.remove_item{name = item.name, count = item.count}
+                    end
+                    for item_index = blocked_index, #items do
+                        local item = items[item_index]
+                        local left = item.count - (inserted_count[item_index] or 0)
+                        if left > 0 then
+                            overflow[#overflow + 1] = {
+                                name = item.name,
+                                count = left,
+                                position = {
+                                    x = entity.position.x,
+                                    y = entity.position.y,
+                                },
+                            }
+                        end
+                    end
                     status = "inventory_full"
                     inventory_full = {
-                        name = full.name,
+                        name = items[blocked_index].name,
                         position = {x = entity.position.x, y = entity.position.y},
                     }
                     break
                 end
-                for _, item in ipairs(items) do
-                    player.insert(item)
-                    items_returned[item.name] = (items_returned[item.name] or 0) + item.count
-                end
-                pcall(function()
+                local ok_destroy = pcall(function()
                     entity.destroy{raise_destroy=false, do_cliff_correction=false}
                 end)
-                removed = removed + 1
+                if not ok_destroy or entity.valid then
+                    for _, item in ipairs(inserted_items) do
+                        player.remove_item{name = item.name, count = item.count}
+                    end
+                    skip(entity, "destroy_failed")
+                else
+                    for _, item in ipairs(inserted_items) do
+                        items_returned[item.name] = (items_returned[item.name] or 0)
+                            + item.count
+                    end
+                    removed = removed + 1
+                end
             end
         end
     end
@@ -220,6 +253,7 @@ storage.actions.deconstruct_area = function(player_index, x1, y1, x2, y2, protot
         requested = requested,
         items_returned = items_returned,
         skipped = skipped,
+        overflow = overflow,
         truncated = truncated,
         inventory_full = inventory_full,
         tick = game.tick,

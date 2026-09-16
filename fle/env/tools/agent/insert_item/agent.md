@@ -10,6 +10,21 @@ insert_item(item: Prototype, target: Union[Entity, EntityGroup], quantity: int =
 
 The function returns the updated target entity.
 
+The receipt records how much actually went in: `inserted`, `requested` and
+`insert_status` (`"completed"` or `"partial"`). When the target exposes an item
+inventory the receipt also carries `remaining_capacity`, the number of further
+items of that type the target can take after the call (0 means it is now full).
+A partial insert (for example a fuel slot, machine input or chest that fills
+before the whole quantity fits, or a request larger than your stock) also adds
+a diagnostic to the entity `warnings`; it is never reported as a full success.
+Only a call where nothing at all can be accepted raises, with the remaining
+capacity in the message. `replace=True` swaps a burner's fuel only when the new
+stack can be inserted, otherwise the old fuel is restored.
+
+Example: a burner mining drill whose fuel slot holds 40/50 coal answers
+`insert_item(Prototype.Coal, drill, 20)` with `inserted=10, requested=20,
+remaining_capacity=0, insert_status="partial"` instead of failing.
+
 ### Parameters
 
 - `item`: Prototype of the item to insert
@@ -62,6 +77,16 @@ if inventory[Prototype.Coal] >= 10:
 
 - Can only accept fuel items
 - Common with BurnerInserter, BurnerMiningDrill
+- The fuel slot holds one fuel type at a time; feeding a different type fails
+  and names the blocking stack unless you pass `replace=True`
+- For topping up a burner with whatever fuel you carry, use `refuel(entity)`;
+  it picks the best `fuel_value`, respects the existing fuel type and the
+  remaining slot capacity
+- Burner entities burn the fuel in their own fuel slot. A burner inserter also
+  self-fuels: when its reserve runs low it puts a fuel item it picked up into
+  its own fuel slot instead of the destination (confirmed in a Factorio 2.0.77
+  reference world), so it stays fed from a chest or belt of coal. Burner
+  mining drills, furnaces and boilers do not self-fuel and need `refuel`.
 
 ### 3. Assembling Machines
 

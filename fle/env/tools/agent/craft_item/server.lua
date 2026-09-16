@@ -66,6 +66,47 @@ storage.actions.craft_item = function(player_index, entity, count)
         return missing_ingredients
     end
 
+    local function format_missing_ingredients(player, recipe, count)
+        local function sorted_names(missing)
+            local names = {}
+            for name in pairs(missing) do
+                table.insert(names, name)
+            end
+            table.sort(names)
+            return names
+        end
+
+        local function map_text(missing, names)
+            local parts = {}
+            for _, name in ipairs(names) do
+                table.insert(parts, name .. " x" .. missing[name])
+            end
+            return table.concat(parts, ", ")
+        end
+
+        local missing = get_missing_ingredients(player, recipe, count)
+        local names = sorted_names(missing)
+        if #names == 0 then
+            return ""
+        end
+        local detail = map_text(missing, names)
+        local child_parts = {}
+        for _, name in ipairs(names) do
+            local child_recipe = player.force.recipes[name]
+            if child_recipe then
+                local child_missing = get_missing_ingredients(player, child_recipe, missing[name])
+                local child_names = sorted_names(child_missing)
+                if #child_names > 0 then
+                    table.insert(child_parts, name .. ": " .. map_text(child_missing, child_names))
+                end
+            end
+        end
+        if #child_parts > 0 then
+            detail = detail .. " (" .. table.concat(child_parts, "; ") .. ")"
+        end
+        return detail
+    end
+
     local function get_required_technology(recipe_name, force)
         for _, tech in pairs(force.technologies) do
             -- Factorio 2.0: effects are on the technology prototype
@@ -168,7 +209,8 @@ storage.actions.craft_item = function(player_index, entity, count)
             for ingredient_name, needed_amount in pairs(missing_ingredients) do
                 local crafted_amount, error_msg = attempt_craft(player, ingredient_name, needed_amount, attempted_recipes)
                 if crafted_amount == 0 then
-                    return 0, "couldn't craft a required sub-ingredient for ".. entity_name .. " - " .. ingredient_name .. " - " .. error_msg .. ". Required " ..ingredient_name.. " amount for " .. entity_name .. " - " .. needed_amount .. ")"
+                    local missing_detail = format_missing_ingredients(player, recipe, actual_craft_count)
+                    return 0, "couldn't craft a required sub-ingredient for ".. entity_name .. " - " .. ingredient_name .. " - " .. error_msg .. ". Required " ..ingredient_name.. " amount for " .. entity_name .. " - " .. needed_amount .. ") (missing ingredients - " .. missing_detail .. ")"
                 end
             end
         end
@@ -189,11 +231,7 @@ storage.actions.craft_item = function(player_index, entity, count)
         -- Fast crafting implementation
         local missing = get_missing_ingredients(player, recipe, actual_craft_count)
         if next(missing) then
-            local missing_str = ""
-            for name, amount in pairs(missing) do
-                missing_str = missing_str .. name .. " x" .. amount .. ", "
-            end
-            return 0, "still missing ingredients - " .. missing_str:sub(1, -3)
+            return 0, "still missing ingredients - " .. format_missing_ingredients(player, recipe, actual_craft_count)
         end
 
         for _, ingredient in pairs(recipe.ingredients) do
@@ -217,7 +255,13 @@ storage.actions.craft_item = function(player_index, entity, count)
         local queued = storage.utils.begin_native_crafting(
             player_index, entity, math.ceil(count / amount)
         )
-        if queued == 0 then error("Unable to begin crafting: inspect ingredients and inventory space") end
+        if queued == 0 then
+            local missing_detail = format_missing_ingredients(player, recipe, count)
+            if missing_detail ~= "" then
+                error("Unable to begin crafting: inspect ingredients and inventory space - still missing ingredients - " .. missing_detail)
+            end
+            error("Unable to begin crafting: inspect ingredients and inventory space")
+        end
         -- Factorio expands intermediate recipes itself. Do not queue the
         -- intermediates separately and then test inventory before they finish.
         return queued * amount
