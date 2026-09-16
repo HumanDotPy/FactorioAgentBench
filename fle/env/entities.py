@@ -149,6 +149,9 @@ class EntityStatus(Enum):
     NO_SPOT_SEEDABLE_BY_INPUTS = "no_spot_seedable_by_inputs"
     WAITING_FOR_PLANTS_TO_GROW = "waiting_for_plants_to_grow"
 
+    # Public observations use this sentinel when Factorio exposes no mapped state.
+    UNKNOWN = "unknown"
+
     def __repr__(self):
         return f"EntityStatus.{self.name}"
 

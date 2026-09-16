@@ -290,6 +290,7 @@ def test_serialized_status_matches_python_from_string():
     assert quoted == '"no_minable_resources"'
     assert EntityStatus.from_string(quoted) is EntityStatus.NO_MINABLE_RESOURCES
     assert EntityStatus.from_string("normal") is EntityStatus.NORMAL
+    assert EntityStatus.from_string("unknown") is EntityStatus.UNKNOWN
     assert EntityStatus.from_string(None) is None
 
 
