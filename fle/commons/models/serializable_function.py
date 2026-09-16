@@ -130,7 +130,10 @@ class SerializableFunction:
         if self._instance is None:
             raise RuntimeError("Function must be bound to an instance before calling")
         persistent_vars = getattr(self._instance, "persistent_vars", None)
-        keys = tuple(persistent_vars) if persistent_vars else ()
+        if persistent_vars:
+            keys = tuple((name, id(value)) for name, value in persistent_vars.items())
+        else:
+            keys = ()
         if self._cached_func is None or self._cached_keys != keys:
             self._cached_func = self.reconstruct(self._instance, self)
             self._cached_keys = keys
