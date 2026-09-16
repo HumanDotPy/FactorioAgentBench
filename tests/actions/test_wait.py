@@ -165,6 +165,17 @@ def test_client_reports_transport_latency_and_cleans_up():
     tool.execute.assert_called_with("cancel", 1)
 
 
+def test_sleep_server_charges_virtual_action_cost_ticks():
+    lua = runtime()
+    lua.execute("storage.elapsed_ticks=7; game.tick=99")
+    lua.execute(
+        (Path(__file__).parents[2] / "fle/env/tools/agent/sleep/server.lua").read_text()
+    )
+    result = lua.execute("return storage.actions.sleep(2)")
+    assert result == 99
+    assert lua.eval("storage.elapsed_ticks") == 127
+
+
 @pytest.mark.parametrize("ticks", [0, -1, 1.5, True])
 def test_wait_rejects_invalid_ticks(ticks):
     with pytest.raises(ValueError, match="ticks must be a positive integer"):

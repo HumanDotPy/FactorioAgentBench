@@ -39,5 +39,6 @@ class Sleep(Tool):
 
         started = __import__("time").monotonic()
         Wait(self.connection, self.game_state)(int(seconds * 60))
+        self.execute(seconds)
         Sleep._add_sleep_duration(__import__("time").monotonic() - started)
         return True
