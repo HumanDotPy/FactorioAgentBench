@@ -87,16 +87,24 @@ class APIFactory:
         self.api_key_manager = None
         self._clients = {}
 
-    def _get_client(self, provider_config: dict, api_key: str) -> AsyncOpenAI:
-        cache_key = (provider_config["base_url"], api_key)
-        client = self._clients.get(cache_key)
-        if client is None:
-            client = AsyncOpenAI(
-                base_url=provider_config["base_url"],
-                api_key=api_key,
-                max_retries=0,  # We handle retries ourselves
-            )
-            self._clients[cache_key] = client
+    async def _get_client(self, provider_config: dict, api_key: str) -> AsyncOpenAI:
+        base_url = provider_config["base_url"]
+        cached = self._clients.get(base_url)
+        if cached is not None:
+            cached_key, client = cached
+            if cached_key == api_key and not client.is_closed():
+                return client
+            del self._clients[base_url]
+            try:
+                await client.close()
+            except Exception as e:
+                logging.warning("Failed to close rotated API client: %s", e)
+        client = AsyncOpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            max_retries=0,  # We handle retries ourselves
+        )
+        self._clients[base_url] = (api_key, client)
         return client
 
     def _get_provider_config(self, model: str) -> dict:
@@ -224,7 +232,7 @@ class APIFactory:
         api_key = self._get_api_key(provider_config)
 
         # Create client
-        client = self._get_client(provider_config, api_key)
+        client = await self._get_client(provider_config, api_key)
 
         try:
             # Build the API call parameters
