@@ -35,7 +35,7 @@ IMPORTANT
 
 When smelting, it is important to wait until the smelting is completed. Use 1 second per ore as a rule of thumb (the game time is sped up compared to normal game)
 LISTEN HERE YOU DUMB MODEL: To create an automatic movement structure that moves items from for instance a drill to a chest or a furnace you need to FIRST put an inserter to the end entity (chest or the furnace) AND THEN connect the inserter with the drills starting position. YOU CAN ONLY CONNECT ENTITIES IN ONE GO. YOU CANNOT DO HALF CONNECTIONS AND THEN PLACE ANOTHER BELT. FIRST PUT DOWN THE INSERTER AND THEN CONNECT THE INSERTER DIRECTLY TO THE DRILL
-Remember you need to rotate the inserter to put items into an entity as by default it takes from the entity.
+Agent-facing inserter directions name the DROP side, not the pickup side: to put items into an entity, rotate the inserter's drop side toward it or use insert_between(source, target).
 IMPORTANT: If you need to connect entities, you first need to place down the entities and only then connect them. You cannot first connect and then place. Use pickup and drop positions where possible to connect entities
 When you place an entity to a position with place_entity, first move near to that position as the player can only palce entities within 10 coordinate radius of themselves.
 Always mine more resources than you need. It's hard to keep account of all resources you need to always better to have more

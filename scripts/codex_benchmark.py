@@ -50,6 +50,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PYTHON = str(REPO_ROOT / ".venv" / "Scripts" / "python.exe")
 MCP_SERVER = str(REPO_ROOT / "scripts" / "factorio_codex_mcp.py")
 CODEX = r"C:\Users\WillR\AppData\Roaming\npm\codex.cmd"
+IN_FACTORY_PROGRAM_TOOLS = (
+    "inspect_inventory, get_entities, nearest, move_to, harvest_resource, "
+    "craft_item, place_entity, place_path, rotate_entities, belt_line_report, "
+    "insert_item, insert_between, refuel, extract_item, extract_area, "
+    "catch_output, can_place_entity, plan_placement, plan_path, "
+    "set_entity_recipe, and blueprint('save'|'place'|'list'|'get')"
+)
 
 
 def _write_codex_home(
@@ -123,14 +130,12 @@ async def run_attempt(
     args: argparse.Namespace,
 ) -> tuple[BenchmarkAttempt, dict]:
     spec = _task_spec(task_id)
-    started_at = datetime.now(timezone.utc)
     async with HTTPEnvironmentClient(args.envd_url) as env_client:
         lease = await env_client.lease(spec)
         lease_id = lease.lease_id
         try:
             codex_home = Path(tempfile.mkdtemp(prefix="codex-home-"))
             _write_codex_home(codex_home, model, args.envd_url, lease_id)
-            goal_line = spec.goal.splitlines()[0] if spec.goal else task_id
             prompt = (
                 f"Objective: {spec.goal}\n\n"
                 "You control a real Factorio factory exclusively through two "
@@ -140,10 +145,7 @@ async def run_attempt(
                 "`factorio__factorio_observe_factory` first. Then intervene "
                 "with short Python programs passed as the `code` argument of "
                 "`factorio__factorio_execute_program`; available in-factory "
-                "names include inspect_inventory, get_entities, nearest, "
-                "move_to, harvest_resource, craft_item, place_entity, "
-                "insert_item, extract_item, set_entity_recipe, and "
-                "blueprint('save'|'place'|'list'|'get') for reusable factory "
+                f"names include {IN_FACTORY_PROGRAM_TOOLS} for reusable factory "
                 "fragments. Prefer the "
                 "supplied inventory over gathering. When the objective is "
                 "met, or no useful action remains, stop calling tools."

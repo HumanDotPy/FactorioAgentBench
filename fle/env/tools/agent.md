@@ -1,5 +1,41 @@
 # Patterns
 
+## Direction and tool semantics
+
+`Direction` is agent-facing. For inserters `direction` names the DROP side
+(the engine stores the pickup side; receipts echo `pickup_side`/`drop_side`).
+For belts, underground belts and drills it names item flow and output. `+y`
+points south. Belt tiles are walkable, so a walk may start on or cross them;
+only entities that block the player layer stop movement. In a program,
+`player_position` reads the character's current `Position`.
+
+Placement is exact and non-atomic. Probe with `plan_placement`/`plan_path`,
+then build with `place_entity`/`place_path`; the returned position is
+authoritative because the engine snaps footprints to tiles. Inspect fluids and
+ports with `get_entity_ports` and power with `get_power_network`.
+
+Items on the ground are first-class reads, not invisible clutter.
+`get_entities(...).ground_items` lists one entry per dropped stack (`name`,
+`count`, `position`) and sets `ground_items_truncated` when the stack listing
+is capped; `get_tile_map` draws each stack as the `o` glyph and its structured
+entity record carries `item` and `count`. Ground items never block
+construction, but they explain catch failures: `catch_output` receipts report
+`item_on_ground_before` (plus warnings) when the catch tile already holds
+items, and `place_entity` receipts add `drop_warning` when nothing at a
+machine's catch tile can receive its output. Check them before assuming a
+receiver is working.
+
+| Intent | Tool |
+| --- | --- |
+| Place one exact entity on a tile | `place_entity(exact=True)` |
+| Link two existing entities point-to-point | `connect_entities` (planner-assisted profile only) |
+| Build an exact axis-aligned polyline | `place_path` |
+| Probe a tile or corridor before building | `plan_placement`, `plan_path` |
+| Stamp a repeated pattern | `repeat_pattern` |
+| Put one receiver on a machine's drop tile | `catch_output` |
+| Bridge two machines with an inserter | `insert_between` |
+| If a `place_path` receipt is partial | resume from `resume_from`, clear `blocker` |
+
 ## Core Systems Implementation
 
 ### 1. Resource Mining Systems
@@ -7,35 +43,28 @@
 #### Self-Fueling Coal Mining System
 
 ```python
-def build_self_fueling_coal_mining_system(coal_patch_position):
-    # Define building area
-    building_box = BuildingBox(width=Prototype.BurnerMiningDrill.WIDTH, height=Prototype.BurnerMiningDrill.HEIGHT + Prototype.BurnerInserter.HEIGHT + Prototype.TransportBelt.HEIGHT)  #  drill width, drill + inserter + belt height
-    buildable_coords = nearest_buildable(Prototype.BurnerMiningDrill, building_box, coal_patch_position)
+def build_self_fueling_coal_mining_system(coal_position):
+    move_to(coal_position)
+    drill = place_entity(
+        Prototype.BurnerMiningDrill,
+        position=coal_position,
+        direction=Direction.DOWN,
+    )
+    print(f"Placed burner mining drill at {drill.position}")
 
-    # Place drill
-    move_to(buildable_coords.center)
-    drill = place_entity(Prototype.BurnerMiningDrill,
-                            position=buildable_coords.center,
-                            direction=Direction.DOWN)
-    print(f"Placed BurnerMiningDrill to mine coal at {drill.position}")
+    catcher = catch_output(drill)
+    print(f"Placed {catcher['status']} receiver at {catcher['catch_tile']}")
 
-    # Place self-fueling inserter
-    inserter = place_entity_next_to(Prototype.BurnerInserter,
-                                        drill.position,
-                                        direction=Direction.DOWN,
-                                        spacing=0)
-    inserter = rotate_entity(inserter, Direction.UP)
-    print(f"Placed inserter at {inserter.position} to fuel the drill")
-
-    # Connect with belts
-    belts = connect_entities(drill.drop_position,
-                                inserter.pickup_position,
-                                Prototype.TransportBelt)
-    print(f"Connected drill to inserter with transport belt")
-
-    # Bootstrap system
-    drill = insert_item(Prototype.Coal, drill, quantity=5)
-    return drill, inserter, belts
+    fuel_chest = place_entity(
+        Prototype.WoodenChest,
+        position=Position(x=drill.position.x - 2, y=drill.position.y),
+    )
+    feeder = insert_between(fuel_chest, drill)
+    if feeder.get("status") != "placed":
+        print(f"Could not place fuel inserter: {feeder}")
+    insert_item(Prototype.Coal, fuel_chest, quantity=20)
+    refuel(insert_item(Prototype.Coal, drill, quantity=5))
+    return drill, catcher, fuel_chest, feeder
 ```
 
 ### 2. Power Systems
@@ -47,144 +76,112 @@ Power typically involves:
 -> Boiler (burning coal)
 -> SteamEngine
 
-IMPORTANT: We also need to be very careful and check where we can place boiler and steam engine as they cannot be on water
-We will do this in 3 separate code examples
+IMPORTANT: Boiler and steam engine cannot be on water, so probe before
+building. Keep at least 4 tiles between the pump and the boiler for pipes.
 
 ```python
-# log your general idea what you will do next
-print(f"I will create a power generation setup with a steam engine")
-# Power system pattern
+print("I will create a power generation setup with a steam engine")
 move_to(water_position)
-# first place offshore pump on the water system
-offshore_pump = place_entity(Prototype.OffshorePump, position=water_position)
-print(f"Placed offshore pump to get water at {offshore_pump.position}") # Placed at Position(x = 1, y = 0)
-# Then place the boiler near the offshore pump
-# IMPORTANT: We need to be careful as there is water nearby which is unplaceable,
-# We do not know where the water is so we will use nearest_buildable for safety and place the entity at the center of the boundingbox
-# We will also need to be atleast 4 tiles away from the offshore-pump and otherwise won't have room for connections.
+pump = place_offshore_pump(water_position)
+print(f"Placed offshore pump at {pump.position}")
 
-# first get the width and height of a BurnerMiningDrill
-print(f"Boiler width: {Prototype.Boiler.WIDTH}, height: {Prototype.Boiler.HEIGHT}") # width 3, height 2
-# use the prototype width and height attributes
-# add 4 to ensure no overlap
-building_box = BuildingBox(width = Prototype.Boiler.WIDTH + 4, height = Prototype.Boiler.HEIGHT + 4)
-
-coords = nearest_buildable(Prototype.Boiler,building_box,offshore_pump.position)
-# place the boiler at the centre coordinate
-# first move to the center coordinate
-move_to(coords.center)
-boiler = place_entity(Prototype.Boiler, position = coords.center, direction = Direction.LEFT)
-print(f"Placed boiler to generate steam at {boiler.position}. This will be connected to the offshore pump at {offshore_pump.position}") # placed boiler at Position(x = 10, y = 0)
-# add coal to boiler to start the power generation
-boiler = insert_item(Prototype.Coal, boiler, 10)
+boiler_position = Position(x=pump.position.x + 6, y=pump.position.y)
+probe = plan_placement(Prototype.Boiler, position=boiler_position, direction=Direction.LEFT)
+assert probe["placeable"], f"Boiler tile is blocked: {probe}"
+boiler = place_entity(Prototype.Boiler, position=boiler_position, direction=Direction.LEFT)
+insert_item(Prototype.Coal, boiler, quantity=10)
 ```
 
 ```python
-boiler = get_entity(Prototype.Boiler, Position(x = 10, y = 0))
-# Finally we need to place the steam engine close to the boiler
-# use the prototype width and height attributes
-# add 4 to ensure no overlap
-building_box = BuildingBox(width = Prototype.SteamEngine.WIDTH + 4, height = Prototype.SteamEngine.HEIGHT + 4)
-
-coords = nearest_buildable(Prototype.SteamEngine,bbox,boiler.position)
-# move to the centre coordinate
-move_to(coords.center)
-# place the steam engine on the centre coordinate
-steam_engine = place_entity(Prototype.SteamEngine,
-                            position = coords.center,
-                            direction = Direction.LEFT)
-
-print(f"Placed steam_engine to generate electricity at {steam_engine.position}. This will be connected to the boiler at {boiler.position} to generate electricity") # Placed at Position(x = 10, y = 10)
+engine_position = Position(x=boiler.position.x + 7, y=boiler.position.y)
+probe = plan_placement(Prototype.SteamEngine, position=engine_position, direction=Direction.LEFT)
+assert probe["placeable"], f"Steam engine tile is blocked: {probe}"
+steam_engine = place_entity(
+    Prototype.SteamEngine,
+    position=engine_position,
+    direction=Direction.LEFT,
+)
+print(f"Placed steam engine at {steam_engine.position}")
 ```
 
 ```python
-offshore_pump = get_entity(Prototype.OffshorePump, Position(x = 1, y = 0))
-boiler = get_entity(Prototype.Boiler, Position(x = 10, y = 0))
-steam_engine = get_entity(Prototype.SteamEngine, Position(x = 10, y = 10))
-# Connect entities in order
-water_pipes = connect_entities(offshore_pump, boiler, Prototype.Pipe)
-print(f"Connected offshore pump at {offshore_pump.position} to boiler at {boiler.position} with pipes {water_pipes}")
-steam_pipes = connect_entities(boiler, steam_engine, Prototype.Pipe)
-print(f"Connected boiler at {boiler.position} to steam_engine at {steam_engine.position} with pipes {water_pipes}")
+pump_attach = get_entity_ports(pump)["outputs"][0]["attach_tiles"][0]
+boiler_attach = get_entity_ports(boiler)["inputs"][0]["attach_tiles"][0]
+water_corner = Position(x=boiler_attach["x"], y=pump_attach["y"])
+place_path(
+    Prototype.Pipe,
+    [
+        Position(x=pump_attach["x"], y=pump_attach["y"]),
+        water_corner,
+        Position(x=boiler_attach["x"], y=boiler_attach["y"]),
+    ],
+)
+engine_attach = get_entity_ports(steam_engine)["inputs"][0]["attach_tiles"][0]
+boiler_steam = get_entity_ports(boiler)["outputs"][0]["attach_tiles"][0]
+steam_corner = Position(x=boiler_steam["x"], y=engine_attach["y"])
+place_path(
+    Prototype.Pipe,
+    [
+        Position(x=boiler_steam["x"], y=boiler_steam["y"]),
+        steam_corner,
+        Position(x=engine_attach["x"], y=engine_attach["y"]),
+    ],
+)
 
-# check that it has power
-# sleep for 5 seconds to ensure flow
-sleep(5)
-# update the entity
-steam_engine = get_entity(Prototype.SteamEngine, position = steam_engine.position)
-# check that the steam engine is generating power
-assert steam_engine.energy > 0, f"Steam engine is not generating power"
-print(f"Steam engine at {steam_engine.position} is generating power!")
+wait(300)
+steam_engine = get_entity(Prototype.SteamEngine, steam_engine.position)
+assert steam_engine.energy > 0, "Steam engine is not generating power"
+print(f"Steam engine at {steam_engine.position} is generating power")
 ```
 
 ### 3. Automated Assembly Systems
 
 #### Basic Assembly Line
 
-Important: Each section of the mine should be atleast 20 spaces further away from the other and have enough room for connections
+Keep factory sections at least 20 tiles apart and leave room for inserters.
 
 ```python
-furnace_output_inserter = get_entity(Prototype.BurnerInserter, Position(x = 9, y = 0))
-solar_panel = get_entity(Prototype.SolarPanel, Position(x = 0, y = 0))
-# get a position 15 spaces away
-assembler_position = Position(x = furnace_output_inserter.x + 15, y = furnace_output_inserter.y)
-# Plan space for assembler and inserters, add some buffer
-building_box = BuildingBox(width=Prototype.AssemblingMachine1.WIDTH + 2*Prototype.BurnerInserter.WIDTH + 2, height=Prototype.AssemblingMachine1.HEIGHT+ 2)
-buildable_coords = nearest_buildable(Prototype.AssemblingMachine1,
-                                        building_box,
-                                        assembler_position)
-
-# Place assembling machine
-move_to(buildable_coords.center)
-assembler = place_entity(Prototype.AssemblingMachine1,
-                            position=buildable_coords.center,
-                            direction = Direction.DOWN)
-print(f"Placed assembling machine at {assembler.position}")
-
-# Set recipe. Recipes always use the RecipeName namespace; Prototype names
-# identify entities/items and are not accepted by set_entity_recipe.
+assembler_position = Position(x=0, y=0)
+probe = plan_placement(
+    Prototype.AssemblingMachine1,
+    position=assembler_position,
+    direction=Direction.DOWN,
+)
+assert probe["placeable"], f"Assembler tile is blocked: {probe}"
+assembler = place_entity(
+    Prototype.AssemblingMachine1,
+    position=assembler_position,
+    direction=Direction.DOWN,
+)
 set_entity_recipe(assembler, RecipeName.CopperCable)
 
-# Add input inserter
-# place it to the right as we added to the width of the building box
-assembly_machine_input_inserter = place_entity_next_to(Prototype.BurnerInserter,
-                                          assembler.position,
-                                          direction=Direction.RIGHT,
-                                          spacing=0)
-# rotate it to input items into the assembling machine
-assembly_machine_input_inserter = rotate_entity(assembly_machine_input_inserter, Direction.LEFT)
+input_chest = place_entity(
+    Prototype.WoodenChest,
+    position=Position(x=assembler.position.x - 3, y=assembler.position.y),
+)
+input_feeder = insert_between(input_chest, assembler)
+insert_item(Prototype.CopperPlate, input_chest, quantity=20)
 
-# Add output inserter
-# put it on the other side of assembling machine
-output_inserter = place_entity_next_to(Prototype.BurnerInserter,
-                                           assembler.position,
-                                           direction=Direction.LEFT,
-                                           spacing=0)
-output_chest = place_entity(Prototype.WoodenChest, position = output_inserter.drop_position)
-# add coal to inserters
-output_inserter = insert_item(Prototype.Coal, output_inserter, quantity = 5)
-input_inserter = insert_item(Prototype.Coal, input_inserter, quantity = 5)
-# Connect power
-poles = connect_entities(power_source,
-                     assembler,
-                     Prototype.SmallElectricPole)
-print(f"Powered assembling machine at {assembler.position} with {poles}")
-# wait for 5 seconds to check power
-sleep(5)
+output_chest = place_entity(
+    Prototype.WoodenChest,
+    position=Position(x=assembler.position.x + 3, y=assembler.position.y),
+)
+output_feeder = insert_between(assembler, output_chest)
+refuel(input_feeder)
+refuel(output_feeder)
+
+solar = place_entity(
+    Prototype.SolarPanel,
+    position=Position(x=assembler.position.x, y=assembler.position.y + 8),
+)
+place_power_line([solar.position, assembler.position], Prototype.SmallElectricPole)
+
+wait(900)
 assembler = get_entity(Prototype.AssemblingMachine1, assembler.position)
-assert assembler.energy > 0, f"Assembling machine at {assembler.position} is not receiving power"
-# Connect input belt
-belts = connect_entities(furnace_output_inserter,
-                     assembly_machine_input_inserter,
-                     Prototype.TransportBelt)
-print(f"Connected assembling machine at {assembler.position} to furnace_output_inserter with {belts}")
-
-# wait for 15 seconds to if structure works and machine is creating copper cables into the output chest
-sleep(15)
+assert assembler.energy > 0, f"Assembler at {assembler.position} has no power"
 output_chest = get_entity(Prototype.WoodenChest, output_chest.position)
-inventory = inspect_inventory(output_chest)
-copper_cables_in_inventory = inventory[Prototype.CopperCable]
-assert copper_cables_in_inventory > 0, f"No copper cables created"
+cables = inspect_inventory(output_chest)
+assert cables[Prototype.CopperCable] > 0, "No copper cables produced"
 ```
 
 ### 4. Research Systems
@@ -193,26 +190,16 @@ assert copper_cables_in_inventory > 0, f"No copper cables created"
 
 ```python
 def build_research_facility(power_source, lab):
-    # Connect power
-    poles = connect_entities(power_source,
-                         lab,
-                         Prototype.SmallElectricPole)
-    print(f"Powered lab at {lab.position} with {poles}")
-    # Add science pack inserter
-    # put it to the left of lab
-    inserter = place_entity_next_to(Prototype.BurnerInserter,
-                                        lab.position,
-                                        direction=Direction.LEFT,
-                                        spacing=0)
-    # rotate it to input items into the lab
-    inserter = rotate_entity(inserter, Direction.RIGHT)
-    # Place input chest
-    chest = place_entity(Prototype.WoodenChest,
-                                     inserter.pickup_position,
-                                     direction=Direction.LEFT)
-    print(f"Placed chest at {chest.position} to input automation packs to lab at {lab.position}")
+    place_power_line([power_source.position, lab.position], Prototype.SmallElectricPole)
+    print(f"Powered lab at {lab.position}")
 
-    return lab, inserter, chest
+    science_chest = place_entity(
+        Prototype.WoodenChest,
+        position=Position(x=lab.position.x + 3, y=lab.position.y),
+    )
+    feeder = insert_between(science_chest, lab)
+    insert_item(Prototype.AutomationSciencePack, science_chest, quantity=50)
+    return lab, feeder, science_chest
 ```
 
 # Key Implementation Patterns
@@ -230,52 +217,73 @@ def monitor_entity_status(entity, expected_status):
     return True
 ```
 
-## Chemical plants
-
-Set recipe for chemical plant and connect to input and output storage tanks
+### 2. Resuming a Partial Polyline
 
 ```python
-# get the chemical plant
+receipt = place_path(Prototype.TransportBelt, [start, corner, end])
+while receipt.get("status") == "partial":
+    blocker = receipt["blocker"]
+    print(f"Stopped at {receipt['last_position']} by {blocker}")
+    mine_entity(blocker)
+    receipt = place_path(Prototype.TransportBelt, [receipt["resume_from"], corner, end])
+```
+
+## Chemical plants
+
+Set the recipe before connecting inputs and outputs. Read each port's
+`attach_tiles` and place pipes there.
+
+```python
 chemical_plant = get_entity(Prototype.ChemicalPlant, position=Position(x=0, y=0))
-
-# Set the recipe to craft solid fuel from heavy oil
-# IMPORTANT: The recipe for chemical plants and oil refineries must be set before connecting to inputs and outputs
 chemical_plant = set_entity_recipe(chemical_plant, RecipeName.HeavyOilCracking)
-print(f"Set the recipe of chemical plant at {chemical_plant.position} to HeavyOilCracking")
+print(f"Set the recipe of chemical plant at {chemical_plant.position}")
 
-# get the input storage tank
-storage_tank = get_entity(Prototype.StorageTank, position=Position(x=10, y=0))
-# connect with underground and overground pipes
-# the order matters as the storage tank will be connected to recipe inputs
-pipes = connect_entities(storage_tank, chemical_plant, connection_type={Prototype.UndergroundPipe, Prototype.Pipe})
-print(f"Connected the input tank at {storage_tank.position} to chemical plant at {chemical_plant.position} with {pipes}")
-
-# get the output storage tank
-output_storage_tank = get_entity(Prototype.StorageTank, position=Position(x=-10, y=0))
-# connect with underground and overground pipes
-# the order matters as the storage tank will be connected to recipe outputs
-pipes = connect_entities(chemical_plant, output_storage_tank, connection_type={Prototype.UndergroundPipe, Prototype.Pipe})
-print(f"Connected the output tank at {output_storage_tank.position} to chemical plant at {chemical_plant.position} with {pipes}")
+storage_tank = place_entity(
+    Prototype.StorageTank,
+    position=Position(x=10, y=0),
+)
+ports = get_entity_ports(storage_tank)
+attach = ports["ports"][0]["attach_tiles"][0]
+place_path(
+    Prototype.Pipe,
+    [Position(x=attach["x"], y=attach["y"]),
+     Position(x=chemical_plant.position.x + 2, y=chemical_plant.position.y)],
+)
+output_storage_tank = place_entity(
+    Prototype.StorageTank,
+    position=Position(x=-10, y=0),
+)
+ports = get_entity_ports(chemical_plant)
+attach = ports["outputs"][0]["attach_tiles"][0]
+place_path(
+    Prototype.Pipe,
+    [Position(x=attach["x"], y=attach["y"]),
+     Position(x=output_storage_tank.position.x + 2, y=output_storage_tank.position.y)],
+)
 ```
 
 ## Oil Refinery
 
-Set recipe for oil refinery to get petroleum gas
+Set the recipe before connecting inputs and outputs.
 
 ```python
-# get the pumpjack
 pumpjack = get_entity(Prototype.PumpJack, position=Position(x=-50, y=0))
-oil_refinery = get_entity(Prototype.Oilrefinery, position = Position(x = -25, y = 10))
-
-# Set the recipe to basc oil processing
-# IMPORTANT: The recipe for chemical plants and oil refineries must be set before connecting to inputs and outputs
+oil_refinery = get_entity(Prototype.OilRefinery, position=Position(x=-25, y=10))
 oil_refinery = set_entity_recipe(oil_refinery, RecipeName.BasicOilProcessing)
-print(f"Set the recipe of oil refinery at {oil_refinery.position} to BasicOilProcessing")
+print(f"Set the recipe of oil refinery at {oil_refinery.position}")
 
-# connect with underground and overground pipes to the pumpjack
-pipes = connect_entities(pumpjack, oil_refinery, connection_type={Prototype.UndergroundPipe, Prototype.Pipe})
-print(f"Connected the pumpjack at {pumpjack.position} to oil refinery at {oil_refinery.position} with {pipes}")
-
+ports = get_entity_ports(oil_refinery)
+attach = ports["inputs"][0]["attach_tiles"][0]
+corner = Position(x=pumpjack.position.x, y=attach["y"])
+place_path(
+    Prototype.Pipe,
+    [
+        Position(x=pumpjack.position.x, y=pumpjack.position.y),
+        corner,
+        Position(x=attach["x"], y=attach["y"]),
+    ],
+)
+print(f"Connected the pumpjack to the oil refinery")
 ```
 
 ## Useful statistics
@@ -328,8 +336,9 @@ Chemical plant - 1 (Example: Creates 600 Lubricant per 60 seconds)
 
 ## TIPS WHEN CREATING STRUCTURES
 
-- When a entity has status "WAITING_FOR_SPACE_IN_DESTINATION", it means the there is no space in the drop position. For instance, a mining drill will have status WAITING_FOR_SPACE_IN_DESTINATION when the entities it mines are not being properly collected by a furnace or a chest or transported away from drop position with transport belts
-- Make sure to always put 20+ fuel into all entities that require fuel. It's easy to mine more coal, so it's better to insert in abundance
-- Keep it simple! Only use transport belts if you need them. Use chests and furnaces to catch the ore directly from drills
-- Inserters put items into entities or take items away from entities. You need to add inserters when items need to be automatically put into entities like chests, assembling machines, furnaces, boilers etc. The only exception is you can put a chest directly at drills drop position, that catches the ore directly or a furnace with place_entity_next_to(drill.drop_position), where the furnace will be fed the ore
-- have at least 10 spaces between different factory sections
+- When an entity has status "WAITING_FOR_SPACE_IN_DESTINATION", it means there is no space in the drop position. For instance, a mining drill will have status WAITING_FOR_SPACE_IN_DESTINATION when the items it mines are not being collected by a furnace, chest, or transport belts at its drop position. `catch_output(drill)` places a chest on the exact catch tile.
+- Make sure to always put 20+ fuel into all entities that require fuel. Use `refuel(entity)` to top up from your inventory; it picks the best fuel you carry.
+- Keep it simple! Only use transport belts if you need them. Use chests and furnaces to catch the ore directly from drills with `catch_output`.
+- Missed output accumulates on the ground: watch `get_entities(...).ground_items`, the `o` glyphs in `get_tile_map`, and the `item_on_ground_before`/`drop_warning` fields of `catch_output`/`place_entity` receipts, then move or fix the receiver instead of waiting for a status flip.
+- Inserters put items into entities or take items away from entities; agent-facing inserter `direction` is always the DROP side. Use `insert_between(source, target)` to feed a target instead of guessing a rotation. You need to add inserters when items need to be automatically put into entities like chests, assembling machines, furnaces, boilers etc.
+- Have at least 10 spaces between different factory sections.

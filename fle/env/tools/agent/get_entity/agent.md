@@ -39,6 +39,14 @@ belts = connect_entities(
 )
 ```
 
+**Group prototypes**
+
+`Prototype.BeltGroup`, `Prototype.PipeGroup` and `Prototype.ElectricityGroup`
+search only the position tile and its immediate neighbours. When one is found
+the tool returns the connected group and prints an informational line with its
+class, id, member count and status; the group is a network near the position,
+not the single entity at that tile.
+
 **Outdated variables**
 
 - Regularly update your variables using entity = get_entity(Prototype.X, entity.position)
