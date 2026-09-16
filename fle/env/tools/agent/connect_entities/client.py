@@ -632,12 +632,35 @@ class ConnectEntities(Tool):
             "last_connection_type": connection_type,
         }
 
+    @staticmethod
+    def _entity_values(entities):
+        """Iterate over a Lua table decoded as either a dictionary or a list."""
+        if isinstance(entities, dict):
+            return entities.values()
+        if isinstance(entities, (list, tuple)):
+            return entities
+        return ()
+
+    @classmethod
+    def _append_entity_values(cls, target, source):
+        values = list(cls._entity_values(source))
+        if isinstance(target, list):
+            target.extend(values)
+            return
+        if isinstance(target, dict):
+            next_index = max((key for key in target if isinstance(key, int)), default=0)
+            for value in values:
+                next_index += 1
+                target[next_index] = value
+            return
+        raise TypeError("Path entities must be represented as a list or dictionary")
+
     def _get_groupable_entities(self, result, metaclasses, names_to_type):
         # Process created entities
         path = []
         groupable_entities = []
 
-        for entity_data in result.entities.values():
+        for entity_data in self._entity_values(result.entities):
             if not isinstance(entity_data, dict):
                 continue
 
@@ -1141,20 +1164,16 @@ class ConnectEntities(Tool):
                     if inbetween_path.is_success:
                         if source_straight_line_path_dict["path"]:
                             # add the underground pipes to the source_to_underground_start result
-                            for value in source_straight_line_path_dict[
-                                "path"
-                            ].entities.values():
-                                inbetween_path.entities[
-                                    len(inbetween_path.entities) + 1
-                                ] = value
+                            self._append_entity_values(
+                                inbetween_path.entities,
+                                source_straight_line_path_dict["path"].entities,
+                            )
                         if target_straight_line_path_dict["path"]:
                             # add the underground pipes to the underground_end_to_target result
-                            for value in target_straight_line_path_dict[
-                                "path"
-                            ].entities.values():
-                                inbetween_path.entities[
-                                    len(inbetween_path.entities) + 1
-                                ] = value
+                            self._append_entity_values(
+                                inbetween_path.entities,
+                                target_straight_line_path_dict["path"].entities,
+                            )
                         # return the final path
                         return inbetween_path
 
@@ -1372,7 +1391,7 @@ class ConnectEntities(Tool):
         """
         Pickup the entities in the path data
         """
-        for entity_data in path_data.entities.values():
+        for entity_data in self._entity_values(path_data.entities):
             if not isinstance(entity_data, dict):
                 continue
             # clean up the first path
