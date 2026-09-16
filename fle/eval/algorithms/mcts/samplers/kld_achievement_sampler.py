@@ -129,7 +129,9 @@ class KLDiversityAchievementSampler(DBSampler):
         return kld
 
     @staticmethod
-    def _build_frequency_matrix(programs: List[Tuple[int, Counter]]) -> np.ndarray:
+    def _build_frequency_matrix(
+        programs: List[Tuple[int, Counter]],
+    ) -> Tuple[np.ndarray, np.ndarray]:
         keys: Dict[str, int] = {}
         for _, frequencies in programs:
             for key in frequencies:
@@ -137,16 +139,24 @@ class KLDiversityAchievementSampler(DBSampler):
                     keys[key] = len(keys)
 
         matrix = np.zeros((len(programs), len(keys)), dtype=np.float64)
+        present = np.zeros((len(programs), len(keys)), dtype=bool)
         for row, (_, frequencies) in enumerate(programs):
             for key, value in frequencies.items():
-                matrix[row, keys[key]] = value
-        return matrix
+                column = keys[key]
+                matrix[row, column] = value
+                present[row, column] = True
+        return matrix, present
 
     @staticmethod
-    def _pairwise_kl_divergences(matrix: np.ndarray) -> np.ndarray:
+    def _pairwise_kl_divergences(
+        matrix: np.ndarray, present: np.ndarray = None
+    ) -> np.ndarray:
         num_programs, num_keys = matrix.shape
         if num_keys == 0:
             return np.zeros(num_programs)
+
+        if present is None:
+            present = matrix != 0
 
         epsilon = 1e-10
         smoothed = matrix + epsilon
@@ -154,10 +164,9 @@ class KLDiversityAchievementSampler(DBSampler):
         own_terms = (smoothed * log_smoothed).sum(axis=1)
         cross_terms = smoothed @ log_smoothed.T
 
-        support = matrix != 0
-        support_sizes = support.sum(axis=1)
-        support_float = support.astype(np.float64)
-        intersections = support_float @ support_float.T
+        presence = present.astype(np.float64)
+        support_sizes = presence.sum(axis=1)
+        intersections = presence @ presence.T
         union_sizes = support_sizes[:, None] + support_sizes[None, :] - intersections
 
         safe_union = np.where(union_sizes == 0, 1.0, union_sizes)
@@ -224,8 +233,8 @@ class KLDiversityAchievementSampler(DBSampler):
                         program_id = programs[0][0]
                     else:
                         # Compute pairwise KL divergences
-                        matrix = self._build_frequency_matrix(programs)
-                        scores = self._pairwise_kl_divergences(matrix)
+                        matrix, present = self._build_frequency_matrix(programs)
+                        scores = self._pairwise_kl_divergences(matrix, present)
                         normalized_scores = self._normalize_scores(scores)
 
                         normalized_scores = (
