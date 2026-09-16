@@ -278,12 +278,14 @@ class ProgramRuntime:
         if action in {
             "place_grid",
             "repeat_pattern",
-            "place_path",
             "place_power_line",
             "submit_actions",
             "resume_actions",
         } and isinstance(result, dict):
-            if result.get("status") in {"partial", "halted", "failed"}:
+            failure = result.get("status") in {"partial", "halted", "failed"} or bool(
+                result.get("error")
+            )
+            if failure:
                 with self.condition:
                     if self.active:
                         self.jobs[self.active]["blocker"] = (

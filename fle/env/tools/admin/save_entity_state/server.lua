@@ -1,21 +1,3 @@
-local ENTITY_STATUS_NAMES = nil
-
-local function quoted_status_name(entity_status)
-    if not ENTITY_STATUS_NAMES then
-        ENTITY_STATUS_NAMES = {}
-        for name, value in pairs(defines.entity_status) do
-            ENTITY_STATUS_NAMES[value] = name
-        end
-    end
-    if not entity_status then
-        return '"normal"'
-    end
-    local name = defines.entity_status[entity_status]
-        or ENTITY_STATUS_NAMES[entity_status]
-        or "normal"
-    return '"' .. name .. '"'
-end
-
 -- Helper to ensure all numbers are serializable
 local function serialize_number(num)
     if num == math.huge then
@@ -179,7 +161,7 @@ storage.actions.save_entity_state = function(player_index, distance, player_enti
                 health = serialize_number(entity.health),
                 energy = serialize_number(entity.energy or 0),
                 active = entity.active,
-                status = quoted_status_name(entity.status),
+                status = storage.utils.entity_status_names(entity.status),
                 warnings = {},
                 inventories = {}
             }

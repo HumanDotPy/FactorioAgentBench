@@ -75,11 +75,10 @@ def test_move_to_elapsed_ticks_and_timing(game, speed, tolerance):
     # Check ticks added
     ticks_added = game.instance.get_elapsed_ticks() - initial_ticks
 
-    # Movement should add ticks based on distance and player speed
-    # Character speed is ~0.15 tiles/tick, so 5 tiles should take ~33-34 ticks
-    expected_ticks = 5 / 0.15  # Distance / speed
+    # Character walking speed is version-dependent, so accept the observed
+    # band for a 5-tile walk instead of pinning a specific tiles/tick rate.
     assert 25 <= ticks_added <= 40, (
-        f"Expected ~{expected_ticks:.0f} ticks for 5-tile movement, got {ticks_added}"
+        f"Expected 25-40 ticks for 5-tile movement, got {ticks_added}"
     )
 
     # Real-world sleep should be proportional to ticks at current speed

@@ -13,6 +13,7 @@ storage.actions.load_entity_state = function(player, stored_json_data)
     local character_states = {}
     local blueprint_overlays = {}
     local old_positions = {}
+    local leftover_items = {}
     -- Snapshot characters are replaced after the factory. They must not block
     -- native revival at a spawn tile now occupied by the saved factory.
     for _,state in pairs(stored_data) do
@@ -301,55 +302,40 @@ storage.actions.load_entity_state = function(player, stored_json_data)
 
         -- Restore transport belt contents
         if entity_type == "transport-belt" and state.transport_lines then
-            -- game.print("Has transport_lines field: " .. tostring(state.transport_lines ~= nil))
-            -- Handle front line (line 1)
-            local line1 = entity.get_transport_line(1)
-
-            if state.transport_lines["1"] then
-                -- game.print("Transport line 1")
-                for item_name, count in pairs(state.transport_lines["1"]) do
+            local function restore_transport_line(line, contents, line_index)
+                if not line then return end
+                for item_name, count in pairs(contents or {}) do
                     local name = unquote_string(item_name)
                     local item_count = tonumber(count)
-                    if prototypes.item[name] then
-                        -- Insert whole stacks instead of single items
-                        local stack_size = math.max(
-                            1, prototypes.item[name].stack_size or 1)
+                    if name and item_count and item_count > 0
+                        and prototypes.item[name] then
                         local inserted = 0
                         while inserted < item_count do
-                            local chunk = math.min(stack_size, item_count - inserted)
-                            line1.insert_at(inserted / item_count, {
+                            local position = inserted / item_count
+                            local ok, accepted = pcall(function()
+                                return line.insert_at(position, {
+                                    name = name,
+                                    count = 1
+                                })
+                            end)
+                            if not ok or accepted ~= true then break end
+                            inserted = inserted + 1
+                        end
+                        if inserted < item_count then
+                            table.insert(leftover_items, {
+                                entity_id = entity.unit_number,
+                                line = line_index,
                                 name = name,
-                                count = chunk
+                                count = item_count - inserted,
                             })
-                            inserted = inserted + chunk
                         end
                     end
                 end
             end
-
-            -- Handle back line (line 2)
-            local line2 = entity.get_transport_line(2)
-            if state.transport_lines["2"] then
-                -- game.print("Transport line 2")
-                for item_name, count in pairs(state.transport_lines["2"]) do
-                    local name = unquote_string(item_name)
-                    local item_count = tonumber(count)
-                    if prototypes.item[name] then
-                        -- Insert whole stacks instead of single items
-                        local stack_size = math.max(
-                            1, prototypes.item[name].stack_size or 1)
-                        local inserted = 0
-                        while inserted < item_count do
-                            local chunk = math.min(stack_size, item_count - inserted)
-                            line2.insert_at(inserted / item_count, {
-                                name = name,
-                                count = chunk
-                            })
-                            inserted = inserted + chunk
-                        end
-                    end
-                end
-            end
+            restore_transport_line(
+                entity.get_transport_line(1), state.transport_lines["1"], 1)
+            restore_transport_line(
+                entity.get_transport_line(2), state.transport_lines["2"], 2)
         end
 
         -- Restore energy and active state
@@ -371,6 +357,9 @@ storage.actions.load_entity_state = function(player, stored_json_data)
                     quality=unquote_string(state.upgrade_quality) or "normal"}}
             end
         end
+    end
+    if #leftover_items > 0 then
+        return {restored = true, leftover = leftover_items}
     end
     return true
 end

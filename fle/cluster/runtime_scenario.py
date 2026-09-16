@@ -8,11 +8,12 @@ This compiler moves callables into control.lua locals and leaves storage as data
 
 from __future__ import annotations
 
+import json
+import hashlib
+import os
 import re
 import shutil
-import json
 import zipfile
-import hashlib
 from pathlib import Path
 
 
@@ -104,6 +105,8 @@ fle_runtime = {{}}
 fle_event_handlers = {{}}
 fle_nth_handlers = {{}}
 
+local fle_nth_registered = {{}}
+
 local function fle_replace_handler(registry, key, owner, handler)
     local handlers = registry[key] or {{}}
     for index = #handlers, 1, -1 do
@@ -130,6 +133,8 @@ end
 
 local function fle_on_nth_tick(owner, tick, handler)
     fle_replace_handler(fle_nth_handlers, tick, owner, handler)
+    if fle_nth_registered[tick] then return end
+    fle_nth_registered[tick] = true
     script.on_nth_tick(tick, function(event)
         for _, entry in ipairs(fle_nth_handlers[tick] or {{}}) do
             entry.handler(event)

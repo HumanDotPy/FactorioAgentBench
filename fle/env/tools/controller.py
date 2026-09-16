@@ -1,3 +1,5 @@
+import enum
+import re
 import time
 from timeit import default_timer as timer
 from typing import List, Tuple, Dict, Any
@@ -7,7 +9,7 @@ import warnings
 
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="slpp")
 
-from slpp import slpp as lua, ParseError
+from slpp import ParseError
 
 from fle.env.entities import Direction
 from fle.env.lua_manager import LuaScriptManager
@@ -20,6 +22,86 @@ COMMAND = "/silent-command"
 # Maximum retries for RCON [processing] errors
 MAX_PROCESSING_RETRIES = 3
 PROCESSING_RETRY_DELAY = 0.1  # seconds
+
+ARGUMENT_TOKEN = re.compile(r"\barg(\d+)\b")
+
+_ENCODING_ERROR = object()
+
+
+def _lua_quote(text: str) -> str:
+    """Quote a Python string as a Lua long-lived literal.
+
+    Lua short strings honour backslash escapes, which slpp cannot decode
+    losslessly. Escape every character that Lua or the transport treats
+    specially (including newlines) so an argument can never break the command
+    or change the number of arguments.
+    """
+    escaped = []
+    for char in text:
+        code = ord(char)
+        if char == "\\":
+            escaped.append("\\\\")
+        elif char == '"':
+            escaped.append('\\"')
+        elif char == "\n":
+            escaped.append("\\n")
+        elif char == "\r":
+            escaped.append("\\r")
+        elif char == "\t":
+            escaped.append("\\t")
+        elif code < 0x20 or code == 0x7F:
+            escaped.append("\\%03d" % code)
+        else:
+            escaped.append(char)
+    return '"' + "".join(escaped) + '"'
+
+
+def _encode_argument(value, path="arg"):
+    """Serialize one controller argument into Lua source.
+
+    Returns the Lua literal or ``_ENCODING_ERROR`` when a value has no safe
+    representation. It never returns an empty string: silent argument loss
+    shifts every later positional argument.
+    """
+    if value is None:
+        return "nil"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return _lua_quote(value)
+    if isinstance(value, Direction):
+        return str(value.value)
+    if isinstance(value, (list, tuple)):
+        parts = []
+        for index, item in enumerate(value):
+            encoded = _encode_argument(item, f"{path}[{index}]")
+            if encoded is _ENCODING_ERROR:
+                return _ENCODING_ERROR
+            parts.append(encoded)
+        return "{" + ",".join(parts) + "}"
+    if hasattr(value, "items"):
+        parts = []
+        for key, item in value.items():
+            if isinstance(key, bool):
+                return _ENCODING_ERROR
+            if isinstance(key, (int, float)):
+                key_literal = f"[{key!r}]"
+            elif isinstance(key, str):
+                key_literal = f"[{_lua_quote(key)}]"
+            else:
+                return _ENCODING_ERROR
+            encoded = _encode_argument(item, f"{path}[{key}]")
+            if encoded is _ENCODING_ERROR:
+                return _ENCODING_ERROR
+            parts.append(f"{key_literal}={encoded}")
+        return "{" + ",".join(parts) + "}"
+    if hasattr(value, "model_dump"):
+        return _encode_argument(value.model_dump(mode="python"), path)
+    if isinstance(value, enum.Enum):
+        return _encode_argument(value.value, path)
+    if isinstance(value, (int, float)):
+        return repr(value)
+    return _ENCODING_ERROR
 
 
 class RconProcessingError(Exception):
@@ -156,13 +238,37 @@ class Controller:
     def _get_command(self, command, parameters=[], measured=True):
         if command in self.script_dict:
             script = f"{COMMAND} " + self.script_dict[command]
-            for index in range(len(parameters)):
-                script = script.replace(
-                    f"arg{index + 1}", lua.encode(parameters[index])
-                )
+            encoded = [self._encode_parameters(parameters)]
+            if encoded[0] is None:
+                raise TypeError("controller command arguments are not encodable")
+            values = encoded[0]
+
+            cursor = 0
+            pieces = []
+            for match in ARGUMENT_TOKEN.finditer(script):
+                pieces.append(script[cursor : match.start()])
+                position = int(match.group(1)) - 1
+                pieces.append(values[position] if position < len(values) else "nil")
+                cursor = match.end()
+            pieces.append(script[cursor:])
+            script = "".join(pieces)
         else:
             script = command
         return script
+
+    def _encode_parameters(self, parameters) -> list[str] | None:
+        encoded = []
+        for index, parameter in enumerate(parameters):
+            literal = _encode_argument(parameter, f"arg{index + 1}")
+            if literal is _ENCODING_ERROR:
+                raise TypeError(
+                    "cannot serialize controller argument "
+                    f"arg{index + 1} ({type(parameter).__name__}); "
+                    "pass a string, number, bool, list, dictionary, Position, "
+                    "Direction, or entity"
+                )
+            encoded.append(literal)
+        return encoded
 
     def _check_for_processing_error(self, lua_response: str) -> bool:
         """Check if the RCON response indicates a [processing] error"""
@@ -173,7 +279,7 @@ class Controller:
     def _execute_once(self, *args) -> Tuple[Dict, Any, str]:
         """Execute a single command attempt, returns (result, elapsed, lua_response)"""
         start = time.time()
-        parameters = [lua.encode(arg) for arg in args]
+        parameters = self._encode_parameters(args)
         invocation = self.lua_script_manager.action_invocation(self.name, parameters)
         wrapped = self.lua_script_manager.action_command(self.name, parameters, COMMAND)
         with span("rcon.action." + self.name):
@@ -199,17 +305,14 @@ class Controller:
                 if parsed is None:
                     raise RuntimeError(f"Invalid action response: {lua_response!r}")
 
-                if (
-                    not parsed.get("a")
-                    and "b" in parsed
-                    and isinstance(parsed["b"], str)
-                ):
-                    # Check if the error message contains [processing]
-                    if "[processing]" in parsed["b"].lower():
-                        raise RconProcessingError(
-                            "Game engine busy (processing), try again"
-                        )
+                if not isinstance(parsed, dict):
+                    raise RuntimeError(f"Invalid action response: {lua_response!r}")
 
+                if not parsed.get("a") and "b" in parsed:
+                    # pcall returned a string diagnostic. The engine may
+                    # already have applied (or partially applied) the action,
+                    # so never retry it here: retrying duplicates side
+                    # effects. Report the diagnostic instead.
                     return parsed["b"], lua_response
 
                 return parsed.get("b", {}), lua_response  # elapsed
@@ -232,7 +335,7 @@ class Controller:
         lua_response = ""
         try:
             start = time.time()
-            parameters = [lua.encode(arg) for arg in args]
+            parameters = self._encode_parameters(args)
             invocation = self.lua_script_manager.action_invocation(
                 self.name, parameters
             )
@@ -241,10 +344,15 @@ class Controller:
             )
             lua_response = self.connection.rcon_client.send_command(wrapped)
             parsed, elapsed = _lua2python(invocation, lua_response, start=start)
-            if not parsed["a"] and "b" in parsed and isinstance(parsed["b"], str):
+            if parsed is None:
+                return lua_response, -1
+            if not parsed.get("a") and "b" in parsed and isinstance(parsed["b"], str):
                 parts = lua_response.split('["b"] = ')
-                parts[1] = f"{parts[1][:-2]}" if parts[1][-1] == "}" else parts[1]
-                parsed["b"] = parts[1].replace("!!", '"')
+                if len(parts) > 1:
+                    value = parts[1]
+                    if value.endswith("}"):
+                        value = value[:-2]
+                    parsed["b"] = value
             if "b" not in parsed:
                 return {}, elapsed
         except ParseError as e:

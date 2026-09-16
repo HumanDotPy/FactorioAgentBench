@@ -66,6 +66,24 @@ def test_execute_request_id_replays_exact_result_without_mutating(task_spec):
         )
 
 
+def test_execute_replay_preserves_non_json_types(task_spec):
+    class TupleWorker(FakeWorker):
+        def execute(self, lease_id, code, sequence, template=None):
+            result = super().execute(lease_id, code, sequence, template=template)
+            result.status_changes["marker"] = (1, 2)
+            return result
+
+    service = EnvironmentService([TupleWorker()])
+    lease = service.lease(task_spec)
+
+    first = service.execute(lease.lease_id, "go()", request_id="tuple-1")
+    replay = service.execute(lease.lease_id, "go()", request_id="tuple-1")
+
+    assert isinstance(first.status_changes["marker"], tuple)
+    assert replay == first
+    assert isinstance(replay.status_changes["marker"], tuple)
+
+
 def test_terminal_execute_can_be_replayed_by_request_id(task_spec):
     class TerminalWorker(FakeWorker):
         def execute(self, lease_id, code, sequence, template=None):

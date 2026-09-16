@@ -17,6 +17,7 @@ import uuid
 from dotenv import load_dotenv
 
 from fle.commons.profiling import timed
+from fle.env.entities import Position
 from fle.env.lua_manager import LuaScriptManager
 from fle.env.namespace import FactorioNamespace
 from fle.env.utils.rcon import _lua2python
@@ -42,6 +43,12 @@ var = {}
 class GameControl:
     """Handles game speed and pause/unpause functionality"""
 
+    _ELAPSED_TICKS_COMMAND = (
+        "/sc rcon.print(remote.interfaces['fle_runtime'] and "
+        "remote.call('fle_runtime', 'dispatch', '__get_elapsed_ticks') or "
+        "(storage.elapsed_ticks ~= nil and storage.elapsed_ticks or 'nil'))"
+    )
+
     def __init__(
         self,
         rcon_client,
@@ -49,6 +56,7 @@ class GameControl:
         reset_speed: float = 10,
         reset_paused: bool = False,
         reconnect=None,
+        runtime_ready=None,
     ):
         self.rcon_client = rcon_client
         self._speed = 1.0
@@ -57,6 +65,7 @@ class GameControl:
         self.reset_paused = reset_paused
         self.render_message_tool = render_message_tool
         self._reconnect = reconnect
+        self._runtime_ready = runtime_ready
 
     @timed("rcon.control")
     def _send(self, command: str):
@@ -132,13 +141,20 @@ class GameControl:
         self.pause()
 
     def get_elapsed_ticks(self):
-        response = self._send(
-            "/sc rcon.print(remote.interfaces['fle_runtime'] and "
-            "remote.call('fle_runtime', 'dispatch', '__get_elapsed_ticks') or "
-            "(storage.elapsed_ticks or 0))"
-        )
+        response = self._send(self._ELAPSED_TICKS_COMMAND)
+        if (
+            response
+            and response.strip() == "nil"
+            and self._runtime_ready is not None
+            and self._runtime_ready()
+        ):
+            response = self._send(self._ELAPSED_TICKS_COMMAND)
         if not response:
             print("WARNING: No response from get_elapsed_ticks")
+            return 0
+        response = response.strip()
+        if response == "nil":
+            print("WARNING: elapsed tick counter is unavailable; reporting 0")
             return 0
         return int(response)
 
@@ -236,6 +252,7 @@ class FactorioInstance:
             reset_speed,
             reset_paused,
             reconnect=self.reconnect,
+            runtime_ready=self.ensure_non_bundled_runtime,
         )
         self.game_control.reset_to_defaults()
 
@@ -302,6 +319,19 @@ class FactorioInstance:
         return self.namespaces[0] if self.namespaces else None
 
     @property
+    def player_position(self) -> Position | None:
+        namespace = self.first_namespace
+        if namespace is None:
+            return None
+        return namespace.player_position
+
+    @player_position.setter
+    def player_position(self, value):
+        namespace = self.first_namespace
+        if namespace is not None:
+            namespace.player_position = value
+
+    @property
     def is_multiagent(self):
         return self.num_agents > 1
 
@@ -321,6 +351,7 @@ class FactorioInstance:
         # Ensure RCON connection is healthy before resetting
         # This prevents cascading failures when the connection was broken by a previous test
         self.ensure_connected()
+        self.ensure_non_bundled_runtime()
 
         # Reset the namespace (clear variables, functions etc)
         assert not game_state or len(game_state.inventories) == self.num_agents, (
@@ -476,21 +507,29 @@ class FactorioInstance:
             # Wait for the result with timeout
             return future.result(timeout=timeout)
         except FutureTimeoutError:
-            # A running Future cannot be cancelled. Close the socket to unblock
-            # any in-flight RCON receive, then let the AST cancellation guard
-            # stop the program before reconnecting the same client.
+            # Signal the AST cancellation guard first. A periodic action checks
+            # it between steps, so most timeouts recover without touching the
+            # socket that every other agent shares.
             namespace._cancel_requested = True
             future.cancel()
-            self.rcon_client.close()
+            socket_closed = False
             try:
-                future.result(timeout=5)
+                future.result(timeout=0.25)
             except Exception:
-                pass
+                # The worker is still blocked inside a socket read. Only now
+                # close the socket to unblock it, and reconnect afterwards.
+                socket_closed = True
+                self.rcon_client.close()
+                try:
+                    future.result(timeout=5)
+                except Exception:
+                    pass
             if not future.done():
                 raise RuntimeError(
                     "Evaluation timed out and its worker did not stop cleanly"
                 )
-            self.rcon_client.connect()
+            if socket_closed:
+                self.rcon_client.connect()
             namespace._cancel_requested = False
             raise TimeoutError()
         except Exception:
@@ -500,6 +539,7 @@ class FactorioInstance:
     @timed("runtime.evaluate")
     def eval(self, expr, agent_idx=0, timeout=60):
         "Evaluate several lines of input, returning the result of the last line with a timeout"
+        self.ensure_non_bundled_runtime()
         ctime = time.time()
         try:
             response = self.eval_with_error(expr, agent_idx, timeout)
@@ -513,8 +553,8 @@ class FactorioInstance:
                 )
             response = (-1, "", timeout_msg)
         except Exception as e:
-            message = e.args[0].replace("\\n", "")
-            response = (-1, "", f"{message}".strip())
+            message = str(e).replace("\\n", "").strip() or e.__class__.__name__
+            response = (-1, "", message)
         ntime = time.time()
         duration = ntime - ctime
         reward, _, result = response
@@ -585,6 +625,10 @@ class FactorioInstance:
                     "/sc remote.call('fle_runtime', 'dispatch', '__call_util', 'remove_enemies')"
                 )
             else:
+                self.require_non_bundled_function(
+                    "storage.utils and storage.utils.remove_enemies",
+                    "storage.utils.remove_enemies",
+                )
                 self.rcon_client.send_command("/sc storage.utils.remove_enemies()")
 
         # Generate chunks around origin to enable long-distance pathfinding
@@ -613,6 +657,9 @@ class FactorioInstance:
                 f"remote.call('fle_runtime', 'dispatch', '__get_alerts', {seconds})"
             )
         else:
+            self.require_non_bundled_function(
+                "storage.get_alerts", "storage.get_alerts"
+            )
             expression = f"storage.get_alerts({seconds})"
         lua_response = self.rcon_client.send_command(
             f"/sc rcon.print(dump({expression}))"
@@ -658,6 +705,66 @@ class FactorioInstance:
             "/silent-command game.surfaces[1].force_generate_chunk_requests()"
         )
         pass
+
+    def _non_bundled_function(self, expression: str) -> bool:
+        response = self.rcon_client.send_command(
+            "/sc rcon.print((" + expression + ") and 'true' or 'false')"
+        )
+        return (response or "").strip() == "true"
+
+    def ensure_non_bundled_runtime(self) -> bool:
+        """Reload console-staged scripts after a save/load stripped storage functions.
+
+        Non-bundled runtimes register Lua functions inside ``storage``; Factorio
+        does not persist those functions across a save/load and there is no
+        on_load hook to re-register them. Re-sending the scripts restores them.
+        Returns True when a reload was performed.
+        """
+        if self.lua_script_manager.runtime_bundled:
+            return False
+        if self._non_bundled_function("storage.actions and storage.actions.move_to"):
+            return False
+        manager = self.lua_script_manager
+        previous_cache = manager.cache_scripts
+        manager.cache_scripts = False
+        try:
+            manager.load_init_into_game("initialise")
+            for script_name in (
+                "lualib_util",
+                "utils",
+                "alerts",
+                "objective_telemetry",
+                "connection_points",
+                "recipe_fluid_connection_mappings",
+                "serialize",
+                "serialize_direction_fix",
+            ):
+                manager.load_init_into_game(script_name)
+            for tool_name in sorted(getattr(self, "controllers", {})):
+                manager.load_tool_into_game(tool_name)
+        finally:
+            manager.cache_scripts = previous_cache
+        if not self._non_bundled_function(
+            "storage.actions and storage.actions.move_to"
+        ):
+            raise RuntimeError(
+                "non-bundled Factorio scripts are unavailable and could not be "
+                "reloaded; restart or restage the Factorio server"
+            )
+        return True
+
+    def require_non_bundled_function(self, expression: str, name: str) -> None:
+        if self.lua_script_manager.runtime_bundled:
+            return
+        if self._non_bundled_function(expression):
+            return
+        self.ensure_non_bundled_runtime()
+        if not self._non_bundled_function(expression):
+            raise RuntimeError(
+                f"non-bundled runtime function {name} is unavailable; the "
+                "console-loaded FLE scripts do not survive a save/load and could "
+                "not be reloaded"
+            )
 
     def is_rcon_connected(self) -> bool:
         """Check if the RCON client is still connected and healthy."""

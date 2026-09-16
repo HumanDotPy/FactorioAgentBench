@@ -6,10 +6,15 @@ from lupa.lua54 import LuaRuntime
 import pytest
 
 from fle.env import Position
+from fle.env.entities import Direction
 from fle.env.game_types import Prototype
 from fle.env.tools.agent.get_prototype_recipe.client import GetPrototypeRecipe
 from fle.env.tools.agent.launch_rocket.client import LaunchRocket
-from fle.env.tools.controller import Controller
+from fle.env.tools.controller import (
+    Controller,
+    _ENCODING_ERROR,
+    _encode_argument,
+)
 from fle.env.utils.rcon import _lua2python
 
 
@@ -29,6 +34,63 @@ def lua_runtime():
     return lua
 
 
+def bare_controller():
+    controller = Controller.__new__(Controller)
+    controller.game_state = SimpleNamespace(_program_runtime=None)
+    controller.script_dict = {}
+    return controller
+
+
+def test_controller_substitutes_each_argument_exactly_once():
+    controller = bare_controller()
+    controller.script_dict = {"probe": "captured = arg1 .. arg2"}
+    script = controller._get_command("probe", parameters=["arg2 text", "tail"])
+    lua = LuaRuntime(unpack_returned_tuples=True)
+    lua.execute(script.replace("/silent-command ", ""))
+    assert lua.eval("captured") == "arg2 texttail"
+
+
+def test_controller_encodes_positions_directions_and_strings_losslessly():
+    script = (
+        "captured = {"
+        + ",".join(
+            _encode_argument(value)
+            for value in (
+                {"position": Position(3, 4), "direction": Direction.RIGHT},
+                'a "b" c\nd',
+                None,
+            )
+        )
+        + "}"
+    )
+    lua = LuaRuntime(unpack_returned_tuples=True)
+    lua.execute(script)
+    assert lua.eval("#captured") == 2
+    assert lua.eval("captured[1].position.x") == 3.0
+    assert lua.eval("captured[1].position.y") == 4.0
+    assert lua.eval("captured[1].direction") == 4
+    assert lua.eval("captured[2]") == 'a "b" c\nd'
+
+
+def test_controller_rejects_arguments_that_cannot_be_serialized():
+    assert _encode_argument(object()) is _ENCODING_ERROR
+    controller = bare_controller()
+    controller.script_dict = {"probe": "captured = arg1"}
+    with pytest.raises(TypeError, match="arg1"):
+        controller._get_command("probe", parameters=[object()])
+
+
+def test_controller_returns_payload_strings_without_retrying_completed_actions():
+    controller = bare_controller()
+    controller.name = "wait"
+    controller._execute_once = Mock(
+        return_value=({"a": False, "b": "engine is [processing] meanwhile"}, "<raw>")
+    )
+    result, _ = controller.execute(30)
+    assert result == "engine is [processing] meanwhile"
+    assert controller._execute_once.call_count == 1
+
+
 def test_transport_quotes_raw_strings_without_losing_error_fields():
     lua = lua_runtime()
     raw = lua.eval("""dump({a=true,b={error="product_depot_capacity_reached",
@@ -46,7 +108,7 @@ def test_transport_quotes_raw_strings_without_losing_error_fields():
 
 
 def test_transport_failure_is_not_returned_as_an_empty_success():
-    controller = Controller.__new__(Controller)
+    controller = bare_controller()
     controller.name = "wait"
     controller._execute_once = Mock(side_effect=OSError("connection closed"))
     with pytest.raises(
@@ -136,6 +198,19 @@ def test_player_attached_crafting_does_not_duplicate_engine_flows():
     assert lua.eval("storage.manual_production_events[1].outputs.lab") == 1
 
 
+def test_character_direction_uses_full_16_way_names():
+    lua = lua_runtime()
+    lua.execute("""
+        character={name='character',position={x=0,y=0},direction=15}
+        player={force={},surface={find_entities_filtered=function() return {character} end}}
+        local data=storage.utils.inspect(player,1,{x=0,y=0})
+        assert(data[1].direction=='northnorthwest')
+        character.direction=3
+        data=storage.utils.inspect(player,1,{x=0,y=0})
+        assert(data[1].direction=='eastnortheast')
+    """)
+
+
 def test_resource_identity_uses_nearest_center_not_engine_query_order():
     lua = lua_runtime()
     lua.execute("""
@@ -203,6 +278,41 @@ def test_score_scripts_do_not_replace_shared_serializer():
         assert "return dump(" not in source
 
 
+def test_runtime_registers_one_nth_tick_dispatcher_per_tick():
+    from fle.cluster.runtime_scenario import _runtime_header
+
+    lua = LuaRuntime(unpack_returned_tuples=True)
+    lua.execute("""
+        fle_actions={}; fle_utils={}; fle_runtime={}
+        fle_event_handlers={}; fle_nth_handlers={}
+        storage={}
+        game={}
+        defines={events={on_tick=1,on_player_joined_game=2},
+            controllers={spectator=1},input_action={}}
+        nth={}
+        script={on_event=function() end, on_nth_tick=function(tick, handler)
+            nth[tick]=nth[tick] or {}
+            table.insert(nth[tick], handler)
+        end}
+    """)
+    lua.execute(
+        _runtime_header("fle-observer")
+        + """
+        calls={a=0,b=0,c=0}
+        fle_on_nth_tick('owner-a', 1, function() calls.a=calls.a+1 end)
+        fle_on_nth_tick('owner-b', 1, function() calls.b=calls.b+1 end)
+        fle_on_nth_tick('owner-c', 60, function() calls.c=calls.c+1 end)
+        """
+    )
+    assert lua.eval("#nth[1]") == 1
+    assert lua.eval("#nth[60]") == 1
+    lua.execute("for _, handler in ipairs(nth[1]) do handler({}) end")
+    lua.execute("for _, handler in ipairs(nth[60]) do handler({}) end")
+    assert lua.eval("calls.a") == 1
+    assert lua.eval("calls.b") == 1
+    assert lua.eval("calls.c") == 1
+
+
 def test_path_approach_radius_stays_centered_on_requested_entity():
     lua = lua_runtime()
     lua.execute("""
@@ -214,6 +324,7 @@ def test_path_approach_radius_stays_centered_on_requested_entity():
             request_path=function(args) captured=args; return 1 end,
         }
         local character={surface=surface,force={},name='character',
+            position={x=17,y=2.3},
             resource_reach_distance=2.5,
             prototype={collision_box={left_top={x=-0.2,y=-0.2},right_bottom={x=0.2,y=0.2}}}}
         storage.utils.ensure_valid_character=function() return character end
@@ -224,5 +335,10 @@ def test_path_approach_radius_stays_centered_on_requested_entity():
     assert lua.eval("captured.goal.y") == 20
     assert lua.eval("captured.radius") == 5.5
     assert lua.eval("captured.bounding_box[1][1]") == -0.25
+    assert lua.eval("captured.start.x") == 17
+    assert lua.eval("captured.start.y") == 2.3
     lua.execute("storage.actions.request_path(1,0,0,10,20,0.15,false,nil,0)")
     assert lua.eval("captured.goal.x") == 10
+    lua.execute("storage.actions.request_path(1,3,4,10,20,0.15,false,0.5,0)")
+    assert lua.eval("captured.start.x") == 3
+    assert lua.eval("captured.start.y") == 4

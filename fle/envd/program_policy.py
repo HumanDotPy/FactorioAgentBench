@@ -10,6 +10,7 @@ depth, not a replacement for OS/container isolation in production.
 from __future__ import annotations
 
 import ast
+import re
 
 from fle.envd.errors import EnvironmentServiceError
 
@@ -66,6 +67,27 @@ FORBIDDEN_NODE_TYPES = (
 
 
 PLANNER_ASSISTED_ACTIONS = {"connect_entities", "nearest_buildable"}
+READ_ONLY_ACTIONS = {"can_place_entity", "plan_placement", "plan_path"}
+GUARDED_CALLS = {
+    *PLANNER_ASSISTED_ACTIONS,
+    "move_to",
+    "place_entity",
+    "set_entity_recipe",
+}
+_DUNDER_IDENTIFIER = re.compile(r"__[A-Za-z0-9]+__")
+
+
+def _alias_pair(node: ast.AST) -> tuple[str, ast.AST] | None:
+    if isinstance(node, ast.Assign):
+        if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            return node.targets[0].id, node.value
+    elif isinstance(node, ast.AnnAssign):
+        if isinstance(node.target, ast.Name) and node.value is not None:
+            return node.target.id, node.value
+    elif isinstance(node, ast.NamedExpr):
+        if isinstance(node.target, ast.Name):
+            return node.target.id, node.value
+    return None
 
 
 def validate_program(code: str, *, action_profile: str = "semantic-motor-v1") -> None:
@@ -88,16 +110,24 @@ def validate_program(code: str, *, action_profile: str = "semantic-motor-v1") ->
 
     semantic_aliases: dict[str, str] = {}
     if action_profile == "semantic-motor-v1":
-        for node in nodes:
-            if (
-                isinstance(node, ast.Assign)
-                and isinstance(node.value, ast.Name)
-                and node.value.id
-                in {*PLANNER_ASSISTED_ACTIONS, "place_entity", "move_to"}
-            ):
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        semantic_aliases[target.id] = node.value.id
+        for _ in range(4):
+            changed = False
+            for node in nodes:
+                pair = _alias_pair(node)
+                if pair is None:
+                    continue
+                target_name, value = pair
+                if not isinstance(value, ast.Name):
+                    continue
+                source = semantic_aliases.get(value.id, value.id)
+                if (
+                    source in GUARDED_CALLS
+                    and semantic_aliases.get(target_name) != source
+                ):
+                    semantic_aliases[target_name] = source
+                    changed = True
+            if not changed:
+                break
 
     for node in nodes:
         if isinstance(node, FORBIDDEN_NODE_TYPES):
@@ -123,7 +153,7 @@ def validate_program(code: str, *, action_profile: str = "semantic-motor-v1") ->
                 f"private attribute {node.attr!r} is not available in fle-program-v1"
             )
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if "__" in node.value:
+            if _DUNDER_IDENTIFIER.search(node.value):
                 raise ProgramPolicyViolation(
                     "dunder attribute names are not available in fle-program-v1"
                 )
@@ -144,10 +174,24 @@ def validate_program(code: str, *, action_profile: str = "semantic-motor-v1") ->
             called_name = semantic_aliases.get(node.func.id, node.func.id)
             if (
                 action_profile == "semantic-motor-v1"
+                and called_name in READ_ONLY_ACTIONS
+            ):
+                continue
+            if (
+                action_profile == "semantic-motor-v1"
                 and called_name in PLANNER_ASSISTED_ACTIONS
             ):
                 raise ProgramPolicyViolation(
                     f"{called_name} is available only in planner-assisted-v1"
+                )
+            if (
+                action_profile == "semantic-motor-v1"
+                and called_name in GUARDED_CALLS
+                and any(keyword.arg is None for keyword in node.keywords)
+            ):
+                raise ProgramPolicyViolation(
+                    f"{called_name} does not accept ** keyword unpacking in "
+                    "fle-program-v1; pass checked arguments explicitly"
                 )
             if action_profile == "semantic-motor-v1" and called_name == "move_to":
                 if any(
@@ -156,6 +200,13 @@ def validate_program(code: str, *, action_profile: str = "semantic-motor-v1") ->
                     raise ProgramPolicyViolation(
                         "move_to laying/leading is planner-assisted; use place_path"
                     )
+                for argument in node.args[1:3]:
+                    if not (
+                        isinstance(argument, ast.Constant) and argument.value is None
+                    ):
+                        raise ProgramPolicyViolation(
+                            "move_to laying/leading is planner-assisted; use place_path"
+                        )
             if action_profile == "semantic-motor-v1" and called_name == "place_entity":
                 first_argument = node.args[0] if node.args else None
                 if (
@@ -165,7 +216,8 @@ def validate_program(code: str, *, action_profile: str = "semantic-motor-v1") ->
                     and first_argument.attr == "OffshorePump"
                 ):
                     raise ProgramPolicyViolation(
-                        "use place_offshore_pump for explicit shoreline snapping"
+                        "use place_offshore_pump(preferred_position); it snaps to the "
+                        "shoreline and faces the pump toward the water"
                     )
                 exact_argument = None
                 if len(node.args) >= 4:
@@ -175,12 +227,13 @@ def validate_program(code: str, *, action_profile: str = "semantic-motor-v1") ->
                         exact_argument = keyword.value
                 if (
                     isinstance(exact_argument, ast.Constant)
-                    and exact_argument.value is False
+                    and exact_argument.value is not True
                 ):
                     raise ProgramPolicyViolation(
-                        "non-exact placement is planner-assisted; canonical placement is exact"
+                        "non-exact placement is planner-assisted; canonical placement "
+                        "is exact (pass exact=True; the engine may snap the returned tile)"
                     )
-            if node.func.id != "set_entity_recipe":
+            if called_name != "set_entity_recipe":
                 continue
             recipe_argument = node.args[1] if len(node.args) > 1 else None
             if recipe_argument is None:

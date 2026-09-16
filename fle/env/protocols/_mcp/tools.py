@@ -3,6 +3,7 @@ from mcp.types import ImageContent
 
 from fle.env.entities import Position
 from fle.commons.models.game_state import GameState
+from fle.envd.program_policy import validate_program
 
 from fle.env.protocols._mcp.init import state, initialize_session
 from fle.env.protocols._mcp import mcp
@@ -58,6 +59,8 @@ async def execute(code: str) -> str:
         return "VCS not initialized. Please connect to a server first."
 
     instance = state.active_server
+
+    validate_program(code, action_profile="semantic-motor-v1")
 
     # Execute the code
     result, score, response = instance.eval(code, timeout=60)

@@ -56,6 +56,18 @@ class Tool(Controller):
         # technology and its recipe). Never discard that causal context.
         return response.strip() if isinstance(response, str) else response
 
+    def refresh_player_location(self):
+        """Refresh the cached player position from the live character."""
+
+        controllers = getattr(
+            getattr(self.game_state, "instance", None), "controllers", None
+        )
+        move_to = controllers.get("move_to") if isinstance(controllers, dict) else None
+        refresh = getattr(move_to, "refresh_player_location", None)
+        if move_to is not self and callable(refresh):
+            return refresh()
+        return self.game_state.player_location
+
     def ensure_reachable(self, target, stop_distance: float = 5.5):
         """Walk into interaction range in live mode without choosing a new target."""
 
@@ -63,7 +75,7 @@ class Tool(Controller):
             return self.game_state.player_location
         position = target.position if isinstance(target, Entity) else target
         x, y = self.get_position(position)
-        current = self.game_state.player_location
+        current = self.refresh_player_location()
         if math.hypot(x - current.x, y - current.y) <= stop_distance:
             return current
         # Lazy import avoids a module cycle: MoveTo itself derives from Tool.

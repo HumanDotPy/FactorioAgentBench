@@ -55,7 +55,7 @@ class _LeaseRecord:
     terminal_reason: str | None = None
     released: bool = False
     lock: threading.RLock = field(default_factory=threading.RLock)
-    execute_request_cache: dict[str, tuple[str, dict[str, Any]]] = field(
+    execute_request_cache: dict[str, tuple[str, ExecutionResult]] = field(
         default_factory=dict
     )
     scored_interventions: int = 0
@@ -312,11 +312,9 @@ class EnvironmentService:
             record.memory = SessionMemory.from_state(memory_state)
         for entry in state.get("execute_request_cache", []):
             cached_result = ExecutionResult.model_validate(entry["result"])
-            payload = cached_result.model_dump(mode="json")
-            payload["lease_id"] = record.lease.lease_id
             record.execute_request_cache[str(entry["request_id"])] = (
                 str(entry["code_sha256"]),
-                payload,
+                cached_result.model_copy(update={"lease_id": record.lease.lease_id}),
             )
         for entry in state.get("epoch_request_cache", []):
             method = str(entry["method"])
@@ -509,15 +507,15 @@ class EnvironmentService:
             if request_id is not None:
                 cached = record.execute_request_cache.get(request_id)
                 if cached is not None:
-                    cached_hash, cached_payload = cached
+                    cached_hash, cached_result = cached
                     if cached_hash != code_sha256:
                         raise IdempotencyConflict(
                             f"Execute request_id {request_id!r} was already used "
                             "for a different program"
                         )
                     self._renew(record)
-                    return ExecutionResult.model_validate(cached_payload).model_copy(
-                        update={"lease_id": lease_id}
+                    return cached_result.model_copy(
+                        update={"lease_id": lease_id}, deep=True
                     )
             if record.snapshot is not None:
                 raise LeaseFinalized(f"Lease is already finalized: {lease_id}")
@@ -654,7 +652,7 @@ class EnvironmentService:
             if request_id is not None:
                 record.execute_request_cache[request_id] = (
                     code_sha256,
-                    result.model_dump(mode="json"),
+                    result.model_copy(deep=True),
                 )
             self._renew(record)
             return result

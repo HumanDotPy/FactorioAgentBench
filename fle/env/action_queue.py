@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from typing import Any
 
@@ -10,12 +11,15 @@ from pydantic import BaseModel
 
 from fle.env.entities import Entity, Position
 
-
 ALLOWED_ACTIONS = {
+    "can_place_entity",
     "cancel_craft",
+    "catch_output",
     "craft_item",
+    "extract_area",
     "extract_item",
     "harvest_resource",
+    "insert_between",
     "insert_item",
     "move_to",
     "pickup_entity",
@@ -25,9 +29,13 @@ ALLOWED_ACTIONS = {
     "place_offshore_pump",
     "place_path",
     "place_power_line",
+    "plan_path",
+    "plan_placement",
     "queue_craft",
     "queue_research",
+    "refuel",
     "repeat_pattern",
+    "rotate_entities",
     "rotate_entity",
     "set_delivery_chest",
     "set_entity_recipe",
@@ -37,6 +45,29 @@ ALLOWED_ACTIONS = {
 }
 DEFAULT_INTERRUPTS = {"action_failure", "new_order", "under_attack"}
 MAX_QUEUE_ACTIONS = 1024
+MAX_PUBLIC_RECEIPTS = 32
+_INTERRUPT_NAME = re.compile(r"^[a-z0-9_-]+$")
+
+
+def _normalize_interrupts(values) -> set[str]:
+    normalized = set()
+    for value in values:
+        name = str(value).strip().lower()
+        if not _INTERRUPT_NAME.match(name):
+            raise ValueError(f"interrupt_on entry {value!r} is not a valid event name")
+        normalized.add(name)
+    return normalized
+
+
+def _interrupt_literal(names) -> str:
+    """Serialize event names for a single-quoted Lua string.
+
+    Escape backslashes first so a backslash in a payload cannot terminate the
+    Lua literal, then escape quotes. This keeps the argument list intact for
+    every name that passed ``_normalize_interrupts``.
+    """
+    escaped = json.dumps(sorted(names)).replace("\\", "\\\\").replace("'", "\\'")
+    return "'" + escaped + "'"
 
 
 def _state(namespace) -> dict[str, Any] | None:
@@ -164,6 +195,8 @@ def _public_state(state: dict[str, Any]) -> dict[str, Any]:
         "next_index": state["next_index"],
         "action_count": len(actions),
         "ticks_elapsed": state.get("ticks_elapsed", 0),
+        "virtual_ticks_elapsed": state.get("virtual_ticks_elapsed", 0),
+        "in_flight": state.get("in_flight"),
         "interrupt_on": sorted(state["interrupt_on"]),
         "stop_reason": state.get("stop_reason"),
         "event": state.get("event"),
@@ -176,37 +209,49 @@ def _public_state(state: dict[str, Any]) -> dict[str, Any]:
             }
             for i, action in enumerate(actions)
         ],
-        "receipts": state.get("receipts", [])[-32:],
+        "receipts": state.get("receipts", [])[-MAX_PUBLIC_RECEIPTS:],
+        "receipt_count": len(state.get("receipts", [])),
     }
+
+
+def _response_json(namespace, command) -> dict:
+    response = namespace.instance.rcon_client.send_command(command)
+    if not response:
+        return {}
+    try:
+        payload = json.loads(response)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"malformed event snapshot response from Factorio: {response!r}"
+        ) from exc
+    return payload if isinstance(payload, dict) else {}
 
 
 def _event_snapshot(namespace, since_tick: int, interrupt_on: set[str]) -> dict | None:
     if not interrupt_on:
         return None
     namespace.instance.ensure_connected()
-    kinds = json.dumps(sorted(interrupt_on))
-    wanted_json = kinds.replace("'", "\\'")
+    wanted_literal = _interrupt_literal(interrupt_on)
     manager = getattr(namespace.instance, "lua_script_manager", None)
     if manager is not None and manager.runtime_bundled:
         command = (
-            "/sc local names=helpers.json_to_table('"
-            + wanted_json
-            + "') local wanted={} for _,v in ipairs(names) do wanted[v]=true end "
+            "/sc local names=helpers.json_to_table("
+            + wanted_literal
+            + ") local wanted={} for _,v in ipairs(names) do wanted[v]=true end "
             + "rcon.print(helpers.table_to_json(remote.call('fle_runtime', 'dispatch', "
             + "'__semantic_event', "
             + f"{int(since_tick)}, wanted)))"
         )
     else:
         command = (
-            "/sc local wanted={} for _,v in ipairs(helpers.json_to_table('"
-            + wanted_json
-            + "')) do wanted[v]=true end local found=nil "
+            "/sc local wanted={} for _,v in ipairs(helpers.json_to_table("
+            + wanted_literal
+            + ")) do wanted[v]=true end local found=nil "
             + f"for _,e in ipairs(storage.semantic_events or {{}}) do if e.tick>{int(since_tick)} "
             + "and wanted[e.type] then found=e break end end "
             + "rcon.print(helpers.table_to_json(found or {}))"
         )
-    response = namespace.instance.rcon_client.send_command(command)
-    event = json.loads(response or "{}")
+    event = _response_json(namespace, command)
     return event or None
 
 
@@ -214,31 +259,27 @@ def _tick_and_event_snapshot(
     namespace, since_tick: int, interrupt_on: set[str]
 ) -> tuple[int, dict | None]:
     namespace.instance.ensure_connected()
-    kinds = json.dumps(sorted(interrupt_on))
-    wanted_json = kinds.replace("'", "\\'")
+    wanted_literal = _interrupt_literal(interrupt_on)
     manager = getattr(namespace.instance, "lua_script_manager", None)
     if manager is not None and manager.runtime_bundled:
         command = (
-            "/sc local names=helpers.json_to_table('"
-            + wanted_json
-            + "') local wanted={} for _,v in ipairs(names) do wanted[v]=true end "
+            "/sc local names=helpers.json_to_table("
+            + wanted_literal
+            + ") local wanted={} for _,v in ipairs(names) do wanted[v]=true end "
             + "local event=remote.call('fle_runtime', 'dispatch', '__semantic_event', "
             + f"{int(since_tick)}, wanted) "
             + "rcon.print(helpers.table_to_json({tick=game.tick, event=event}))"
         )
     else:
         command = (
-            "/sc local wanted={} for _,v in ipairs(helpers.json_to_table('"
-            + wanted_json
-            + "')) do wanted[v]=true end local found=nil "
+            "/sc local wanted={} for _,v in ipairs(helpers.json_to_table("
+            + wanted_literal
+            + ")) do wanted[v]=true end local found=nil "
             + f"for _,e in ipairs(storage.semantic_events or {{}}) do if e.tick>{int(since_tick)} "
             + "and wanted[e.type] then found=e break end end "
             + "rcon.print(helpers.table_to_json({tick=game.tick, event=found or {}}))"
         )
-    response = namespace.instance.rcon_client.send_command(command)
-    payload = json.loads(response or "{}")
-    if not isinstance(payload, dict):
-        payload = {}
+    payload = _response_json(namespace, command)
     tick = payload.get("tick")
     if tick is None:
         tick = int(
@@ -257,11 +298,97 @@ def inspect_queue(namespace) -> dict[str, Any]:
     )
 
 
+def _action_failure(state, index, spec, exc, reason="action_failure") -> None:
+    state["status"] = "halted"
+    state["stop_reason"] = reason
+    state["in_flight"] = None
+    state["event"] = {
+        "type": reason,
+        "action_index": index,
+        "action": spec["action"] if spec else None,
+        "message": str(exc),
+    }
+
+
+def _account_action(
+    namespace, state, index, spec, result, start_tick, end_tick, start_virtual
+):
+    """Record one applied action before anything else can fail.
+
+    The engine mutation has already happened by the time this runs, so the
+    receipt must be durable even when the following tick/event snapshot or
+    result serialization is unavailable. Otherwise a resume would execute the
+    action a second time.
+    """
+    elapsed = max(end_tick - start_tick, 0)
+    end_virtual = _read_virtual_tick(namespace)
+    virtual_elapsed = (
+        max(end_virtual - start_virtual, 0)
+        if end_virtual is not None and start_virtual is not None
+        else 0
+    )
+    try:
+        summary = _result_summary(result)
+    except Exception as exc:
+        summary = f"<unserializable result: {exc}>"
+    state["next_index"] = index + 1
+    state["ticks_elapsed"] = state.get("ticks_elapsed", 0) + elapsed
+    state["virtual_ticks_elapsed"] = (
+        state.get("virtual_ticks_elapsed", 0) + virtual_elapsed
+    )
+    state["in_flight"] = None
+    state["receipts"].append(
+        {
+            "index": index,
+            "id": spec["id"],
+            "action": spec["action"],
+            "ticks_elapsed": elapsed,
+            "virtual_ticks_elapsed": virtual_elapsed,
+            "result": summary,
+        }
+    )
+    results = state.setdefault("results", {})
+    frozen_result = _freeze(result)
+    results[spec["id"]] = frozen_result
+    results[index] = frozen_result
+
+
+def _read_tick(namespace) -> int:
+    return int(
+        namespace.instance.rcon_client.send_command("/sc rcon.print(game.tick)") or 0
+    )
+
+
+def _read_virtual_tick(namespace) -> int | None:
+    getter = getattr(namespace.instance, "get_elapsed_ticks", None)
+    if getter is None:
+        return None
+    try:
+        return int(getter())
+    except Exception:
+        return None
+
+
 def run_queue(namespace) -> dict[str, Any]:
     state = _state(namespace)
     if not state:
         raise ValueError("there is no action queue")
     if state["status"] in {"completed", "cancelled"}:
+        return _public_state(state)
+    if state.get("in_flight") is not None:
+        in_flight = state["in_flight"]
+        state["status"] = "halted"
+        state["stop_reason"] = "action_in_flight"
+        state["event"] = {
+            "type": "action_in_flight",
+            "action_index": int(in_flight.get("index", state["next_index"])),
+            "action": in_flight.get("action"),
+            "message": (
+                "the previous attempt at this action never reported completion; "
+                "it was not re-executed because its side effects are unverified"
+            ),
+        }
+        _store(namespace, state)
         return _public_state(state)
     state["status"] = "running"
     state["stop_reason"] = None
@@ -271,49 +398,79 @@ def run_queue(namespace) -> dict[str, Any]:
     while state["next_index"] < len(state["actions"]):
         index = state["next_index"]
         spec = state["actions"][index]
-        start_tick = int(
-            namespace.instance.rcon_client.send_command("/sc rcon.print(game.tick)")
-            or 0
-        )
+        try:
+            start_tick = _read_tick(namespace)
+        except Exception as exc:
+            _action_failure(state, index, spec, exc, reason="tick_read_failure")
+            results.pop("__namespace__", None)
+            _store(namespace, state)
+            return _public_state(state)
+        start_virtual = _read_virtual_tick(namespace)
+        state["in_flight"] = {
+            "index": index,
+            "id": spec["id"],
+            "action": spec["action"],
+        }
+        _store(namespace, state)
         try:
             args = _resolve(spec["args"], results)
             kwargs = _resolve(spec["kwargs"], results)
             result = getattr(namespace, spec["action"])(*args, **kwargs)
         except Exception as exc:
-            state["status"] = "halted"
-            state["stop_reason"] = "action_failure"
-            state["event"] = {
-                "type": "action_failure",
-                "action_index": index,
-                "message": str(exc),
-            }
+            _action_failure(state, index, spec, exc)
             results.pop("__namespace__", None)
             _store(namespace, state)
             return _public_state(state)
+
+        # The action is now applied. Record it before probing the world so a
+        # failed snapshot cannot cause it to run again on resume.
+        end_tick = start_tick
         if state["interrupt_on"]:
-            end_tick, event = _tick_and_event_snapshot(
-                namespace, start_tick, state["interrupt_on"]
-            )
+            try:
+                end_tick, event = _tick_and_event_snapshot(
+                    namespace, start_tick, state["interrupt_on"]
+                )
+            except Exception as exc:
+                _account_action(
+                    namespace,
+                    state,
+                    index,
+                    spec,
+                    result,
+                    start_tick,
+                    end_tick,
+                    start_virtual,
+                )
+                _action_failure(
+                    state, index, spec, exc, reason="event_snapshot_failure"
+                )
+                results.pop("__namespace__", None)
+                _store(namespace, state)
+                return _public_state(state)
         else:
-            end_tick = int(
-                namespace.instance.rcon_client.send_command("/sc rcon.print(game.tick)")
-                or start_tick
-            )
             event = None
-        frozen_result = _freeze(result)
-        results[spec["id"]] = frozen_result
-        results[index] = frozen_result
-        state["next_index"] += 1
-        state["ticks_elapsed"] += max(end_tick - start_tick, 0)
-        state["receipts"].append(
-            {
-                "index": index,
-                "id": spec["id"],
-                "action": spec["action"],
-                "ticks_elapsed": max(end_tick - start_tick, 0),
-                "result": _result_summary(result),
-            }
+            try:
+                end_tick = _read_tick(namespace)
+            except Exception as exc:
+                _account_action(
+                    namespace,
+                    state,
+                    index,
+                    spec,
+                    result,
+                    start_tick,
+                    end_tick,
+                    start_virtual,
+                )
+                _action_failure(state, index, spec, exc, reason="tick_read_failure")
+                results.pop("__namespace__", None)
+                _store(namespace, state)
+                return _public_state(state)
+
+        _account_action(
+            namespace, state, index, spec, result, start_tick, end_tick, start_virtual
         )
+
         if event:
             state["status"] = "interrupted"
             state["stop_reason"] = str(event.get("type", "event"))
@@ -358,11 +515,11 @@ def submit_queue(namespace, tool, actions, interrupt_on=None) -> dict[str, Any]:
         "status": "pending",
         "actions": normalized,
         "next_index": 0,
-        "interrupt_on": {
-            str(value).strip().lower() for value in (interrupt_on or DEFAULT_INTERRUPTS)
-        },
+        "interrupt_on": _normalize_interrupts(interrupt_on or DEFAULT_INTERRUPTS),
         "submitted_tick": tick,
         "ticks_elapsed": 0,
+        "virtual_ticks_elapsed": 0,
+        "in_flight": None,
         "receipts": [],
         "results": {},
         "stop_reason": None,
@@ -379,11 +536,16 @@ def cancel_queue(namespace, from_index: int | None = None) -> dict[str, Any]:
     start = state["next_index"] if from_index is None else int(from_index)
     if start < state["next_index"] or start > len(state["actions"]):
         raise ValueError("from_index must refer to the pending suffix")
+    in_flight = state.get("in_flight")
+    if in_flight is not None and int(in_flight.get("index", -1)) >= start:
+        state["in_flight"] = None
     del state["actions"][start:]
-    state["status"] = (
-        "cancelled" if state["next_index"] >= len(state["actions"]) else "pending"
-    )
-    state["stop_reason"] = "cancelled"
+    if state["next_index"] >= len(state["actions"]):
+        state["status"] = "cancelled"
+        state["stop_reason"] = "cancelled"
+    else:
+        state["status"] = "pending"
+        state["stop_reason"] = None
     _store(namespace, state)
     return _public_state(state)
 
@@ -411,5 +573,6 @@ def insert_queue(namespace, tool, before_index: int, actions) -> dict[str, Any]:
     state["actions"][before_index:before_index] = normalized
     state["status"] = "pending"
     state["stop_reason"] = None
+    state["event"] = None
     _store(namespace, state)
     return _public_state(state)

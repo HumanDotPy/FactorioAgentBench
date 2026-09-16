@@ -14,6 +14,9 @@ pytestmark = pytest.mark.no_factorio
 def native_tool(counts, ticks, queues):
     tool = object.__new__(HarvestResource)
     tool.player_index = 1
+    tool.game_state = SimpleNamespace(
+        player_location=Position(0, 0), _program_runtime=None
+    )
     tool.get_resource_type_at_position = Mock(return_value=Resource.IronOre)
     tool.inspect_inventory = Mock(side_effect=[{"iron-ore": n} for n in counts])
     tool.ensure_reachable = Mock()
@@ -24,6 +27,19 @@ def native_tool(counts, ticks, queues):
     connection.send_command.side_effect = queues
     tool.connection = SimpleNamespace(rcon_client=connection)
     return tool
+
+
+def unstick_move():
+    return SimpleNamespace(
+        self_unstick=Mock(
+            return_value={
+                "moved": True,
+                "steps": 1,
+                "reason": "terrain",
+                "position": {"x": 1.0, "y": 0.0},
+            }
+        )
+    )
 
 
 def test_native_harvest_counts_inventory_not_number_of_resource_entities():
@@ -40,6 +56,25 @@ def test_stalled_harvest_cancels_mining_and_reports_actual_progress():
         tool.connection.rcon_client.send_command.call_args.args[0]
         == "/sc clear_harvest_queue"
     )
+
+
+def test_native_harvest_unsticks_blocked_start_and_retries():
+    tool = native_tool([0, 5], [0, 600], ["0", None])
+    tool.ensure_reachable = Mock(side_effect=[RuntimeError("not_found"), None])
+    tool.move_to = unstick_move()
+    assert tool._harvest_native(Position(1, 1), 5, 10) == 5
+    assert tool.ensure_reachable.call_count == 2
+    assert tool.move_to.self_unstick.call_count == 1
+
+
+def test_native_harvest_bounded_unstick_failure_surfaces_error():
+    tool = native_tool([0], [0], [])
+    tool.ensure_reachable = Mock(side_effect=RuntimeError("start occupied (not_found)"))
+    tool.move_to = unstick_move()
+    with pytest.raises(RuntimeError, match="start occupied"):
+        tool._harvest_native(Position(1, 1), 5, 10)
+    assert tool.ensure_reachable.call_count == 3
+    assert tool.move_to.self_unstick.call_count == 2
 
 
 def walking_runtime():

@@ -12,29 +12,31 @@ storage.actions.request_path = function(player_index, start_x, start_y, goal_x, 
     local surface = player.surface
     local force = player.force
 
+    local requested_start = {x = start_x, y = start_y}
+    local live_start = {x = player.position.x, y = player.position.y}
+    local start_position = entity_size and requested_start or live_start
+
     -- Ensure chunks are generated along the path corridor from start to goal.
     -- The pathfinder cannot traverse ungenerated chunks, and needs a wide corridor
     -- to route around water, cliffs, and other obstacles.
     local corridor_radius = 5  -- ~160 tile wide corridor for pathfinding flexibility
     local goal_radius = 8  -- Extra corridor coverage around the goal
-    surface.request_to_generate_chunks({x = start_x, y = start_y}, corridor_radius)
+    surface.request_to_generate_chunks(start_position, corridor_radius)
     surface.request_to_generate_chunks({x = goal_x, y = goal_y}, goal_radius)
 
-    local dx = goal_x - start_x
-    local dy = goal_y - start_y
+    local dx = goal_x - start_position.x
+    local dy = goal_y - start_position.y
     local distance = math.sqrt(dx * dx + dy * dy)
     if distance > 32 then
         local num_points = math.ceil(distance / 32)
         for i = 1, num_points - 1 do
             local t = i / num_points
-            surface.request_to_generate_chunks({x = start_x + dx * t, y = start_y + dy * t}, corridor_radius)
+            surface.request_to_generate_chunks({x = start_position.x + dx * t, y = start_position.y + dy * t}, corridor_radius)
         end
     end
     surface.force_generate_chunk_requests()
 
     local goal_position = {x = goal_x, y = goal_y}
-
-    local start_position = {y = start_y, x = start_x}
 
     local path_request = {
         bounding_box = bounding_box,
@@ -75,7 +77,8 @@ storage.actions.request_path = function(player_index, start_x, start_y, goal_x, 
     end
 
     storage.path_requests[request_id] = {player_index=player_index,
-        start=start_position, goal=goal_position, radius=radius or 0,
+        start=start_position, requested_start=requested_start, live_start=live_start,
+        goal=goal_position, radius=radius or 0,
         bounding_box=bounding_box, collision_mask=path_request.collision_mask,
         surface_index=surface.index}
 

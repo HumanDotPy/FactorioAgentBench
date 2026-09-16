@@ -225,6 +225,15 @@ class FactorioNamespace:
         # will get an error instead of silently shadowing an FLE tool/builtin.
         self._protected_names = set()
 
+    @property
+    def player_position(self) -> "ent.Position":
+        """Last known character Position exposed to agent programs."""
+        return self.player_location
+
+    @player_position.setter
+    def player_position(self, value):
+        self.player_location = value
+
     def _freeze_protected_names(self):
         """Snapshot all current namespace names as protected.
 
@@ -247,6 +256,10 @@ class FactorioNamespace:
     def _persist(self, name, value):
         self.persistent_vars[name] = value
         self._persistent_dirty = True
+
+    def _refresh_score(self):
+        self._last_score = self.score()
+        return self._last_score
 
     def get_functions(self) -> List[SerializableFunction]:
         """
@@ -271,8 +284,7 @@ class FactorioNamespace:
                 setattr(self, key, restored_value)
 
         except Exception as e:
-            print(f"Error restoring namespace: {e}")
-            pass
+            raise RuntimeError(f"Error restoring namespace: {e}") from e
 
     def _assign_target(self, target, value, eval_dict):
         """Helper function to handle different types of assignment targets"""
@@ -1094,8 +1106,6 @@ class FactorioNamespace:
                 eval_dict[key] = value.bind(self)
         self._persistent_dirty = False
 
-        last_successful_state = None
-
         # Execute the expression
         for index, node in enumerate(tree.body):
             try:
@@ -1124,7 +1134,6 @@ class FactorioNamespace:
                             and value._instance is not self
                         ):
                             value.bind(self)
-                    last_successful_state = dict(self.persistent_vars)
             except (Exception, NameError, SystemExit) as e:
                 self._sequential_exception_count += 1
                 error_traceback = traceback.format_exc()
@@ -1156,8 +1165,13 @@ class FactorioNamespace:
 
                 self.log(error_message)
 
-                if last_successful_state is not None:
-                    self.persistent_vars = last_successful_state.copy()
+                eval_dict.update(self.persistent_vars)
+                self.log(
+                    "Note: assignments completed before this failure are kept and "
+                    "engine actions already applied are not rolled back, so the "
+                    "game world and the namespace may both be partially modified "
+                    "from this failure onward."
+                )
                 self._persistent_dirty = True
 
                 # if self._sequential_exception_count >= self.max_sequential_exception_count:

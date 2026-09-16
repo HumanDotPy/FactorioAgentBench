@@ -8,6 +8,7 @@ import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from unittest.mock import Mock
 
 import aiohttp
 import pytest
@@ -92,6 +93,42 @@ def test_planner_assisted_ablation_keeps_legacy_router():
         "connect_entities(a, b, Prototype.TransportBelt)",
         action_profile="planner-assisted-v1",
     )
+
+
+def test_belt_batch_tools_are_registered_across_agent_surfaces():
+    from fle.env.action_queue import ALLOWED_ACTIONS
+    from fle.envd.action_reference import ACTION_PROFILE_REFERENCE
+    from scripts import codex_benchmark
+
+    description = next(
+        tool["description"]
+        for tool in factorio_codex_mcp.TOOLS
+        if tool["name"] == "factorio_execute_program"
+    )
+    for name in ("rotate_entities", "belt_line_report"):
+        assert name in ACTION_PROFILE_REFERENCE
+        assert name in description
+        assert name in codex_benchmark.IN_FACTORY_PROGRAM_TOOLS
+    assert "rotate_entities" in ALLOWED_ACTIONS
+    assert "belt_line_report" not in ALLOWED_ACTIONS
+
+
+def test_legacy_mcp_execute_enforces_program_policy(monkeypatch):
+    pytest.importorskip("fastmcp")
+    from fle.env.protocols._mcp import tools as legacy_tools
+
+    instance = Mock()
+    instance.eval = Mock()
+    monkeypatch.setattr(legacy_tools.state, "active_server", instance)
+    monkeypatch.setattr(legacy_tools.state, "get_vcs", lambda: Mock())
+
+    with pytest.raises(ProgramPolicyViolation):
+        asyncio.run(
+            legacy_tools.execute.fn(
+                "place_entity(Prototype.StoneFurnace, position=p, exact=False)"
+            )
+        )
+    instance.eval.assert_not_called()
 
 
 def test_http_client_retries_only_keyed_ambiguous_execute():
