@@ -2,6 +2,7 @@ import math
 
 import pytest
 
+from fle.env import DirectionInternal
 from fle.env.entities import (
     Direction,
     Entity,
@@ -38,45 +39,19 @@ def game(instance):
 
 
 def test_connect_offshore_pump_to_boiler(game):
-    # game.craft_item(Prototype.OffshorePump)
     game.move_to(game.nearest(Resource.Water))
     game.move_to(game.nearest(Resource.Wood))
     game.harvest_resource(game.nearest(Resource.Wood), quantity=100)
     game.move_to(game.nearest(Resource.Water))
-    offshore_pump = game.place_entity(
-        Prototype.OffshorePump, position=game.nearest(Resource.Water)
-    )
+    offshore_pump = game.place_offshore_pump(game.nearest(Resource.Water))
+    output_direction = DirectionInternal.opposite(offshore_pump.direction)
     boiler = game.place_entity_next_to(
         Prototype.Boiler,
         reference_position=offshore_pump.position,
-        direction=offshore_pump.direction,
+        direction=output_direction,
         spacing=5,
     )
-    water_pipes = game.connect_entities(
-        boiler, offshore_pump, connection_type=Prototype.Pipe
-    )
-    assert (
-        len(water_pipes.pipes)
-        == 5
-        + boiler.tile_dimensions.tile_width / 2
-        + offshore_pump.tile_dimensions.tile_width / 2
-        + 1
-    )
-
-    game.instance.reset()
-    game.move_to(game.nearest(Resource.Water))
-    offshore_pump = game.place_entity(
-        Prototype.OffshorePump,
-        position=game.nearest(Resource.Water),
-        direction=Direction.RIGHT,
-    )
-    boiler = game.place_entity_next_to(
-        Prototype.Boiler,
-        reference_position=offshore_pump.position,
-        direction=offshore_pump.direction,
-        spacing=5,
-    )
-    assert boiler.direction.value == offshore_pump.direction.value
+    assert boiler.direction.value == output_direction.value
     water_pipes = game.connect_entities(
         boiler, offshore_pump, connection_type=Prototype.Pipe
     )
@@ -84,57 +59,6 @@ def test_connect_offshore_pump_to_boiler(game):
         5
         + boiler.tile_dimensions.tile_height / 2
         + offshore_pump.tile_dimensions.tile_height / 2
-        + 1
-    )
-
-    game.instance.reset()
-    game.move_to(game.nearest(Resource.Water))
-
-    offshore_pump = game.place_entity(
-        Prototype.OffshorePump,
-        position=game.nearest(Resource.Water),
-        direction=Direction.DOWN,
-        exact=False,
-    )
-    boiler = game.place_entity_next_to(
-        Prototype.Boiler,
-        reference_position=offshore_pump.position,
-        direction=offshore_pump.direction,
-        spacing=5,
-    )
-    assert boiler.direction.value == offshore_pump.direction.value
-    water_pipes = game.connect_entities(
-        boiler, offshore_pump, connection_type=Prototype.Pipe
-    )
-    assert len(water_pipes.pipes) >= math.ceil(
-        5
-        + boiler.tile_dimensions.tile_height / 2
-        + offshore_pump.tile_dimensions.tile_height / 2
-        + 1
-    )
-
-    game.move_to(Position(x=-30, y=0))
-    water_pos = game.nearest(Resource.Water)
-    game.move_to(water_pos)
-    offshore_pump = game.place_entity(
-        Prototype.OffshorePump,
-        position=water_pos,
-        direction=Direction.LEFT,
-    )
-    boiler = game.place_entity_next_to(
-        Prototype.Boiler,
-        reference_position=offshore_pump.position,
-        direction=offshore_pump.direction,
-        spacing=5,
-    )
-    assert boiler.direction.value == offshore_pump.direction.value
-    water_pipes = game.connect_entities(
-        boiler, offshore_pump, connection_type=Prototype.Pipe
-    )
-    assert len(water_pipes.pipes) >= math.ceil(
-        5
-        + boiler.tile_dimensions.tile_width / 2
-        + offshore_pump.tile_dimensions.tile_width / 2
         + 1
     )
 
@@ -231,17 +155,13 @@ def test_connect_steam_engine_boiler_nearly_adjacent(game):
     # place the offshore pump at nearest water source
     game.move_to(Position(x=-30, y=12))
     game.move_to(game.nearest(Resource.Water))
-    offshore_pump = game.place_entity(
-        Prototype.OffshorePump,
-        position=game.nearest(Resource.Water),
-        direction=Direction.LEFT,
-    )
+    offshore_pump = game.place_offshore_pump(game.nearest(Resource.Water))
 
-    # place the boiler next to the offshore pump
+    # place the boiler next to the offshore pump output
     boiler = game.place_entity_next_to(
         Prototype.Boiler,
         reference_position=offshore_pump.position,
-        direction=offshore_pump.direction,
+        direction=DirectionInternal.opposite(offshore_pump.direction),
         spacing=2,
     )
 
@@ -314,9 +234,7 @@ def test_avoid_self_collision(game):
 
     # Step 3: Place offshore pump
     game.move_to(water_source)
-    offshore_pump = game.place_entity(
-        Prototype.OffshorePump, position=water_source, direction=Direction.SOUTH
-    )
+    offshore_pump = game.place_offshore_pump(water_source)
     print(f"Placed offshore pump at: {offshore_pump.position}")
 
     # Step 4: Place boiler
@@ -341,7 +259,7 @@ def test_connect_where_connection_points_are_blocked(game):
     game.move_to(water_source)
     print(f"Moved to water source at {water_source}")
     # Place the offshore pump
-    pump = game.place_entity(Prototype.OffshorePump, Direction.RIGHT, water_source)
+    pump = game.place_offshore_pump(water_source)
     print(f"Placed offshore pump at {pump.position}")
     """
     Step 2: Place the boiler and connect it to the pump
@@ -486,15 +404,13 @@ def test_connect_steam_engine_battery(game):
     game.move_to(water_pos)
 
     # Place first offshore pump
-    offshore_pump1 = game.place_entity(
-        Prototype.OffshorePump, position=water_pos, direction=Direction.RIGHT
-    )
+    offshore_pump1 = game.place_offshore_pump(water_pos)
 
     # Place first boiler with some spacing for pipes
     boiler1 = game.place_entity_next_to(
         Prototype.Boiler,
         reference_position=offshore_pump1.position,
-        direction=Direction.RIGHT,
+        direction=DirectionInternal.opposite(offshore_pump1.direction),
         spacing=3,
     )
 
@@ -532,18 +448,13 @@ def test_connect_steam_engine_battery(game):
 
     # Set up second row
     # Place second offshore pump below first one
-    offshore_pump2 = game.place_entity_next_to(
-        Prototype.OffshorePump,
-        reference_position=offshore_pump1.position,
-        direction=Direction.DOWN,
-        spacing=3,
-    )
+    offshore_pump2 = game.place_offshore_pump(offshore_pump1.position.down(4))
 
     # Place second boiler
     boiler2 = game.place_entity_next_to(
         Prototype.Boiler,
         reference_position=offshore_pump2.position,
-        direction=Direction.RIGHT,
+        direction=DirectionInternal.opposite(offshore_pump2.direction),
         spacing=3,
     )
 

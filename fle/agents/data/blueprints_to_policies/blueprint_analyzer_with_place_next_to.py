@@ -8,6 +8,9 @@ from typing import Union
 from fle.env import EntityGroup
 from fle.env import FactorioInstance, Direction
 from fle.env.game_types import prototype_by_name, Resource
+from fle.agents.data.blueprints_to_policies.direction_semantics import (
+    agent_direction,
+)
 
 
 @dataclass
@@ -89,7 +92,7 @@ class BlueprintAnalyzerWithPlaceNextTo:
     def get_entity_size(self, entity: Entity) -> Tuple[float, float]:
         """Get the effective size of an entity considering its direction."""
         width, height = entity.dimensions
-        if entity.direction in [2, 6]:  # LEFT or RIGHT
+        if entity.direction in [4, 12]:  # LEFT or RIGHT
             width, height = height, width
         return width, height
 
@@ -370,7 +373,7 @@ class BlueprintAnalyzerWithPlaceNextTo:
                         f"{var_name} = game.place_entity({self._name_to_prototype_string(entity.name)}, ",
                         f"    position=Position(x=origin.x + {entity.position['x']:.1f}, "
                         f"y=origin.y + {entity.position['y']:.1f}),",
-                        f"    direction={self._direction_to_enum(entity.direction)},",
+                        f"    direction={self._direction_to_enum(entity.direction, entity.name)},",
                         "    exact=True)",
                         "",
                     ]
@@ -387,7 +390,7 @@ class BlueprintAnalyzerWithPlaceNextTo:
                         f"    direction={direction},",
                         f"    spacing={spacing:.1f})",
                         "",
-                        f"{var_name} = game.rotate_entity({var_name}, {self._direction_to_enum(entity.direction)})",
+                        f"{var_name} = game.rotate_entity({var_name}, {self._direction_to_enum(entity.direction, entity.name)})",
                         "",
                     ]
                 )
@@ -408,12 +411,13 @@ class BlueprintAnalyzerWithPlaceNextTo:
             entity_counts[entity.name] = entity_counts.get(entity.name, 0) + 1
         return entity_counts
 
-    def _direction_to_enum(self, direction: int) -> str:
+    def _direction_to_enum(self, direction: int, name: str = None) -> str:
+        direction = agent_direction(name, direction)
         direction_map = {
             0: "Direction.UP",
-            2: "Direction.RIGHT",
-            4: "Direction.DOWN",
-            6: "Direction.LEFT",
+            4: "Direction.RIGHT",
+            8: "Direction.DOWN",
+            12: "Direction.LEFT",
         }
         return direction_map.get(direction, "Direction.UP")
 

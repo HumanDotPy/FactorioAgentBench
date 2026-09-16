@@ -75,11 +75,11 @@ def get_around(entity: Dict, grid) -> list:
         # North
         is_stone_wall(grid.get_relative(0, -1)) or is_gate(grid.get_relative(0, -1), 0),
         # East
-        is_stone_wall(grid.get_relative(1, 0)) or is_gate(grid.get_relative(1, 0), 2),
+        is_stone_wall(grid.get_relative(1, 0)) or is_gate(grid.get_relative(1, 0), 4),
         # South
         is_stone_wall(grid.get_relative(0, 1)) or is_gate(grid.get_relative(0, 1), 0),
         # West
-        is_stone_wall(grid.get_relative(-1, 0)) or is_gate(grid.get_relative(-1, 0), 2),
+        is_stone_wall(grid.get_relative(-1, 0)) or is_gate(grid.get_relative(-1, 0), 4),
     ]
 
 

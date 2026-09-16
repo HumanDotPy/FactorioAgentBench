@@ -24,33 +24,33 @@ SPRITE_CONFIGS = {
 DIRECTION_MAPPINGS = {
     "standard": {
         0: 0,  # North
-        1: 1,  # North-East
-        2: 2,  # East
-        3: 3,  # South-East
-        4: 4,  # South
-        5: 5,  # South-West
-        6: 6,  # West
-        7: 7,  # North-West
+        2: 1,  # North-East
+        4: 2,  # East
+        6: 3,  # South-East
+        8: 4,  # South
+        10: 5,  # South-West
+        12: 6,  # West
+        14: 7,  # North-West
     },
     "mining": {
         0: 0,  # North
-        1: 0,  # NE -> North
-        2: 3,  # East
-        3: 3,  # SE -> East
-        4: 6,  # South
-        5: 6,  # SW -> South
-        6: 9,  # West
-        7: 9,  # NW -> West
+        2: 0,  # NE -> North
+        4: 3,  # East
+        6: 3,  # SE -> East
+        8: 6,  # South
+        10: 6,  # SW -> South
+        12: 9,  # West
+        14: 9,  # NW -> West
     },
     "dead": {
         0: 0,  # North/South
-        1: 1,  # NE -> East/West
-        2: 1,  # East/West
-        3: 1,  # SE -> East/West
-        4: 0,  # South -> North/South
-        5: 0,  # SW -> North/South
-        6: 1,  # West -> East/West
-        7: 1,  # NW -> East/West
+        2: 1,  # NE -> East/West
+        4: 1,  # East/West
+        6: 1,  # SE -> East/West
+        8: 0,  # South -> North/South
+        10: 0,  # SW -> North/South
+        12: 1,  # West -> East/West
+        14: 1,  # NW -> East/West
     },
 }
 
@@ -252,13 +252,13 @@ def render_shadow(
             # Map 8 directions to fewer columns for running shadows
             direction_mapping = {
                 0: 0,  # North
-                1: 1,  # NE
-                2: 2,  # East
-                3: 3,  # SE
-                4: 4,  # South
-                5: 5,  # SW
-                6: 6,  # West
-                7: 7,  # NW
+                2: 1,  # NE
+                4: 2,  # East
+                6: 3,  # SE
+                8: 4,  # South
+                10: 5,  # SW
+                12: 6,  # West
+                14: 7,  # NW
             }
             # Adjust for actual available columns
             if cols < 8:

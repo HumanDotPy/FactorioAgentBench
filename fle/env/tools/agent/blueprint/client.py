@@ -36,14 +36,30 @@ class Blueprint(Tool):
         except Exception:  # noqa: BLE001 - tick is best effort metadata
             return None
 
+    def _resolve(self, source: str):
+        """Resolve a library name or inline exchange string without fallthrough."""
+        try:
+            record = self._store().try_get(source)
+        except BlueprintError as exc:
+            return None, "", str(exc)
+        if record is not None:
+            return record, record.content, None
+        if isinstance(source, str) and source.startswith("0"):
+            return None, source, None
+        return None, "", f"No blueprint named {source!r} in scope"
+
     def __call__(self, command: str = "list", *args: Any, **kwargs: Any):
         """Create, edit, inspect, share and place native construction plans.
 
         Commands:
-        - ``blueprint('save', name, x, y, radius)`` captures force-owned
-          entities around (x, y) into the library.
-        - ``blueprint('place', name_or_string, x, y)`` places a saved design
-          by name as native ghosts, for manual or robot construction.
+        - ``blueprint('save', name, x, y, radius, include_tiles=True)`` captures
+          force-owned entities around (x, y) into the library; oversized
+          captures fail before any work with a size estimate.
+        - ``blueprint('place', name_or_string, x, y, book_path=None)`` places a
+          saved design by name as native ghosts, for manual or robot
+          construction.
+        - ``blueprint('apply', name_or_string, x, y, radius, book_path=None)``
+          marks or cancels upgrade/deconstruction orders from a planner.
         - ``blueprint('list')`` lists saved names and usage counts.
         - ``blueprint('get', name)`` returns the exchange string.
         """
@@ -63,8 +79,22 @@ class Blueprint(Tool):
             return {"error": f"unknown command: {command}"}
         return handler(*args, **kwargs)
 
-    def save(self, name: str = "", x: float = 0, y: float = 0, radius: float = 32):
-        capture, _ = self.execute(self.player_index, "capture", x, y, radius)
+    def save(
+        self,
+        name: str = "",
+        x: float = 0,
+        y: float = 0,
+        radius: float = 32,
+        include_tiles: bool = True,
+    ):
+        capture, _ = self.execute(
+            self.player_index,
+            "capture",
+            x,
+            y,
+            radius,
+            {"include_tiles": include_tiles},
+        )
         if not isinstance(capture, dict) or capture.get("error"):
             return capture if isinstance(capture, dict) else {"error": str(capture)}
         content = str(capture.get("blueprint") or "").strip()
@@ -79,6 +109,7 @@ class Blueprint(Tool):
             while store.try_get(resolved_name) is not None:
                 index += 1
                 resolved_name = f"bp-{index}"
+        tick = self._tick()
         try:
             record = store.save(
                 resolved_name,
@@ -86,11 +117,17 @@ class Blueprint(Tool):
                 entity_count=int(capture.get("entity_count") or 0),
                 center_x=capture.get("center_x"),
                 center_y=capture.get("center_y"),
-                created_tick=self._tick(),
+                created_tick=tick,
             )
         except BlueprintError as exc:
             return {"error": str(exc)}
-        return {"saved": record.name, **record.summary()}
+        return {
+            "saved": record.name,
+            **record.summary(),
+            "tile_count": int(capture.get("tile_count") or 0),
+            "bytes": int(capture.get("bytes") or len(content)),
+            "created_tick": record.created_tick,
+        }
 
     def place(
         self,
@@ -105,15 +142,17 @@ class Blueprint(Tool):
         if not source:
             return {"error": "place requires a blueprint name or string"}
         store = self._store()
+        record, content, error = self._resolve(source)
+        if error:
+            return {"error": error}
         try:
-            record = store.try_get(source)
-        except BlueprintError as exc:
-            return {"error": str(exc)}
-        content = record.content if record is not None else source
-        try:
-            content = encode_exchange(
-                select_blueprint(decode_exchange(content), book_path)
-            )
+            document = select_blueprint(decode_exchange(content), book_path)
+            if "blueprint" not in document:
+                return {
+                    "error": "selected entry is not a blueprint; use apply for "
+                    "upgrade and deconstruction planners"
+                }
+            content = encode_exchange(document)
         except BlueprintError as exc:
             return {"error": str(exc)}
         from_store = record is not None
@@ -139,9 +178,9 @@ class Blueprint(Tool):
     def import_blueprint(self, name: str, content: str | dict):
         """Create/replace a library item from an exchange string or native JSON."""
         try:
-            content = encode_exchange(content) if isinstance(content, dict) else content
-            decode_exchange(content)
-            result, _ = self.execute(self.player_index, "validate", content)
+            exchange = encode_exchange(content) if isinstance(content, dict) else content
+            document = decode_exchange(exchange)
+            result, _ = self.execute(self.player_index, "validate", exchange)
             if not isinstance(result, dict) or result.get("error"):
                 return result
             record = self._store().save(
@@ -150,7 +189,12 @@ class Blueprint(Tool):
                 entity_count=int(result.get("entity_count", 0)),
                 created_tick=self._tick(),
             )
-            return {"saved": name, **record.summary()}
+            return {
+                "saved": name,
+                **record.summary(),
+                "tile_count": len(document.get("blueprint", {}).get("tiles", [])),
+                "created_tick": record.created_tick,
+            }
         except BlueprintError as exc:
             return {"error": str(exc)}
 
@@ -179,11 +223,15 @@ class Blueprint(Tool):
         y: float = 0,
         radius: float = 32,
         cancel: bool = False,
+        book_path: list[int] | None = None,
     ):
-        record = self._store().try_get(source)
-        content = record.content if record else source
+        record, content, error = self._resolve(source)
+        if error:
+            return {"error": error}
         try:
-            decode_exchange(content)
+            content = encode_exchange(
+                select_blueprint(decode_exchange(content), book_path)
+            )
         except BlueprintError as exc:
             return {"error": str(exc)}
         result, _ = self.execute(
@@ -194,6 +242,8 @@ class Blueprint(Tool):
             y,
             {"radius": radius, "cancel": cancel},
         )
+        if isinstance(result, dict) and not result.get("error") and record is not None:
+            self._store().record_use(record.name, self._tick())
         return result
 
     def list_blueprints(self):

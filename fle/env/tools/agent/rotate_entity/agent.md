@@ -18,32 +18,39 @@ Returns the rotated Entity object.
 ### Examples
 
 ```python
-# Rotating inserters - Inserter rotation affects pickup/drop positions
-# Important: By default inserters take from entities they are placed next to
-# Always rotate the inserters the other way if they need to take items from an entity
+# Rotating inserters - the direction names the DROP side
 inserter = place_entity(Prototype.BurnerInserter, position=pos, direction = Direction.UP)
 print(f"Original inserter: pickup={inserter.pickup_position}, drop={inserter.drop_position}")
 inserter = rotate_entity(inserter, Direction.DOWN)
 print(f"Rotated inserter: pickup={inserter.pickup_position}, drop={inserter.drop_position}")
 ```
 
+Agent-facing inserter directions (here and in `place_entity`) name the DROP
+side. The engine stores the pickup side; the boundary inverts exactly once and
+receipts include `pickup_side`/`drop_side` plus `direction_warning` if the
+built geometry does not match the requested drop side. To move items between
+two adjacent entities, prefer `insert_between(source, target)` over placing a
+guessed direction.
+
 ## Entity-Specific Behaviors
 
-### 1. Assembling Machines, Oil refineris and Chemical Cplants
+### 1. Assembling Machines, Oil refineries and Chemical plants
 
-Always need to set the recipe for assembling machines, oil refineries and chemical plants as their behaviour differs with recipes
+Assembling machines, oil refineries and chemical plants can only be rotated when their recipe uses a fluid; Factorio 2.0 disables rotation for machines whose recipe has no fluid ingredient. Set a fluid recipe before rotating, otherwise the call fails without changing the entity.
 
 ```python
-# Must set recipe before rotating
+# Must set a fluid recipe before rotating
 assembler = place_entity(Prototype.AssemblingMachine1, position=pos)
 
 # This will fail:
 try:
     assembler = rotate_entity(assembler, Direction.RIGHT)
 except Exception as e:
-    print("Cannot rotate without recipe")
+    print("Cannot rotate without a fluid recipe")
 
 # Correct way:
-assembler = set_entity_recipe(assembler, Prototype.IronGearWheel)
+assembler = set_entity_recipe(assembler, RecipeName.FillCrudeOilBarrel)
 assembler = rotate_entity(assembler, Direction.RIGHT)
 ```
+
+Rotation keeps the recipe, crafting progress, fluidbox contents, modules and items; nothing is destroyed and recreated.

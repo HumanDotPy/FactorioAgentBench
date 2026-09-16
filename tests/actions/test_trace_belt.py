@@ -16,9 +16,12 @@ def runtime():
         storage={actions={},agent_characters={[1]={surface=nil}}}
         belts={}
         blockers={}
-        function make_belt(x,y,dir,contents)
-            local b={name='transport-belt', type='transport-belt',
-                position={x=x,y=y}, direction=dir, active=true, unit_number=100+x}
+        function make_belt(x,y,dir,contents,name,belt_to_ground_type)
+            name = name or 'transport-belt'
+            local kind = name:find('underground') and 'underground-belt' or 'transport-belt'
+            local b={name=name, type=kind,
+                position={x=x,y=y}, direction=dir, active=true, unit_number=100+x,
+                belt_to_ground_type=belt_to_ground_type}
             b.get_transport_line=function(i)
                 local items=(contents and contents[i]) or {}
                 return {get_contents=function() return items end}
@@ -197,6 +200,75 @@ def test_trace_upstream_ignores_non_feeding_direct_belt():
         assert(result.total_tiles==2)
         assert(result.tiles[2].position.x==0 and result.tiles[2].position.y==-1)
         assert(result.blocker.reason=='start_of_line')
+    """)
+
+
+def test_trace_supports_fast_and_express_belts():
+    lua = runtime()
+    lua.execute("""
+        make_belt(0,0,4,nil,'fast-transport-belt')
+        make_belt(1,0,4,nil,'express-transport-belt')
+        result=storage.actions.trace_belt(1,0,0,64)
+        assert(result.total_tiles==2)
+        assert(result.tiles[1].name=='fast-transport-belt')
+        assert(result.tiles[2].name=='express-transport-belt')
+        assert(result.blocker.reason=='end_of_line')
+    """)
+
+
+def test_trace_blocks_on_reversed_belt_downstream():
+    lua = runtime()
+    lua.execute("""
+        make_belt(0,0,4,nil)
+        make_belt(1,0,12,nil)
+        result=storage.actions.trace_belt(1,0,0,64)
+        assert(result.total_tiles==1)
+        assert(result.blocker.reason=='blocked_by_reversed_belt')
+        assert(result.blocker.entity.name=='transport-belt')
+        assert(result.blocker.position.x==1 and result.blocker.position.y==0)
+    """)
+
+
+def test_trace_follows_underground_pair_downstream():
+    lua = runtime()
+    lua.execute("""
+        make_belt(0,0,4,nil)
+        make_belt(1,0,4,nil,'underground-belt','input')
+        make_belt(3,0,4,nil,'underground-belt','output')
+        result=storage.actions.trace_belt(1,0,0,64)
+        assert(result.total_tiles==3)
+        assert(result.tiles[2].name=='underground-belt')
+        assert(result.tiles[3].position.x==3)
+        assert(result.blocker.reason=='end_of_line')
+        assert(result.blocker.position.x==4 and result.blocker.position.y==0)
+    """)
+
+
+def test_trace_follows_underground_pair_upstream():
+    lua = runtime()
+    lua.execute("""
+        make_belt(4,0,4,nil)
+        make_belt(3,0,4,nil,'underground-belt','output')
+        make_belt(1,0,4,nil,'underground-belt','input')
+        make_belt(0,0,4,nil)
+        result=storage.actions.trace_belt(1,4,0,64,true)
+        assert(result.total_tiles==4)
+        assert(result.tiles[2].name=='underground-belt')
+        assert(result.tiles[3].position.x==1)
+        assert(result.tiles[4].position.x==0)
+        assert(result.blocker.reason=='start_of_line')
+    """)
+
+
+def test_trace_does_not_jump_unpaired_underground_belt():
+    lua = runtime()
+    lua.execute("""
+        make_belt(0,0,4,nil)
+        make_belt(1,0,4,nil,'underground-belt','input')
+        result=storage.actions.trace_belt(1,0,0,64)
+        assert(result.total_tiles==1)
+        assert(result.blocker.reason=='blocked_by_entity')
+        assert(result.blocker.entity.name=='underground-belt')
     """)
 
 

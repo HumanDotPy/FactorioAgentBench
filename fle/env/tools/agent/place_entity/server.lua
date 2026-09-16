@@ -1,109 +1,126 @@
--- Helper to convert surface direction to entity direction
-local function surface_to_entity_direction(surface_dir)
-    -- In Factorio, offshore pumps face opposite to placement direction
-    local direction_map = {
-        [defines.direction.north] = defines.direction.north,  -- 0 -> 4
-        [defines.direction.east] = defines.direction.east,    -- 2 -> 6
-        [defines.direction.south] = defines.direction.south,  -- 4 -> 0
-        [defines.direction.west] = defines.direction.west     -- 6 -> 2
-    }
-    return direction_map[surface_dir]
+local function pe_accepts_items(entity)
+    if entity.type == "transport-belt" or entity.type == "underground-belt"
+        or entity.type == "splitter" or entity.type == "inserter"
+        or entity.type == "loader" or entity.type == "linked-belt" then
+        return true
+    end
+    local ok, accepts = pcall(function()
+        local inventory_defines = {
+            defines.inventory.chest,
+            defines.inventory.furnace_source,
+            defines.inventory.assembling_machine_input,
+            defines.inventory.crafter_input,
+        }
+        for _, inventory_define in ipairs(inventory_defines) do
+            if inventory_define and entity.get_inventory(inventory_define) then
+                return true
+            end
+        end
+        return false
+    end)
+    return ok and accepts or false
 end
 
-
--- Helper to check if a tile is water
-local function is_water_tile(tile_name)
-    return tile_name == "water" or
-           tile_name == "deepwater" or
-           tile_name == "water-green" or
-           tile_name == "deepwater-green" or
-           tile_name == "water-shallow" or
-           tile_name == "water-mud"
-end
-
-local function find_offshore_pump_position(player, center_pos)
-    local max_radius = 20
-    local search_positions = {
-        {dx = 0, dy = 1, dir = defines.direction.north},
-        {dx = 1, dy = 0, dir = defines.direction.west},
-        {dx = 0, dy = -1, dir = defines.direction.south},
-        {dx = -1, dy = 0, dir = defines.direction.east}
-    }
-
-    for radius = 1, max_radius do
-        for y = -radius, radius do
-            for x = -radius, radius do
-                if math.abs(x) == radius or math.abs(y) == radius then
-                    local check_pos = {
-                        x = center_pos.x + x,
-                        y = center_pos.y + y
-                    }
-
-                    -- Check if position is already occupied
-                    -- Factorio 2.0: collision_mask expects a collision layer name string
-                    local entities = player.surface.find_entities_filtered{
-                        position = check_pos,
-                        collision_mask = "player",
-                        invert = false
-                    }
-
-                    if #entities == 0 then
-                        local current_tile = player.surface.get_tile(check_pos.x, check_pos.y)
-
-                        if not is_water_tile(current_tile.name) then
-                            for _, search in ipairs(search_positions) do
-                                local water_pos = {
-                                    x = check_pos.x + search.dx,
-                                    y = check_pos.y + search.dy
-                                }
-
-                                -- Check for entities at water position
-                                -- Factorio 2.0: collision_mask expects a collision layer name string
-                                local water_entities = player.surface.find_entities_filtered{
-                                    position = water_pos,
-                                    collision_mask = "water_tile",
-                                    invert = true
-                                }
-
-                                if #water_entities == 0 then
-                                    local adjacent_tile = player.surface.get_tile(water_pos.x, water_pos.y)
-
-                                    if is_water_tile(adjacent_tile.name) then
-                                        local entity_dir = surface_to_entity_direction(search.dir)
-                                        local placement = {
-                                            name = "offshore-pump",
-                                            position = check_pos,
-                                            direction = entity_dir,
-                                            force = "player"
-                                        }
-
-                                        if player.surface.can_place_entity(placement) then
-                                            -- Final collision check for the exact pump dimensions
-                                            -- Factorio 2.0: collision_mask expects a collision layer name string
-                                            local final_check = player.surface.find_entities_filtered{
-                                                area = {{check_pos.x - 0.5, check_pos.y - 0.5},
-                                                       {check_pos.x + 0.5, check_pos.y + 0.5}},
-                                                collision_mask = "player"
-                                            }
-
-                                            if #final_check == 0 then
-                                                return {
-                                                    position = check_pos,
-                                                    direction = entity_dir
-                                                }
-                                            end
-                                        end
-                                    end
-                                end
-                            end
-                        end
-                    end
-                end
+local function pe_attach_drop_report(serialized, built)
+    if not built.drop_position then
+        return serialized
+    end
+    local drop = built.drop_position
+    local catch = {x = math.floor(drop.x) + 0.5, y = math.floor(drop.y) + 0.5}
+    local entities = {}
+    local ground_by_item = {}
+    local ground_items = 0
+    for _, candidate in ipairs(built.surface.find_entities_filtered{
+        position = catch, radius = 0.5}) do
+        if candidate.valid and candidate ~= built then
+            if candidate.type == "item-entity" then
+                local stack = candidate.stack
+                local name = stack and stack.name or candidate.name
+                local count = stack and stack.count or 1
+                ground_items = ground_items + count
+                ground_by_item[name] = (ground_by_item[name] or 0) + count
+            else
+                entities[#entities + 1] = {
+                    name = candidate.name,
+                    type = candidate.type,
+                    position = {x = candidate.position.x, y = candidate.position.y},
+                    entity_id = candidate.unit_number,
+                    input_inventory = pe_accepts_items(candidate),
+                }
             end
         end
     end
+    serialized.drop_report = {
+        drop = {x = drop.x, y = drop.y},
+        catch = catch,
+        entities = entities,
+        ground_items = ground_items,
+        ground_by_item = ground_by_item,
+    }
+    return serialized
+end
 
-    return nil
+local function pe_drop_tile_hint(surface, footprint, position)
+    if not footprint or not footprint.left_top or not footprint.right_bottom then
+        return nil
+    end
+    local left = footprint.left_top.x
+    local top = footprint.left_top.y
+    local right = footprint.right_bottom.x
+    local bottom = footprint.right_bottom.y
+    local left_tile = math.floor(left)
+    local top_tile = math.floor(top)
+    local right_tile = math.ceil(right) - 1
+    local bottom_tile = math.ceil(bottom) - 1
+    local hints = {}
+    for _, entity in ipairs(surface.find_entities_filtered{
+        area = {{left - 1, top - 1}, {right + 1, bottom + 1}}, limit = 32}) do
+        if entity.valid and entity.drop_position then
+            local drop = entity.drop_position
+            local tile = {x = math.floor(drop.x) + 0.5, y = math.floor(drop.y) + 0.5}
+            local drop_tile_x = math.floor(drop.x)
+            local drop_tile_y = math.floor(drop.y)
+            if drop_tile_x >= left_tile and drop_tile_x <= right_tile
+                and drop_tile_y >= top_tile and drop_tile_y <= bottom_tile then
+                hints[#hints + 1] = {
+                    name = entity.name,
+                    position = {x = entity.position.x, y = entity.position.y},
+                    drop_position = {x = drop.x, y = drop.y},
+                    catch_tile = tile,
+                    entity_id = entity.unit_number,
+                }
+            end
+        end
+    end
+    table.sort(hints, function(a, b)
+        local da, db = 0, 0
+        if position then
+            local ax, ay = a.position.x - position.x, a.position.y - position.y
+            local bx, by = b.position.x - position.x, b.position.y - position.y
+            da = ax * ax + ay * ay
+            db = bx * bx + by * by
+        end
+        if da ~= db then
+            return da < db
+        end
+        local ua = a.entity_id or math.huge
+        local ub = b.entity_id or math.huge
+        if ua ~= ub then
+            return ua < ub
+        end
+        if a.position.x ~= b.position.x then
+            return a.position.x < b.position.x
+        end
+        return a.position.y < b.position.y
+    end)
+    local hint = hints[1]
+    if hint then
+        hint.message = hint.name .. " at (" .. hint.position.x .. ", "
+            .. hint.position.y .. ") outputs to (" .. hint.catch_tile.x .. ", "
+            .. hint.catch_tile.y
+            .. "); the rejected footprint covers another machine's output tile, so the engine refuses the build"
+    end
+    return hint
 end
 
 local function character_only_blocker(diagnostic, player)
@@ -135,7 +152,8 @@ storage.actions.place_entity = function(player_index, entity, direction, x, y, e
         direction = 0
     end
 
-    local entity_direction = storage.utils.get_entity_direction(entity, direction)
+    local entity_direction = storage.utils.inserter_engine_direction(entity,
+        storage.utils.get_entity_direction(entity, direction))
 
     -- Common validation functions
     local function validate_distance()
@@ -175,8 +193,11 @@ storage.actions.place_entity = function(player_index, entity, direction, x, y, e
         if not storage.utils.can_place_entity(player, entity, chosen, entity_direction) then
             chosen = nil
             if entity == "offshore-pump" then
-                local found = find_offshore_pump_position(player, position)
-                if found then chosen = found.position; entity_direction = found.direction end
+                local finder = storage.utils.find_offshore_pump_position
+                if finder then
+                    local found = finder(player, position, entity_direction)
+                    if found then chosen = found.position; entity_direction = found.direction end
+                end
             else
                 for radius=1,10 do
                     for dx=-radius,radius do
@@ -199,7 +220,8 @@ storage.actions.place_entity = function(player_index, entity, direction, x, y, e
             direction=entity_direction,force=player.force,raise_built=true}
         if not built then error("Assisted placement rejected by engine") end
         player.remove_item{name=entity,count=1}
-        local serialized = storage.utils.serialize_entity(built)
+        local serialized = pe_attach_drop_report(storage.utils.serialize_entity(built), built)
+        serialized = storage.utils.inserter_direction_report(serialized, direction)
         return storage.utils.attach_connection_report(serialized, built, player)
     end
 
@@ -230,7 +252,10 @@ storage.actions.place_entity = function(player_index, entity, direction, x, y, e
             end
             if not character_moved then
                 return {error=true, reason="placement_rejected", prototype=entity,
-                    position=position, direction=entity_direction, diagnostics=diagnostic}
+                    position=position, direction=direction,
+                    engine_direction=entity_direction, diagnostics=diagnostic,
+                    drop_tile_hint=pe_drop_tile_hint(player.surface,
+                        diagnostic.footprint, position)}
             end
         end
         local built
@@ -250,7 +275,8 @@ storage.actions.place_entity = function(player_index, entity, direction, x, y, e
                 direction=entity_direction, force=player.force, raise_built=true}
         end
         if not built then
-            return {error=true,reason="creation_rejected",prototype=entity,position=position}
+            return {error=true,reason="creation_rejected",prototype=entity,position=position,
+                direction=direction, engine_direction=entity_direction}
         end
         player.remove_item{name=entity,count=1}
         local serialized = storage.utils.serialize_entity(built)
@@ -258,6 +284,8 @@ storage.actions.place_entity = function(player_index, entity, direction, x, y, e
             serialized.recovered = "character_moved"
             serialized.character_position = {x=player.position.x, y=player.position.y}
         end
+        serialized = pe_attach_drop_report(serialized, built)
+        serialized = storage.utils.inserter_direction_report(serialized, direction)
         return storage.utils.attach_connection_report(serialized, built, player)
     end
 

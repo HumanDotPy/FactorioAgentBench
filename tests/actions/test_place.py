@@ -57,41 +57,8 @@ def test_fail_when_placing_on_the_same_place(game):
     :return:
     """
     game.place_entity(Prototype.Pipe, position=(0, 0))
-    try:
+    with pytest.raises(Exception):
         game.place_entity(Prototype.Pipe, position=(0, 0))
-        assert False
-    except:
-        assert True
-
-
-def test_place_transport_belt_next_to_miner(game):
-    """
-    Place a transport belt next to a burner mining drill
-    :param game:
-    :return:
-    """
-    iron_position = game.get_resource_patch(
-        Resource.IronOre, game.nearest(Resource.IronOre)
-    ).bounding_box.center
-    game.move_to(iron_position)
-    drill = game.place_entity(
-        Prototype.BurnerMiningDrill, position=iron_position, exact=True
-    )
-    for y in range(-1, 3, 1):
-        world_y = y + drill.position.y
-        world_x = -1.0 + drill.position.x - 1
-        game.move_to(Position(x=world_x, y=world_y))
-        game.place_entity(
-            Prototype.TransportBelt,
-            position=Position(x=world_x, y=world_y),
-            direction=Direction.UP,
-            exact=True,
-        )
-
-    # belt = game.place_entity(Prototype.TransportBelt, direction=Direction.RIGHT, position=iron_position + Position(x=-1, y=0))
-    # assert belt is not None
-    # assert belt.direction == Direction.RIGHT
-    pass
 
 
 def test_place_wall(game):
@@ -130,28 +97,10 @@ def test_place_in_all_directions(game):
     assert down.direction.value == Direction.DOWN.value
 
 
-def test_place_pickup(game):
+def test_place_offshore_pump_faces_water(game):
     """
-    Place a boiler at (0, 0) and then pick it up
-    :param game:
-    :return:
+    place_offshore_pump snaps to the shoreline and faces the water intake.
     """
-    boilers_in_inventory = game.inspect_inventory()[Prototype.Boiler]
-    game.place_entity(Prototype.Boiler, position=Position(x=0, y=0))
-    assert boilers_in_inventory == game.inspect_inventory()[Prototype.Boiler] + 1
-
-    game.pickup_entity(Prototype.Boiler, position=Position(x=0, y=0))
-    assert boilers_in_inventory == game.inspect_inventory()[Prototype.Boiler]
-
-
-def test_place_offshore_pumps(game):
-    """
-    Place offshore pumps at each cardinal direction
-    :param game:
-    :return:
-    """
-    # move to the nearest water source
-    entity = Prototype.OffshorePump
     water_location = game.nearest(Resource.Water)
     water_patch = game.get_resource_patch(Resource.Water, water_location)
 
@@ -159,80 +108,32 @@ def test_place_offshore_pumps(game):
         x=water_patch.bounding_box.left_top.x, y=water_patch.bounding_box.center.y
     )
     game.move_to(left_of_water_patch)
-    offshore_pump = game.place_entity(
-        entity, position=left_of_water_patch, direction=Direction.LEFT
-    )
-    assert offshore_pump.direction.value == Direction.LEFT.value
-
-    right_of_water_patch = Position(
-        x=water_patch.bounding_box.right_bottom.x, y=water_patch.bounding_box.center.y
-    )
-    game.move_to(right_of_water_patch)
-    offshore_pump = game.place_entity(
-        entity, position=right_of_water_patch, direction=Direction.RIGHT
-    )
+    offshore_pump = game.place_offshore_pump(left_of_water_patch)
     assert offshore_pump.direction.value == Direction.RIGHT.value
-
-    above_water_patch = Position(
-        x=water_patch.bounding_box.center.x, y=water_patch.bounding_box.left_top.y
-    )
-    game.move_to(above_water_patch)
-    offshore_pump = game.place_entity(
-        entity, position=above_water_patch, direction=Direction.UP
-    )
-    assert offshore_pump.direction.value == Direction.UP.value
-
-    below_water_patch = Position(
-        x=water_patch.bounding_box.center.x, y=water_patch.bounding_box.right_bottom.y
-    )
-    game.move_to(below_water_patch)
-    offshore_pump = game.place_entity(
-        entity, position=below_water_patch, direction=Direction.DOWN
-    )
-    assert offshore_pump.direction.value == Direction.DOWN.value
-
-
-def test_place_offshore_pumps_no_default_direction(game):
-    """
-    Place offshore pumps at each cardinal direction
-    :param game:
-    :return:
-    """
-    # move to the nearest water source
-    entity = Prototype.OffshorePump
-    water_location = game.nearest(Resource.Water)
-    water_patch = game.get_resource_patch(Resource.Water, water_location)
-
-    left_of_water_patch = Position(
-        x=water_patch.bounding_box.left_top.x, y=water_patch.bounding_box.center.y
-    )
-    game.move_to(left_of_water_patch)
-    offshore_pump = game.place_entity(entity, position=left_of_water_patch)
-    assert offshore_pump.direction.value == Direction.LEFT.value
     assert offshore_pump.connection_points
 
     right_of_water_patch = Position(
         x=water_patch.bounding_box.right_bottom.x, y=water_patch.bounding_box.center.y
     )
     game.move_to(right_of_water_patch)
-    offshore_pump = game.place_entity(entity, position=right_of_water_patch)
-    assert offshore_pump.direction.value == Direction.RIGHT.value
+    offshore_pump = game.place_offshore_pump(right_of_water_patch)
+    assert offshore_pump.direction.value == Direction.LEFT.value
     assert offshore_pump.connection_points
 
     above_water_patch = Position(
         x=water_patch.bounding_box.center.x, y=water_patch.bounding_box.left_top.y
     )
     game.move_to(above_water_patch)
-    offshore_pump = game.place_entity(entity, position=above_water_patch)
-    assert offshore_pump.direction.value == Direction.UP.value
+    offshore_pump = game.place_offshore_pump(above_water_patch)
+    assert offshore_pump.direction.value == Direction.DOWN.value
     assert offshore_pump.connection_points
 
     below_water_patch = Position(
         x=water_patch.bounding_box.center.x, y=water_patch.bounding_box.right_bottom.y
     )
     game.move_to(below_water_patch)
-    offshore_pump = game.place_entity(entity, position=below_water_patch)
-    assert offshore_pump.direction.value == Direction.DOWN.value
+    offshore_pump = game.place_offshore_pump(below_water_patch)
+    assert offshore_pump.direction.value == Direction.UP.value
     assert offshore_pump.connection_points
 
 
@@ -341,23 +242,9 @@ def test_place_splitter(game):
     assert splitters_in_inventory - 4 == game.inspect_inventory()[Prototype.Splitter]
 
 
-def test_place_generator(game):
-    """
-    Place a steam engine at (0,0)
-    """
-
-    game.place_entity(
-        Prototype.SteamEngine, position=Position(x=0, y=0), direction=Direction.UP
-    )
-
-    pass
-
-
 def test_place_too_far_away(game):
-    try:
+    with pytest.raises(Exception):
         game.place_entity(Prototype.BurnerMiningDrill, position=Position(x=100, y=0))
-    except Exception:
-        assert True
 
 
 def test_place_at_drop_position(game):

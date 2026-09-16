@@ -7,6 +7,9 @@ from typing import Union
 from fle.env import EntityGroup
 from fle.env import FactorioInstance
 from fle.env.game_types import prototype_by_name
+from fle.agents.data.blueprints_to_policies.direction_semantics import (
+    agent_direction,
+)
 from fle.agents.data.blueprints_to_policies.models.blueprint_entity import (
     BlueprintEntity,
 )
@@ -72,7 +75,7 @@ class BlueprintAnalyzerWithConnect:
                         adj_entity
                         and adj_entity.name == belt_type
                         and (adj_x, adj_y) not in seen
-                        and abs(adj_entity.direction - current.direction) in {0, 4}
+                        and abs(adj_entity.direction - current.direction) in {0, 8}
                     ):  # Same direction or opposite
                         stack.append(adj_entity)
 
@@ -234,11 +237,14 @@ class BlueprintAnalyzerWithConnect:
         vertical_patterns, horizontal_patterns, singles = self.find_patterns()
         belt_sequences = self.find_belt_sequences()
 
-        miners = [e for e in self.entities if "mining-drill" in e.name]
-        if miners:
-            origin_calc = f"game.nearest_buildable({self._name_to_prototype_string(miners[0].name)}, bounding_box=miner_box)"
-        else:
-            origin_calc = f"game.nearest_buildable({self._name_to_prototype_string(self.entities[0].name)}, bounding_box=miner_box)"
+        anchor = next(
+            (e for e in self.entities if "mining-drill" in e.name), self.entities[0]
+        )
+        origin_calc = (
+            f"game.nearest_buildable({self._name_to_prototype_string(anchor.name)}, "
+            f"center_position=Position(x={anchor.position['x']:.1f}, "
+            f"y={anchor.position['y']:.1f}), building_box=miner_box)"
+        )
 
         lines = [
             "# Calculate bounding box",
@@ -246,26 +252,31 @@ class BlueprintAnalyzerWithConnect:
             "    x=0,",
             "    y=0",
             ")",
+            "left_bottom = Position(",
+            "    x=0,",
+            f"    y={self.max_y - self.min_y}",
+            ")",
             "right_bottom = Position(",
             f"    x={self.max_x - self.min_x},",
             f"    y={self.max_y - self.min_y}",
             ")",
-            "center = Position(",
-            "    x=(left_top.x + right_bottom.x) / 2,",
-            "    y=(left_top.y + right_bottom.y) / 2",
+            "right_top = Position(",
+            f"    x={self.max_x - self.min_x},",
+            "    y=0",
             ")",
             "",
             "miner_box = BoundingBox(",
             "    left_top=left_top,",
             "    right_bottom=right_bottom,",
-            "    center=center",
+            "    left_bottom=left_bottom,",
+            "    right_top=right_top",
             ")",
             "",
             "# Find valid position using nearest_buildable",
             f"origin = {origin_calc}",
             "",
             "assert origin, 'Could not find valid position'",
-            "origin = origin + left_top + Position(x=0.5, y=0.5)",
+            "origin = origin.center + left_top + Position(x=0.5, y=0.5)",
             "game.move_to(origin)",
             "",
         ]
@@ -312,7 +323,7 @@ class BlueprintAnalyzerWithConnect:
                     "    game.move_to(Position(x=world_x+1, y=world_y))",
                     f"    entity = game.place_entity({self._name_to_prototype_string(pattern['name'])}, "
                     f"position=Position(x=world_x, y=world_y), "
-                    f"direction={self._direction_to_enum(pattern['direction'])}, "
+                    f"direction={self._direction_to_enum(pattern['direction'], pattern['name'])}, "
                     f"exact=True)",
                     f"    {array_name}.append(entity)",
                     "",
@@ -333,7 +344,7 @@ class BlueprintAnalyzerWithConnect:
                     "    game.move_to(Position(x=world_x, y=world_y+1))",
                     f"    entity = game.place_entity({self._name_to_prototype_string(pattern['name'])}, "
                     f"position=Position(x=world_x, y=world_y), "
-                    f"direction={self._direction_to_enum(pattern['direction'])}, "
+                    f"direction={self._direction_to_enum(pattern['direction'], pattern['name'])}, "
                     f"exact=True)",
                     f"    {array_name}.append(entity)",
                     "",
@@ -353,7 +364,7 @@ class BlueprintAnalyzerWithConnect:
                     f"{var_name} = game.place_entity({self._name_to_prototype_string(entity.name)}, "
                     f"position=Position(x=origin.x + {entity.position['x']:.1f}, "
                     f"y=origin.y + {entity.position['y']:.1f}), "
-                    f"direction={self._direction_to_enum(entity.direction)}, "
+                    f"direction={self._direction_to_enum(entity.direction, entity.name)}, "
                     f"exact=True)",
                     "",
                 ]
@@ -376,8 +387,9 @@ class BlueprintAnalyzerWithConnect:
             entity_counts[entity.name] = entity_counts.get(entity.name, 0) + 1
         return entity_counts
 
-    def _direction_to_enum(self, direction: int) -> str:
-        direction_map = {0: "UP", 2: "RIGHT", 4: "DOWN", 6: "LEFT"}
+    def _direction_to_enum(self, direction: int, name: str = None) -> str:
+        direction = agent_direction(name, direction)
+        direction_map = {0: "UP", 4: "RIGHT", 8: "DOWN", 12: "LEFT"}
         return f"Direction.{direction_map.get(direction, 'UP')}"
 
     def _name_to_prototype_string(self, name: str) -> str:

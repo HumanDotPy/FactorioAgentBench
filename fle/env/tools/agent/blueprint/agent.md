@@ -8,6 +8,8 @@ Recipes, settings, wires and item requests are retained by Factorio.
 ```python
 # Capture entities, tiles, modules, wires, station names and trains.
 blueprint('save', 'iron-line', 10, 10, radius=16)
+# Oversized captures fail before the work starts. Omit tiles for big areas:
+blueprint('save', 'outpost', 0, 0, radius=100, include_tiles=False)
 blueprint('list')
 blueprint('get', 'iron-line')                 # Full native exchange string
 blueprint('inspect', 'iron-line')             # Full editable native JSON
@@ -25,16 +27,23 @@ blueprint('edit', 'new-design', design)
 # Native placement: cardinal direction 0/4/8/12; normal, forced, superforced.
 blueprint('place', 'iron-line', 40, 20, direction=4, build_mode='normal')
 blueprint('ghosts', 40, 20, radius=32, offset=0)
+# ghosts are paged in stable position order; entity_id is engine unit_number
+# or a "ghost:<name>:<type>:x:y" identifier because ghosts have no unit_number.
 # Receipt gives created_ghosts and up to 128 positions; zero can mean collision
 # or that the plan already exists. Inspect ghosts before assuming construction.
 
 # Books retain complete native metadata; select zero-based entry indices.
 blueprint('place', 'my-book', 40, 20, book_path=[2, 0])
-# Imported native planners mark/cancel construction orders.
+# Imported native planners mark/cancel construction orders; book_path selects
+# a planner nested in a book.
 blueprint('apply', 'upgrade-belts', 40, 20, radius=16)
+blueprint('apply', 'planner-book', 40, 20, radius=16, book_path=[1])
 blueprint('apply', 'clear-area', 40, 20, radius=16, cancel=True)
 blueprint('delete', 'new-design')
 ```
+
+`save` receipts include `tile_count`, `bytes` and `created_tick` (null when the
+tick could not be read).
 
 `import`/`edit` replace the complete document, preserving unspecified engine
 fields only when retained in that document. Use inspect → edit for changes to

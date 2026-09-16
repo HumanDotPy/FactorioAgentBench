@@ -16,7 +16,12 @@ def world():
            surface={is_chunk_generated=function() return true end}}
         p.teleport=function(target,surface) p.position=target; return true end
         game={tick=123,tick_paused=true,speed=10,get_player=function() return p end}
-        remote={call=function() p.position={x=100,y=200}; return true end}
+        camera_mode='follow'
+        remote={call=function(_,_,_,mode)
+            if mode~=nil then camera_mode=mode end
+            if camera_mode=='follow' then p.position={x=100,y=200} end
+            return {mode=camera_mode,following=camera_mode=='follow'}
+        end}
         helpers={table_to_json=function(t) return t end}
         rcon={print=function(t) result=t end}
     """)

@@ -23,6 +23,10 @@ end
 
 local has_create_grid = version_ge("1.1.7")
 
+local function round(value)
+    return storage.utils.round(value)
+end
+
 -- Add this helper function at the top level
 local function is_fluid_handler(entity_type)
     return entity_type == "boiler" or
@@ -52,16 +56,17 @@ local function serialize_equipment_grid(grid)
                         n = equipment.name,
                         p = {pos.x, pos.y},
                     }
+                    if equipment.quality and equipment.quality.name ~= "normal" then
+                        entry.q = equipment.quality.name
+                    end
                     if equipment.shield > 0 then entry.s = equipment.shield end
                     if equipment.energy > 0 then entry.e = equipment.energy end
-                    -- TODO: Test with Industrial Revolution
                     if equipment.burner then
                         local burner = equipment.burner
                         entry.i = recursive_serialize.serialize_inventory(burner.inventory)
                         entry.r = recursive_serialize.serialize_inventory(burner.burnt_result_inventory)
-                        if burner.curently_burning then
-                            entry.b = {}
-                            recursive_serialize.serialize_item_stack(burner.curently_burning, entry.b)
+                        if burner.currently_burning then
+                            entry.b = burner.currently_burning.name
                             entry.f = burner.remaining_burning_fuel
                         end
                     end
@@ -93,8 +98,12 @@ recursive_serialize.serialize_item_stack = function(slot, entry)
 
     entry.n = slot.name
     entry.c = slot.count
+    if slot.quality and slot.quality.name ~= "normal" then
+        entry.q = slot.quality.name
+    end
     if slot.health < 1 then entry.h = slot.health end
-    if slot.durability then entry.d = slot.durability end
+    local durability_ok, durability = pcall(function() return slot.durability end)
+    if durability_ok and durability then entry.d = durability end
     if slot.type == "ammo" then entry.a = slot.ammo end
     if slot.is_item_with_label then
         local label = {}
@@ -112,6 +121,55 @@ recursive_serialize.serialize_item_stack = function(slot, entry)
         local sub_inventory = slot.get_inventory(defines.inventory.item_main)
         entry.i = recursive_serialize.serialize_inventory(sub_inventory)
     end
+end
+
+recursive_serialize.serialize_inventory = function(inventory)
+    local serialized = {i = {}}
+    if not inventory then return serialized end
+
+    if inventory[supports_bar] and inventory[supports_bar]() then
+        local bar = inventory[get_bar]()
+        if bar and bar > 0 then
+            serialized.b = bar
+        end
+    end
+
+    local previous_index = 0
+    local previous_serialized = nil
+    for i = 1, #inventory do
+        local item = {}
+        local slot = inventory[i]
+        if inventory.supports_filters and inventory.supports_filters() then
+            local filter = inventory.get_filter(i)
+            if filter then item.f = filter end
+        end
+
+        if slot and slot.valid_for_read then
+            recursive_serialize.serialize_item_stack(slot, item)
+        end
+
+        if item.n or item.f or item.e then
+            local item_serialized = helpers.table_to_json(item)
+            if item_serialized == previous_serialized then
+                local previous_item = serialized.i[#serialized.i]
+                previous_item.r = (previous_item.r or 0) + 1
+                previous_index = i
+            else
+                if i ~= previous_index + 1 then
+                    item.s = i
+                end
+
+                previous_index = i
+                previous_serialized = item_serialized
+                table.insert(serialized.i, item)
+            end
+        else
+            previous_index = 0
+            previous_serialized = nil
+        end
+    end
+
+    return serialized
 end
 
 recursive_serialize.deserialize_item_stack = function(slot, entry)
@@ -133,6 +191,9 @@ recursive_serialize.deserialize_item_stack = function(slot, entry)
     if entry.h then item_stack.health = entry.h end
     if entry.d then item_stack.durability = entry.d end
     if entry.a then item_stack.ammo = entry.a end
+    if entry.q and prototypes.quality and prototypes.quality[entry.q] then
+        item_stack.quality = entry.q
+    end
 
     local call_success, call_return = pcall(slot.set_stack, item_stack)
     if not call_success then
@@ -202,19 +263,31 @@ end
 recursive_serialize.deserialize_equipment_grid = function(grid, serialized)
     grid.clear()
     for _, entry in ipairs(serialized) do
-        local equipment = grid.put({
+        local definition = {
             name = entry.n,
             position = entry.p,
-        })
+        }
+        if entry.q and prototypes.quality and prototypes.quality[entry.q] then
+            definition.quality = entry.q
+        end
+        local equipment = grid.put(definition)
         if equipment then
             if entry.s then equipment.shield = entry.s end
             if entry.e then equipment.energy = entry.e end
             if entry.i then
                 local burner = equipment.burner
-                if entry.b then recursive_serialize.deserialize_item_stack(burner.currently_burning, entry.b) end
-                if entry.f then burner.remaining_burning_fuel = entry.f end
-                recursive_serialize.deserialize_inventory(burner.burnt_result_inventory, entry.r)
-                recursive_serialize.deserialize_inventory(burner.inventory, entry.i)
+                if burner then
+                    local burning = entry.b
+                    if type(burning) == "table" then burning = burning.n end
+                    if burning and prototypes.item[burning] then
+                        burner.currently_burning = prototypes.item[burning]
+                    end
+                    if entry.f then burner.remaining_burning_fuel = entry.f end
+                    if entry.r then
+                        recursive_serialize.deserialize_inventory(burner.burnt_result_inventory, entry.r)
+                    end
+                    recursive_serialize.deserialize_inventory(burner.inventory, entry.i)
+                end
             end
         end
     end
@@ -360,152 +433,128 @@ end
 
 local function get_entity_direction(entity, direction)
 
-    -- If direction is nil then return north
     if direction == nil then
         return defines.direction.north
     end
 
-    local prototype = prototypes.entity[entity]
-    -- if prototype is nil (e.g because the entity is a ghost or player character) then return the direction as is
-    if prototype == nil then
-        return direction
-    end
-
-    local cardinals = {
-        defines.direction.north,
-        defines.direction.east,
-        defines.direction.south,
-        defines.direction.west
-    }
-    -- Factorio 2.0 uses 16 directions: north=0, east=4, south=8, west=12
-    -- The direction parameter comes from entity.direction
-    if prototype and (prototype.name == "boiler" or prototype.type == "generator" or prototype.name == "heat-exchanger") then
-        if direction == defines.direction.north then
-            return defines.direction.north
-        elseif direction == defines.direction.east then
-            return defines.direction.east
-        elseif direction == defines.direction.south then
-            return defines.direction.south
-        else
-            return defines.direction.west
-        end
-    elseif prototype and prototype.name == "offshore-pump" then
-        if direction == defines.direction.south then
-            return defines.direction.north
-        elseif direction == defines.direction.west then
-            return defines.direction.east
-        elseif direction == defines.direction.north then
-            return defines.direction.south
-        else
-            return defines.direction.west
-        end
-    elseif prototype and prototype.name == "oil-refinery" then
-        if direction == defines.direction.north then
-            return defines.direction.north
-        elseif direction == defines.direction.east then
-            return defines.direction.east
-        elseif direction == defines.direction.south then
-            return defines.direction.south
-        else
-            return defines.direction.west
-        end
-    elseif prototype and prototype.name == "chemical-plant" then
-        if direction == defines.direction.south then
-            return defines.direction.north
-        elseif direction == defines.direction.west then
-            return defines.direction.east
-        elseif direction == defines.direction.north then
-            return defines.direction.south
-        else
-            return defines.direction.west
-        end
-    elseif prototype and prototype.type == "transport-belt" or prototype.type == "splitter"  then
-        if direction == defines.direction.north then
-            return defines.direction.north
-        elseif direction == defines.direction.west then
-            return defines.direction.west
-        elseif direction == defines.direction.south then
-            return defines.direction.south
-        else
-            return defines.direction.east
-        end
-    elseif prototype.type == "mining-drill" then
-        if direction == defines.direction.east then
-            return cardinals[2]
-        elseif direction == defines.direction.south then
-            return cardinals[3]
-        elseif direction == defines.direction.west then
-            return cardinals[4]
-        else
-            return cardinals[1]
-        end
-    elseif prototype.type == "underground-belt" then
-        if direction == defines.direction.east then
-            return defines.direction.east
-        elseif direction == defines.direction.south then
-            return defines.direction.south
-        elseif direction == defines.direction.west then
-            return defines.direction.west
-        else
-            return defines.direction.north
-        end
-    elseif prototype.type == "pipe-to-ground" then
-        if direction == defines.direction.east then
-            return defines.direction.west
-        elseif direction == defines.direction.south then
-            return defines.direction.north
-        elseif direction == defines.direction.west then
-            return defines.direction.east
-        else
-            return defines.direction.south
-        end
-    elseif prototype.type == "assembling-machine" then
-        if direction == defines.direction.north then
-            return defines.direction.north
-        elseif direction == defines.direction.east then
-            return defines.direction.east
-        elseif direction == defines.direction.south then
-            return defines.direction.south
-        else
-            return defines.direction.west
-        end
-    elseif prototype.type == "storage-tank" then
-        if direction == defines.direction.north then
-            return defines.direction.north
-        elseif direction == defines.direction.east then
-            return defines.direction.east
-        elseif direction == defines.direction.south then
-            return defines.direction.south
-        else
-            return defines.direction.west
-        end
-    else
-        return direction
-    end
     return direction
 end
 
-local function get_inverse_entity_direction(entity, factorio_direction)
-    local prototype = prototypes.entity[entity]
-
-    if not factorio_direction then
-        return 0  -- Assuming 0 is the default direction in your system
+-- Agent-facing inserter directions name the DROP side, while the engine
+-- stores the PICKUP side (live 2.0.77: direction=4 picks east and drops west).
+-- This is the single documented 180-degree boundary between the two
+-- conventions. It is self-inverse and identity for non-inserter prototypes.
+local function inserter_engine_direction(entity_name, direction)
+    if type(direction) ~= "number" then
+        return direction
     end
+    local prototype = prototypes.entity[entity_name]
+    if prototype == nil or prototype.type ~= "inserter" then
+        return direction
+    end
+    return (direction + 8) % 16
+end
 
-    if prototype and prototype.name == "offshore-pump" then
-        if factorio_direction == defines.direction.west then
-            return defines.direction.east
-        elseif factorio_direction == defines.direction.east then
-            return defines.direction.west
-        elseif factorio_direction == defines.direction.south then
-            return defines.direction.north
-        else
-            return defines.direction.south
+local direction_side_names = {
+    [defines.direction.north] = "north",
+    [defines.direction.east] = "east",
+    [defines.direction.south] = "south",
+    [defines.direction.west] = "west",
+}
+
+local function position_side(origin, point)
+    local dx = point.x - origin.x
+    local dy = point.y - origin.y
+    if math.abs(dx) >= math.abs(dy) then
+        if dx >= 0 then return defines.direction.east end
+        return defines.direction.west
+    end
+    if dy >= 0 then return defines.direction.south end
+    return defines.direction.north
+end
+
+local function inserter_source_item(source)
+    local names = {}
+    local inventory_defines = {
+        defines.inventory.chest,
+        defines.inventory.furnace_source,
+        defines.inventory.assembling_machine_input,
+        defines.inventory.crafter_input,
+        defines.inventory.fuel,
+    }
+    for _, inventory_define in ipairs(inventory_defines) do
+        if inventory_define then
+            local ok, inventory = pcall(function()
+                return source.get_inventory(inventory_define)
+            end)
+            if ok and inventory then
+                local contents_ok, contents = pcall(storage.utils.get_contents_compat, inventory)
+                if contents_ok then
+                    for name, _ in pairs(contents or {}) do
+                        names[#names + 1] = name
+                    end
+                end
+            end
         end
     end
-    --game.print("Getting inverse direction: " .. entity .. " with direction: " .. factorio_direction)
-    -- For other entity types, convert Factorio's direction to 0-3 range
-    return factorio_direction
+    local ok, line = pcall(function() return source.get_transport_line(1) end)
+    if ok and line then
+        local contents_ok, contents = pcall(storage.utils.get_contents_compat, line)
+        if contents_ok then
+            for name, _ in pairs(contents or {}) do
+                names[#names + 1] = name
+            end
+        end
+    end
+    table.sort(names)
+    return names[1]
+end
+
+-- When an inserter reports waiting_for_source_items, attach the tile and
+-- entity it is actually trying to pick from so the status is self-explanatory.
+local function inserter_pickup_look(entity, pickup_position)
+    local tile = {x = math.floor(pickup_position.x) + 0.5,
+        y = math.floor(pickup_position.y) + 0.5}
+    local look = {tile = tile}
+    local found = nil
+    local ground = nil
+    local ok, candidates = pcall(function()
+        return entity.surface.find_entities_filtered{position = tile, radius = 0.45}
+    end)
+    if ok and candidates then
+        for _, candidate in ipairs(candidates) do
+            if candidate.valid and candidate ~= entity then
+                if candidate.type == "item-entity" then
+                    if not ground then
+                        local stack = candidate.stack
+                        ground = {
+                            name = stack and stack.name or candidate.name,
+                            count = stack and stack.count or 1,
+                        }
+                    end
+                elseif not found then
+                    found = candidate
+                end
+            end
+        end
+    end
+    if ground then
+        look.item = ground.name
+        look.ground_count = ground.count
+    end
+    if found then
+        look.entity = {
+            name = found.name,
+            type = found.type,
+            position = {x = found.position.x, y = found.position.y},
+            entity_id = found.unit_number,
+            status = storage.utils.entity_status_names(found.status),
+        }
+        if not look.item then
+            look.item = inserter_source_item(found)
+        end
+    end
+    return look
 end
 
 -- Helper function to check if a position is valid (not colliding with water or other impassable tiles)
@@ -530,7 +579,8 @@ local reverse_entity_status = nil
 
 storage.utils.entity_status_names = function(entity_status)
     local s = entity_status
-    if not s then return '"normal"' end
+    if not s then return '"unknown"' end
+    if type(s) == "string" then return '"' .. s .. '"' end
 
     if not reverse_entity_status then
         reverse_entity_status = {}
@@ -542,10 +592,38 @@ storage.utils.entity_status_names = function(entity_status)
     local name = reverse_entity_status[s]
     if name then return '"' .. name .. '"' end
 
-    return '"normal"'
+    return '"unknown"'
 end
 
 storage.utils.get_entity_direction = get_entity_direction
+storage.utils.inserter_engine_direction = inserter_engine_direction
+
+-- Placement/rotation receipts use this to confirm that a requested drop side
+-- matches the built geometry; mismatch is a direction-convention bug.
+storage.utils.inserter_direction_report = function(serialized, requested_direction)
+    if serialized == nil or serialized.drop_side == nil then
+        return serialized
+    end
+    if type(requested_direction) ~= "number" then
+        return serialized
+    end
+    local requested = requested_direction % 16
+    if serialized.drop_side ~= requested then
+        serialized.direction_warning =
+            "requested " .. (direction_side_names[requested] or tostring(requested))
+            .. " as the inserter drop side, but the drop tile is "
+            .. (direction_side_names[serialized.drop_side] or tostring(serialized.drop_side))
+            .. " of the entity; agent-facing inserter directions name the drop side"
+    end
+    return serialized
+end
+
+storage.utils.serialize_item_stack = recursive_serialize.serialize_item_stack
+storage.utils.deserialize_item_stack = recursive_serialize.deserialize_item_stack
+storage.utils.serialize_inventory = recursive_serialize.serialize_inventory
+storage.utils.deserialize_inventory = recursive_serialize.deserialize_inventory
+storage.utils.serialize_equipment_grid = serialize_equipment_grid
+storage.utils.deserialize_equipment_grid = recursive_serialize.deserialize_equipment_grid
 
 storage.utils.serialize_recipe = function(recipe)
     local function serialize_number(num)
@@ -554,7 +632,7 @@ storage.utils.serialize_recipe = function(recipe)
         elseif num == -math.huge then
             return "-inf"
         else
-            return tostring(num)
+            return num
         end
     end
     if not recipe then return nil end
@@ -574,7 +652,7 @@ storage.utils.serialize_recipe = function(recipe)
             name = '"' .. product.name .. '"',
             amount = serialize_number(product.amount),
             type = '"' .. product.type .. '"',
-            probability = product.probability and serialize_number(product.probability) or "1"
+            probability = product.probability and serialize_number(product.probability) or 1
         })
     end
 
@@ -600,15 +678,7 @@ storage.utils.serialize_entity = function(entity)
     end
     storage.entity_handles = storage.entity_handles or {}
     if entity.unit_number then storage.entity_handles[entity.unit_number] = entity end
-    if storage.utils.track_public_status then storage.utils.track_public_status(entity) end
-    --game.print("Serializing entity: " .. entity.name .. " with direction: " .. entity.direction)
-    local direction = entity.direction
-
-    if direction ~= nil then
-        direction = get_entity_direction(entity.name, entity.direction)
-    else
-        direction = 0
-    end
+    local direction = inserter_engine_direction(entity.name, entity.direction or 0)
 
 
     --game.print("Serialized direction: ", {skip=defines.print_skip.never})
@@ -732,7 +802,7 @@ storage.utils.serialize_entity = function(entity)
         local is_full = not line1.can_insert_at_back() and not line2.can_insert_at_back()
 
         serialized.belt_status = {
-            status = is_full and "\"full_output\"" or "\"normal\""
+            status = storage.utils.entity_status_names(is_full and defines.entity_status.full_output or defines.entity_status.normal)
         }
 
         -- Get and merge contents from both lines
@@ -749,12 +819,10 @@ storage.utils.serialize_entity = function(entity)
 
         -- Merge contents from both belt lines
         for item_name, count in pairs(line1_contents) do
-            --serialized.inventory[item_name] = (serialized.inventory[item_name] or 0) + count
-            serialized.inventory['left'][item_name] = (serialized.inventory[item_name] or 0) + count
+            serialized.inventory['left'][item_name] = (serialized.inventory['left'][item_name] or 0) + count
         end
         for item_name, count in pairs(line2_contents) do
-            --serialized.inventory[item_name] = (serialized.inventory[item_name] or 0) + count
-            serialized.inventory['right'][item_name] = (serialized.inventory[item_name] or 0) + count
+            serialized.inventory['right'][item_name] = (serialized.inventory['right'][item_name] or 0) + count
         end
 
         -- Add warning if belt is full
@@ -785,12 +853,18 @@ storage.utils.serialize_entity = function(entity)
     -- Special handling for power poles
     if entity.type == "electric-pole" then
         local stats = entity.electric_network_statistics
-        local contents_count = 0
-        for name, count in pairs(stats.input_counts) do
-            contents_count = contents_count + count
+        local flow_rate = 0
+        if stats and stats.get_flow_count then
+            for name in pairs(stats.input_counts or {}) do
+                flow_rate = flow_rate + (stats.get_flow_count{
+                    name = name,
+                    category = "input",
+                    precision_index = defines.flow_precision_index.one_minute,
+                    count = false
+                } or 0)
+            end
         end
-
-        serialized.flow_rate = contents_count --stats.get_flow_count{name=…, input=…, precision_index=}
+        serialized.flow_rate = flow_rate
     end
 
     -- Add input and output positions if the entity is a splitter
@@ -860,24 +934,20 @@ storage.utils.serialize_entity = function(entity)
         serialized.drop_position = entity.drop_position
 
         ---- round to the nearest 0.5
-        serialized.pickup_position.x = math.round(serialized.pickup_position.x * 2 ) / 2
-        serialized.pickup_position.y = math.round(serialized.pickup_position.y * 2 ) / 2
-        serialized.drop_position.x = math.round(serialized.drop_position.x * 2 ) / 2
-        serialized.drop_position.y = math.round(serialized.drop_position.y * 2 ) / 2
+        serialized.pickup_position.x = round(serialized.pickup_position.x * 2 ) / 2
+        serialized.pickup_position.y = round(serialized.pickup_position.y * 2 ) / 2
+        serialized.drop_position.x = round(serialized.drop_position.x * 2 ) / 2
+        serialized.drop_position.y = round(serialized.drop_position.y * 2 ) / 2
 
-        -- if pickup_position is nil, compute it from the entity's position and direction
-        if not serialized.pickup_position then
-            --local direction = entity.direction
-            local x, y = entity.position.x, entity.position.y
-            if entity.direction == defines.direction.north then
-                serialized.pickup_position = {x = x, y = y - 1}
-            elseif entity.direction == defines.direction.south then
-                serialized.pickup_position = {x = x, y = y + 1}
-            elseif entity.direction == defines.direction.east then
-                serialized.pickup_position = {x = x + 1, y = y}
-            elseif entity.direction == defines.direction.west then
-                serialized.pickup_position = {x = x - 1, y = y}
-            end
+        serialized.pickup_side = position_side(entity.position, serialized.pickup_position)
+        serialized.drop_side = position_side(entity.position, serialized.drop_position)
+        serialized.pickup_side_name = direction_side_names[serialized.pickup_side]
+        serialized.drop_side_name = direction_side_names[serialized.drop_side]
+
+        if entity.status == defines.entity_status.waiting_for_source_items then
+            serialized.status_reason = {
+                looking_at = inserter_pickup_look(entity, serialized.pickup_position),
+            }
         end
 
         local burner = entity.burner
@@ -930,14 +1000,21 @@ storage.utils.serialize_entity = function(entity)
         serialized.flow_rate = 0
         serialized.contents = contents_count
         serialized.fluid = fluid_name
-        --serialized.input_position = entity.fluidbox.get_connections(1)[1].position
-        --serialized.output_position = entity.fluidbox.get_connections(2)[1].position
+        serialized.connection_points =
+            storage.utils.get_pipe_to_ground_connection_points(entity)
     end
 
     -- Add input and output locations if the entity is a pump
     if entity.type == "pump" then
-        serialized.input_position = entity.fluidbox.get_connections(1)[1].position
-        serialized.output_position = entity.fluidbox.get_connections(2)[1].position
+        local input_connections = entity.fluidbox.get_connections(1)
+        local output_connections = entity.fluidbox.get_connections(2)
+        if input_connections and input_connections[1] then
+            serialized.input_position = input_connections[1].position
+        end
+        if output_connections and output_connections[1] then
+            serialized.output_position = output_connections[1].position
+        end
+        serialized.connection_points = storage.utils.get_pump_connection_points(entity)
     end
 
     -- Add the current research to the lab
@@ -948,15 +1025,6 @@ storage.utils.serialize_entity = function(entity)
             serialized.research = nil
         end
     end
-
-    -- Add input and output locations if the entity is a offshore pump
-    if entity.type == "offshore-pump" then
-        local burner = entity.burner
-        if burner then
-            add_burner_inventory(serialized, burner)
-        end
-    end
-
 
     if entity.name == "oil-refinery" then
         local x, y = entity.position.x, entity.position.y
@@ -986,7 +1054,7 @@ storage.utils.serialize_entity = function(entity)
         -- Filter out any invalid connection points
         local filtered_input_points = {}
         for _, point in ipairs(serialized.input_connection_points) do
-            if is_valid_connection_point(game.surfaces[1], point) then
+            if is_valid_connection_point(entity.surface, point) then
                 table.insert(filtered_input_points, point)
             end
         end
@@ -995,7 +1063,7 @@ storage.utils.serialize_entity = function(entity)
         -- Filter out any invalid connection points
         local filtered_output_points = {}
         for _, point in ipairs(serialized.output_connection_points) do
-            if is_valid_connection_point(game.surfaces[1], point) then
+            if is_valid_connection_point(entity.surface, point) then
                 table.insert(filtered_output_points, point)
             end
         end
@@ -1063,16 +1131,6 @@ storage.utils.serialize_entity = function(entity)
                     {x = x - 2, y = y
                     })
         end
-
-        -- Filter out any invalid connection points
-        local filtered_connection_points = {}
-        for _, point in ipairs(serialized.connection_points) do
-            if is_valid_connection_point(game.surfaces[1], point) then
-                table.insert(filtered_connection_points, point)
-            end
-        end
-
-        serialized.connection_points = filtered_connection_points
     end
     -- Add tile dimensions of the entity
     serialized.tile_dimensions = {
@@ -1085,8 +1143,8 @@ storage.utils.serialize_entity = function(entity)
             x = entity.drop_position.x,
             y = entity.drop_position.y
         }
-        serialized.drop_position.x = math.round(serialized.drop_position.x * 2) / 2
-        serialized.drop_position.y = math.round(serialized.drop_position.y * 2) / 2
+        serialized.drop_position.x = round(serialized.drop_position.x * 2) / 2
+        serialized.drop_position.y = round(serialized.drop_position.y * 2) / 2
         -- game.print("Mining drill drop position: " .. serpent.line(serialized.drop_position))
 
         -- Get the mining area
@@ -1137,7 +1195,7 @@ storage.utils.serialize_entity = function(entity)
 
         -- Add mining status
         if #resources_array == 0 then
-            serialized.status = "\"no_minable_resources\""
+            serialized.status = storage.utils.entity_status_names(defines.entity_status.no_minable_resources)
             if not serialized.warnings then serialized.warnings = {} end
             table.insert(serialized.warnings, "\"nothing to mine\"")
         end
@@ -1185,6 +1243,11 @@ storage.utils.serialize_entity = function(entity)
         end
     end
 
+    if entity.name == "heat-exchanger" then
+        serialized.connection_points =
+            storage.utils.get_heat_exchanger_connection_points(entity)
+    end
+
     if entity.type == "rocket-silo" then
         -- Basic rocket silo properties
         serialized.rocket_parts = 0  -- Will be updated with actual count
@@ -1210,16 +1273,8 @@ storage.utils.serialize_entity = function(entity)
         end
 
         -- Update status based on rocket state
-        if serialized.rocket then
-            if serialized.rocket.launch_progress > 0 then
-                serialized.status = "\"launching_rocket\""
-            elseif serialized.rocket.payload then
-                serialized.status = "\"waiting_to_launch_rocket\""
-            end
-        elseif serialized.rocket_parts < parts_required then
-            if serialized.rocket_parts > 0 then
-                serialized.status = "\"preparing_rocket_for_launch\""
-            end
+        if serialized.rocket_parts < parts_required and serialized.rocket_parts > 0 then
+            serialized.status = storage.utils.entity_status_names(defines.entity_status.preparing_rocket_for_launch)
         end
 
         -- Add warnings based on state
@@ -1228,8 +1283,6 @@ storage.utils.serialize_entity = function(entity)
         end
         if serialized.rocket_parts < parts_required and serialized.rocket_parts > 0 then
             table.insert(serialized.warnings, "\"waiting for rocket parts\"")
-        elseif serialized.status == "\"waiting_to_launch_rocket\"" then
-            table.insert(serialized.warnings, "\"ready to launch\"")
         end
     end
 
@@ -1295,7 +1348,7 @@ storage.utils.serialize_entity = function(entity)
     if is_fluid_handler(entity.type) then
         -- Check if the entity has a fluidbox
         if not entity.fluidbox or #entity.fluidbox == 0 then
-            serialized.status = "\"not_connected\""
+            serialized.status = storage.utils.entity_status_names("not_connected")
             if not serialized.warnings then
                 serialized.warnings = {}
             end
@@ -1320,7 +1373,7 @@ storage.utils.serialize_entity = function(entity)
             serialized.fluid_systems = fluid_systems
 
             if not has_fluid then
-                serialized.status = "not_connected"
+                serialized.status = storage.utils.entity_status_names("not_connected")
                 if not serialized.warnings then
                     serialized.warnings = {}
                 end
@@ -1336,12 +1389,12 @@ storage.utils.serialize_entity = function(entity)
         serialized.electrical_id = entity.electric_network_id
     end
 
-    serialized.direction = get_inverse_entity_direction(entity.name, entity.direction) --api_direction_map[entity.direction]
     -- Post-process connection points if they exist
     if serialized.connection_points then
+        local original_point_count = #serialized.connection_points
         local filtered_points = {}
         for _, point in ipairs(serialized.connection_points) do
-            if is_valid_connection_point(game.surfaces[1], point) then
+            if is_valid_connection_point(entity.surface, point) then
                 table.insert(filtered_points, point)
             end
         end
@@ -1353,21 +1406,17 @@ storage.utils.serialize_entity = function(entity)
             serialized.connection_points = nil
         end
 
-        -- Add warning if points were filtered
-        if not serialized.warnings then
-            serialized.warnings = {}
-        end
-
-        if serialized.connection_points ~= nil then
-            if #filtered_points < #serialized.connection_points then
-                table.insert(serialized.warnings, "\"some connection points were filtered due to being blocked by water\"")
+        if #filtered_points < original_point_count then
+            if not serialized.warnings then
+                serialized.warnings = {}
             end
+            table.insert(serialized.warnings, "\"some connection points were filtered due to being blocked by water\"")
         end
     end
 
     -- Handle special case for boilers which have separate steam output points
     if serialized.steam_output_point then
-        if not is_valid_connection_point(game.surfaces[1], serialized.steam_output_point) then
+        if not is_valid_connection_point(entity.surface, serialized.steam_output_point) then
             serialized.steam_output_point = nil
             if not serialized.warnings then
                 serialized.warnings = {}

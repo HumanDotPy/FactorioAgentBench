@@ -10,7 +10,7 @@ from PIL import Image
 def render(entity: Dict, grid, image_resolver: Callable) -> Optional[Image.Image]:
     """Render steam turbine"""
     direction = entity.get("direction", 0)
-    orientation = "vertical" if direction == 0 else "horizontal"
+    orientation = "vertical" if direction in (0, 8) else "horizontal"
     return image_resolver(f"{entity['name']}_{orientation}")
 
 
@@ -19,7 +19,7 @@ def render_shadow(
 ) -> Optional[Image.Image]:
     """Render shadow"""
     direction = entity.get("direction", 0)
-    orientation = "vertical" if direction == 0 else "horizontal"
+    orientation = "vertical" if direction in (0, 8) else "horizontal"
     return image_resolver(f"{entity['name']}_{orientation}", True)
 
 

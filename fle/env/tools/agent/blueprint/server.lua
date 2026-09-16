@@ -1,5 +1,10 @@
 -- Native blueprint capture and ghost placement. No inventory, research or clock
 -- mutations: construction is performed by the character or native robots.
+local STORE_BYTE_LIMIT = 512 * 1024
+local ESTIMATED_BYTES_PER_TILE = 48
+local ESTIMATED_BYTES_PER_ENTITY = 160
+local ESTIMATED_COMPRESSION_RATIO = 3
+
 local function with_stack(callback)
     local inventory = game.create_inventory(1)
     inventory[1].set_stack{name="blueprint"}
@@ -9,21 +14,83 @@ local function with_stack(callback)
     return result
 end
 
-local function capture(character, x, y, radius)
+local function estimate_capture_bytes(surface, area, include_tiles)
+    local entity_count = 0
+    local ok_entities, counted_entities = pcall(function()
+        return surface.count_entities_filtered{area=area}
+    end)
+    if ok_entities and counted_entities then entity_count = counted_entities end
+    local tile_count = 0
+    if include_tiles then
+        local ok_tiles, counted_tiles = pcall(function()
+            return surface.count_tiles_filtered{area=area}
+        end)
+        if ok_tiles and counted_tiles then
+            tile_count = counted_tiles
+        else
+            tile_count = math.floor(
+                (area[2][1] - area[1][1] + 1) * (area[2][2] - area[1][2] + 1))
+        end
+    end
+    local decoded = tile_count * ESTIMATED_BYTES_PER_TILE
+        + entity_count * ESTIMATED_BYTES_PER_ENTITY
+    return math.ceil(decoded / ESTIMATED_COMPRESSION_RATIO)
+end
+
+local function capture(character, x, y, radius, options)
     if radius <= 0 or radius > 128 then
         return {error="capture radius must be greater than 0 and at most 128"}
     end
+    local include_tiles = options.include_tiles ~= false
+    local area = {{x-radius,y-radius},{x+radius,y+radius}}
+    local estimated_bytes = estimate_capture_bytes(character.surface, area, include_tiles)
+    if estimated_bytes > STORE_BYTE_LIMIT then
+        return {error=string.format(
+            "capture is estimated at %d bytes, above the %d byte library limit; "
+            .. "pass include_tiles=false or use a smaller radius",
+            estimated_bytes, STORE_BYTE_LIMIT),
+            estimated_bytes=estimated_bytes, store_byte_limit=STORE_BYTE_LIMIT}
+    end
     return with_stack(function(stack)
         stack.create_blueprint{
-            surface=character.surface, force=character.force,
-            area={{x-radius,y-radius},{x+radius,y+radius}},
-            always_include_tiles=true, include_entities=true, include_modules=true,
+            surface=character.surface, force=character.force, area=area,
+            always_include_tiles=include_tiles, include_entities=true, include_modules=true,
             include_station_names=true, include_trains=true, include_fuel=true,
         }
         if not stack.is_blueprint_setup() then return {error="empty blueprint area"} end
-        return {blueprint='"' .. stack.export_stack() .. '"',
+        local exported = stack.export_stack()
+        if #exported > STORE_BYTE_LIMIT then
+            return {error=string.format(
+                "captured blueprint is %d bytes, above the %d byte library limit; "
+                .. "pass include_tiles=false or use a smaller radius",
+                #exported, STORE_BYTE_LIMIT), bytes=#exported}
+        end
+        return {blueprint='"' .. exported .. '"', bytes=#exported,
+            included_tiles=include_tiles,
             entity_count=stack.get_blueprint_entity_count(),
             tile_count=#(stack.get_blueprint_tiles() or {}), center_x=x,center_y=y}
+    end)
+end
+
+local function ghost_identifier(ghost)
+    if ghost.unit_number then return ghost.unit_number end
+    return string.format("ghost:%s:%s:%.3f:%.3f",
+        tostring(ghost.ghost_name or ghost.type), tostring(ghost.type),
+        ghost.position.x, ghost.position.y)
+end
+
+local function sort_ghosts(found)
+    table.sort(found, function(left, right)
+        if left.position.x ~= right.position.x then
+            return left.position.x < right.position.x
+        end
+        if left.position.y ~= right.position.y then
+            return left.position.y < right.position.y
+        end
+        local left_name = tostring(left.ghost_name or left.type)
+        local right_name = tostring(right.ghost_name or right.type)
+        if left_name ~= right_name then return left_name < right_name end
+        return (left.unit_number or 0) < (right.unit_number or 0)
     end)
 end
 
@@ -53,7 +120,8 @@ local function place(character, player_index, content, x, y, options)
         for _, ghost in ipairs(ghosts) do
             if ghost.valid and #summaries < 128 then
                 summaries[#summaries+1] = {name=ghost.ghost_name,
-                    position=ghost.position, direction=ghost.direction,entity_id=ghost.unit_number}
+                    position=ghost.position, direction=ghost.direction,
+                    entity_id=ghost_identifier(ghost)}
             end
         end
         return {status=#ghosts>0 and "ghosts_created" or "no_new_ghosts",construction="native",
@@ -68,7 +136,7 @@ storage.actions.blueprint = function(player_index, command, a, b, c, options)
     local character = storage.agent_characters[player_index]
     if not character or not character.valid then return {error="no character"} end
     if command == "capture" then
-        return capture(character, tonumber(a) or 0, tonumber(b) or 0, tonumber(c) or 32)
+        return capture(character, tonumber(a) or 0, tonumber(b) or 0, tonumber(c) or 32, options or {})
     elseif command == "place" then
         return place(character, player_index, a, tonumber(b) or 0, tonumber(c) or 0, options or {})
     elseif command == "ghosts" then
@@ -77,12 +145,13 @@ storage.actions.blueprint = function(player_index, command, a, b, c, options)
         local found = character.surface.find_entities_filtered{
             type={"entity-ghost","tile-ghost"},force=character.force,
             area={{x-radius,y-radius},{x+radius,y+radius}}}
+        sort_ghosts(found)
         local result = {}
         local offset = math.max(0, tonumber(options and options.offset) or 0)
         for index=offset+1,math.min(#found,offset+128) do
             local ghost=found[index]
             result[#result+1]={name=ghost.ghost_name,position=ghost.position,
-                direction=ghost.direction,entity_id=ghost.unit_number,type=ghost.type,
+                direction=ghost.direction,entity_id=ghost_identifier(ghost),type=ghost.type,
                 item_requests=ghost.type=="entity-ghost" and ghost.item_requests or nil}
         end
         return {ghosts=result,total=#found,offset=offset,truncated=#found>offset+#result}

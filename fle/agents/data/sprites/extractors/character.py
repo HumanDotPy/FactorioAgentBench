@@ -170,7 +170,12 @@ class CharacterSpriteExtractor:
 
                     sprite.save(output_path)
                     # HR-only distributions still need canonical 32px/tile sprites.
-                    if is_hr and not sheet_path.with_name(sheet_path.name.removeprefix("hr-")).exists():
+                    if (
+                        is_hr
+                        and not sheet_path.with_name(
+                            sheet_path.name.removeprefix("hr-")
+                        ).exists()
+                    ):
                         sprite.resize(
                             (max(1, sprite.width // 2), max(1, sprite.height // 2)),
                             Image.Resampling.LANCZOS,
@@ -255,32 +260,32 @@ class CharacterSpriteExtractor:
         """
         import json
 
-        # Direction mappings vary by sprite type
+        # Direction mappings vary by sprite type (Factorio 2.0 direction values)
         standard_directions = {
             0: 0,  # North
-            1: 1,  # North-East
-            2: 2,  # East
-            3: 3,  # South-East
-            4: 4,  # South
-            5: 5,  # South-West
-            6: 6,  # West
-            7: 7,  # North-West
+            2: 1,  # North-East
+            4: 2,  # East
+            6: 3,  # South-East
+            8: 4,  # South
+            10: 5,  # South-West
+            12: 6,  # West
+            14: 7,  # North-West
         }
 
         # Mining tool has fewer directions (no diagonals)
         mining_directions = {
             0: 0,  # North
-            2: 3,  # East (maps to column 3)
-            4: 6,  # South (maps to column 6)
-            6: 9,  # West (maps to column 9)
+            4: 3,  # East (maps to column 3)
+            8: 6,  # South (maps to column 6)
+            12: 9,  # West (maps to column 9)
         }
 
         # Dead has only 2 directions
         dead_directions = {
             0: 0,  # North/South
-            2: 1,  # East/West
-            4: 0,  # South (same as North)
-            6: 1,  # West (same as East)
+            4: 1,  # East/West
+            8: 0,  # South (same as North)
+            12: 1,  # West (same as East)
         }
 
         mapping = {

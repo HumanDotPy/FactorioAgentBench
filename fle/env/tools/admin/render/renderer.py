@@ -1093,11 +1093,11 @@ class Renderer:
                 image = None
 
                 if entity["name"] == "straight-rail":
-                    if direction in [0, 4]:
+                    if direction in [0, 8]:
                         image = image_resolver(
                             f"{entity.name}_vertical_pass_{int(pass_num)}", False
                         )
-                    elif direction in [2, 6]:
+                    elif direction in [4, 12]:
                         image = image_resolver(
                             f"{entity.name}_horizontal_pass_{int(pass_num)}", False
                         )

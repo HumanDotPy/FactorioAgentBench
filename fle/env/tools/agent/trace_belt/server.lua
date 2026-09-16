@@ -9,9 +9,23 @@ storage.actions.trace_belt = function(player_index, x, y, max_tiles, upstream)
     local position = {x = tonumber(x), y = tonumber(y)}
     local dirs = {[0] = "north", [4] = "east", [8] = "south", [12] = "west"}
     local vectors = {[0] = {0, -1}, [4] = {1, 0}, [8] = {0, 1}, [12] = {-1, 0}}
+    local BELT_TYPES = {["transport-belt"] = true, ["underground-belt"] = true}
+
+    local function is_belt(entity)
+        return entity ~= nil and BELT_TYPES[entity.type] == true
+    end
+
+    local function is_ground_belt(entity)
+        return entity ~= nil and entity.type == "transport-belt"
+    end
+
+    local function is_underground_belt(entity)
+        return entity ~= nil and entity.type == "underground-belt"
+    end
 
     local found = surface.find_entities_filtered{
-        position = position, radius = 0.71, name = "transport-belt", limit = 1
+        position = position, radius = 0.71,
+        type = {"transport-belt", "underground-belt"}, limit = 1
     }
     local belt = found and found[1]
     if not belt then
@@ -35,6 +49,7 @@ storage.actions.trace_belt = function(player_index, x, y, max_tiles, upstream)
 
     local function describe(entity)
         return {
+            name = entity.name,
             position = {x = entity.position.x, y = entity.position.y},
             direction = dirs[entity.direction] or tostring(entity.direction),
             active = entity.active,
@@ -60,7 +75,7 @@ storage.actions.trace_belt = function(player_index, x, y, max_tiles, upstream)
         local belt_here = nil
         local other = nil
         for _, entity in ipairs(entities or {}) do
-            if entity.name == "transport-belt" then
+            if is_belt(entity) then
                 if not belt_here then belt_here = entity end
             elseif entity.name ~= "item-on-ground" and entity.type ~= "resource" then
                 if not other then other = entity end
@@ -76,6 +91,44 @@ storage.actions.trace_belt = function(player_index, x, y, max_tiles, upstream)
         end
         local output = offset(belt_entity.position, vector)
         return output.x == target_position.x and output.y == target_position.y
+    end
+
+    local function receives_from(belt_entity, source_position)
+        local vector = vectors[belt_entity.direction]
+        if not vector then
+            return false
+        end
+        local behind = offset(belt_entity.position, {-vector[1], -vector[2]})
+        if behind.x == source_position.x and behind.y == source_position.y then
+            return true
+        end
+        local left = offset(belt_entity.position, {vector[2], -vector[1]})
+        local right = offset(belt_entity.position, {-vector[2], vector[1]})
+        return (left.x == source_position.x and left.y == source_position.y)
+            or (right.x == source_position.x and right.y == source_position.y)
+    end
+
+    local function find_underground(origin_position, direction, vector, name, wanted_kind)
+        local reach = 9
+        if prototypes and prototypes.entity then
+            local prototype = prototypes.entity[name]
+            if prototype and prototype.max_distance then
+                reach = math.max(1, math.floor(prototype.max_distance))
+            end
+        end
+        for distance = 1, reach do
+            local probe = offset(origin_position, {vector[1] * distance, vector[2] * distance})
+            local candidate = at_tile(probe)
+            if is_underground_belt(candidate) then
+                if candidate.name == name
+                    and candidate.direction == direction
+                    and candidate.belt_to_ground_type == wanted_kind then
+                    return candidate
+                end
+                return nil
+            end
+        end
+        return nil
     end
 
     local function entity_receipt(entity)
@@ -109,60 +162,116 @@ storage.actions.trace_belt = function(player_index, x, y, max_tiles, upstream)
             local behind_position = offset(current.position, {-vector[1], -vector[2]})
             local behind_belt, behind_other = at_tile(behind_position)
             local predecessor = nil
-            if behind_belt and output_feeds(behind_belt, current.position) then
+            local advanced = false
+            if is_ground_belt(behind_belt) and output_feeds(behind_belt, current.position) then
                 predecessor = behind_belt
-            end
-            -- Side-load probes use a fixed order: left of flow, then right.
-            local side_positions = {
-                offset(current.position, {vector[2], -vector[1]}),
-                offset(current.position, {-vector[2], vector[1]}),
-            }
-            local side_belts = {}
-            local side_others = {}
-            if not predecessor then
-                for index, side_position in ipairs(side_positions) do
-                    side_belts[index], side_others[index] = at_tile(side_position)
-                end
-                for index = 1, 2 do
-                    if
-                        side_belts[index]
-                        and output_feeds(side_belts[index], current.position)
-                    then
-                        predecessor = side_belts[index]
+            elseif is_underground_belt(behind_belt)
+                and behind_belt.belt_to_ground_type == "output"
+                and behind_belt.direction == current.direction then
+                local entrance = find_underground(
+                    behind_belt.position, current.direction,
+                    {-vector[1], -vector[2]}, behind_belt.name, "input"
+                )
+                if entrance then
+                    tiles[#tiles + 1] = describe(behind_belt)
+                    if #tiles >= max_tiles then
+                        blocker = {
+                            position = {x = entrance.position.x, y = entrance.position.y},
+                            reason = "max_tiles_reached",
+                        }
                         break
                     end
+                    current = entrance
+                    advanced = true
                 end
             end
-            if predecessor then
-                current = predecessor
-            else
-                local other = nil
-                local other_position = behind_position
-                local candidates = {
-                    {behind_other, behind_position},
-                    {side_others[1], side_positions[1]},
-                    {side_others[2], side_positions[2]},
+            if not advanced then
+                -- Side-load probes use a fixed order: left of flow, then right.
+                local side_positions = {
+                    offset(current.position, {vector[2], -vector[1]}),
+                    offset(current.position, {-vector[2], vector[1]}),
                 }
-                for _, candidate in ipairs(candidates) do
-                    if is_belt_feeder(candidate[1]) then
-                        other = candidate[1]
-                        other_position = candidate[2]
-                        break
+                local side_belts = {}
+                local side_others = {}
+                if not predecessor then
+                    for index, side_position in ipairs(side_positions) do
+                        side_belts[index], side_others[index] = at_tile(side_position)
+                    end
+                    for index = 1, 2 do
+                        if
+                            is_ground_belt(side_belts[index])
+                            and output_feeds(side_belts[index], current.position)
+                        then
+                            predecessor = side_belts[index]
+                            break
+                        end
                     end
                 end
-                blocker = {
-                    position = {x = other_position.x, y = other_position.y},
-                    reason = other and "fed_by_entity" or "start_of_line",
-                }
-                if other then
-                    blocker.entity = entity_receipt(other)
+                if predecessor then
+                    current = predecessor
+                else
+                    local other = nil
+                    local other_position = behind_position
+                    local candidates = {
+                        {behind_other, behind_position},
+                        {side_others[1], side_positions[1]},
+                        {side_others[2], side_positions[2]},
+                    }
+                    for _, candidate in ipairs(candidates) do
+                        if is_belt_feeder(candidate[1]) then
+                            other = candidate[1]
+                            other_position = candidate[2]
+                            break
+                        end
+                    end
+                    blocker = {
+                        position = {x = other_position.x, y = other_position.y},
+                        reason = other and "fed_by_entity" or "start_of_line",
+                    }
+                    if other then
+                        blocker.entity = entity_receipt(other)
+                    end
+                    break
                 end
-                break
             end
         else
             local next_position = offset(current.position, vector)
             local next_belt, other = at_tile(next_position)
-            if not next_belt then
+            if is_ground_belt(next_belt) and receives_from(next_belt, current.position) then
+                current = next_belt
+            elseif is_underground_belt(next_belt)
+                and next_belt.belt_to_ground_type == "input"
+                and next_belt.direction == current.direction then
+                local output = find_underground(
+                    next_belt.position, current.direction, vector,
+                    next_belt.name, "output"
+                )
+                if output then
+                    tiles[#tiles + 1] = describe(next_belt)
+                    if #tiles >= max_tiles then
+                        blocker = {
+                            position = {x = output.position.x, y = output.position.y},
+                            reason = "max_tiles_reached",
+                        }
+                        break
+                    end
+                    current = output
+                else
+                    blocker = {
+                        position = next_position,
+                        reason = "blocked_by_entity",
+                        entity = entity_receipt(next_belt),
+                    }
+                    break
+                end
+            elseif next_belt then
+                blocker = {
+                    position = next_position,
+                    reason = "blocked_by_reversed_belt",
+                    entity = entity_receipt(next_belt),
+                }
+                break
+            else
                 blocker = {
                     position = next_position,
                     reason = other and "blocked_by_entity" or "end_of_line",
@@ -172,7 +281,6 @@ storage.actions.trace_belt = function(player_index, x, y, max_tiles, upstream)
                 end
                 break
             end
-            current = next_belt
         end
     end
     if blocker == nil then

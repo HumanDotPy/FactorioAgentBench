@@ -6,11 +6,11 @@ Pipe renderer with connection logic
 from typing import Dict, Tuple, Optional, Callable, List
 from PIL import Image
 
-# Direction constants (Factorio 8-way direction system: 0=N, 2=E, 4=S, 6=W)
+# Direction constants (Factorio 2.0 16-way direction system: 0=N, 4=E, 8=S, 12=W)
 NORTH = 0
-EAST = 2
-SOUTH = 4
-WEST = 6
+EAST = 4
+SOUTH = 8
+WEST = 12
 
 # Entities that have fluid connection points
 FLUID_HANDLER_ENTITIES = {

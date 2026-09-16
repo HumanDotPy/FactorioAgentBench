@@ -154,7 +154,9 @@ class EntityStatus(Enum):
 
     @classmethod
     def from_string(cls, status_string):
-        return cls._value2member_map_.get(status_string)
+        if not isinstance(status_string, str):
+            return None
+        return cls._value2member_map_.get(status_string.strip().strip('"'))
 
     @classmethod
     def from_int(cls, status_int):
@@ -356,7 +358,7 @@ class Position(BaseModel):
     def __eq__(self, other) -> bool:
         if not isinstance(other, Position):
             return NotImplemented
-        return self.is_close(other, tolerance=1)
+        return self.is_close(other, tolerance=1e-6)
 
 
 class IndexedPosition(Position):

@@ -89,12 +89,11 @@ def _construct_group(
         entities[0], Pipe
     ):
         entities = _deduplicate_entities(entities)
-        if any([pipe.contents > 0 and pipe.flow_rate > 0 for pipe in entities]):
+        contents = [pipe.contents or 0 for pipe in entities]
+        if any([value > 0 for value in contents]):
             status = EntityStatus.WORKING
-        elif all([pipe.contents == 0 for pipe in entities]):
+        else:
             status = EntityStatus.EMPTY
-        elif all([pipe.flow_rate == 0 for pipe in entities]):
-            status = EntityStatus.FULL_OUTPUT
 
         return PipeGroup(pipes=entities, id=id, status=status, position=position)
     elif prototype in (

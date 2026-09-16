@@ -131,8 +131,8 @@ class Render(Tool):
             world_min_y=size["minY"] + renderer.offset_y,
             world_max_x=size["maxX"] + renderer.offset_x,
             world_max_y=size["maxY"] + renderer.offset_y,
-            center_x=renderer.offset_x,  # The center is at the offset (player position)
-            center_y=renderer.offset_y,
+            center_x=renderer.offset_x + (size["minX"] + size["maxX"]) / 2,
+            center_y=renderer.offset_y + (size["minY"] + size["maxY"]) / 2,
             width_tiles=size["width"],
             height_tiles=size["height"],
             image_width=width,

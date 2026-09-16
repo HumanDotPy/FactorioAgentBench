@@ -96,10 +96,6 @@ function get_step_size(connection_type)
     return wire_reach[connection_type] or 1
 end
 
-function math.round(x)
-    return x >= 0 and math.floor(x + 0.5) or math.ceil(x - 0.5)
-end
-
 local function has_valid_fluidbox(entity)
     -- Factorio 2.0: fluidbox methods are on the LuaFluidBox object, not individual elements
     -- Also: get_fluid_system_id -> get_fluid_segment_id
@@ -371,7 +367,7 @@ local function interpolate_manhattan(pos1, pos2)
         local y_step = math.floor((dy / steps)*2)/2
 
         for i = 1, steps - 1 do
-            local new_pos_x = {x = pos1.x + math.round(x_step * i), y = pos1.y}
+            local new_pos_x = {x = pos1.x + storage.utils.round(x_step * i), y = pos1.y}
             if is_placeable(new_pos_x) then
                 table.insert(interpolated, {position = new_pos_x})
             else
@@ -381,7 +377,7 @@ local function interpolate_manhattan(pos1, pos2)
                 end
             end
 
-            local new_pos_y = {x = pos1.x + math.round(x_step * i), y = pos1.y + math.round(y_step * i)}
+            local new_pos_y = {x = pos1.x + storage.utils.round(x_step * i), y = pos1.y + storage.utils.round(y_step * i)}
             if is_placeable(new_pos_y) then
                 table.insert(interpolated, {position = new_pos_y})
             else
@@ -524,18 +520,7 @@ local function place_at_position(player, connection_type, current_position, dir,
         }
         -- We can just teleport away here to avoid collision as we dont adhere by distance rules in connect_entities
         player.teleport({placement_position.x+2, placement_position.y+2})
-        local can_place
-        if connection_type == 'pipe' or connection_type == 'pipe-to-ground' or connection_type == 'underground-pipe' then
-            -- Use permissive surface check for pipe placement to allow tight spaces
-            can_place = game.surfaces[1].can_place_entity({
-                name = connection_type,
-                position = placement_position,
-                direction = dir,
-                force = player.force
-            })
-        else
-            can_place = storage.utils.can_place_entity(player, connection_type, placement_position, dir)
-        end
+        local can_place = storage.utils.can_place_entity(player, connection_type, placement_position, dir)
 
         --local can_place = storage.utils.avoid_entity(1, connection_type, placement_position, dir)
         --if not can_build then
@@ -637,18 +622,7 @@ local function place_at_position(player, connection_type, current_position, dir,
 
     -- We can just teleport away here to avoid collision as we dont adhere by distance rules in connect_entities
     player.teleport({placement_position.x+2, placement_position.y+2})
-    local can_place
-    if connection_type == 'pipe' or connection_type == 'pipe-to-ground' or connection_type == 'underground-pipe' then
-        -- Use permissive surface check for pipe placement to allow tight spaces
-        can_place = game.surfaces[1].can_place_entity({
-            name = connection_type,
-            position = placement_position,
-            direction = dir,
-            force = player.force
-        })
-    else
-        can_place = storage.utils.can_place_entity(player, connection_type, placement_position, dir)
-    end
+    local can_place = storage.utils.can_place_entity(player, connection_type, placement_position, dir)
     --local player_position = player.position
     --player.teleport({placement_position.x, placement_position.y})
     --local can_place = storage.actions.can_place_entity(1, connection_type, dir, placement_position.x, placement_position.y)--game.surfaces[1].can_place_entity(entity_variant)
@@ -758,7 +732,10 @@ local function connect_entities(player_index, source_x, source_y, target_x, targ
         error("Invalid path: " .. serpent.line(path))
     end
 
-    local path = storage.utils.normalise_path(raw_path, start_position, end_position)
+    local path, normalised_start, normalised_end =
+        storage.utils.normalise_path(raw_path, start_position, end_position)
+    if normalised_start then start_position = normalised_start end
+    if normalised_end then end_position = normalised_end end
 
     -- Get default and underground connection types
     local default_connection_type = default_connect_types[connection_types[1]] or connection_types[1]
@@ -802,8 +779,8 @@ local function connect_entities(player_index, source_x, source_y, target_x, targ
     local position_map = {}
 
     -- Get source and target entities
-    local source_entity = storage.utils.get_closest_entity(player, {x = source_x, y = source_y})
-    local target_entity = storage.utils.get_closest_entity(player, {x = target_x, y = target_y})
+    local source_entity = storage.utils.get_closest_entity(player, {x = source_x, y = source_y}, 1)
+    local target_entity = storage.utils.get_closest_entity(player, {x = target_x, y = target_y}, 1)
 
 
     if #connection_types == 1 and connection_types[1] == 'pipe-to-ground' then
@@ -996,7 +973,7 @@ local function connect_entities(player_index, source_x, source_y, target_x, targ
 
                 if not dry_run then
                     -- Get the newly placed pole
-                    local current_pole = placed_entity or storage.utils.get_closest_entity(player, current_pos)
+                    local current_pole = placed_entity or storage.utils.get_closest_entity(player, current_pos, 1)
 
                     -- Check if we've achieved connectivity to the target
                     if are_poles_connected(current_pole, target_entity) then
@@ -1120,33 +1097,34 @@ local function connect_entities(player_index, source_x, source_y, target_x, targ
     }
 end
 
+local function snap_to_tile_center(value)
+    if math.ceil(value) == value then
+        return value + 0.5
+    end
+    return value
+end
+
 storage.utils.normalise_path = function(original_path, start_position, end_position)
     local path = {}
     local seen = {}  -- To track seen positions
     if original_path == nil or #original_path < 1 or original_path == "not_found" then
         error("Failed to find a path.")
     end
-    if math.ceil(start_position.x) == start_position.x then
-        start_position.x = start_position.x + 0.5
-        --start_position.y = start_position.y + 0.5
-    end
-    if math.ceil(start_position.y) == start_position.y then
-        start_position.y = start_position.y + 0.5
-    end
+    start_position = {
+        x = snap_to_tile_center(start_position.x),
+        y = snap_to_tile_center(start_position.y)
+    }
+    end_position = {
+        x = snap_to_tile_center(end_position.x),
+        y = snap_to_tile_center(end_position.y)
+    }
 
-    if math.ceil(end_position.x) == end_position.x or math.ceil(end_position.y) == end_position.y then
-        end_position.x = end_position.x + 0.5
-        end_position.y = end_position.y + 0.5
-    end
-
-    --game.print(serpent.block(original_path))
-    --for i = 1, #original_path do
-    --    game.print(serpent.line(original_path[i]))
-    --end
-
-    if math.ceil(original_path[1].position.x) == original_path[1].position.x or math.ceil(original_path[1].position.y) == original_path[1].position.y then
-        original_path[1].position.x = original_path[1].position.x + 0.5
-        original_path[1].position.y = original_path[1].position.y + 0.5
+    local first_path_position = nil
+    if original_path[1] and original_path[1].position then
+        first_path_position = {
+            x = snap_to_tile_center(original_path[1].position.x),
+            y = snap_to_tile_center(original_path[1].position.y)
+        }
     end
 
     -- Helper function to add unique positions
@@ -1179,6 +1157,9 @@ storage.utils.normalise_path = function(original_path, start_position, end_posit
     local current_pos = previous_pos
     for i = 1, #original_path do
         local target_pos = original_path[i].position
+        if i == 1 and first_path_position then
+            target_pos = first_path_position
+        end
         local interpolated = interpolate_manhattan(current_pos, target_pos)
 
         -- Add interpolated positions
@@ -1208,7 +1189,7 @@ storage.utils.normalise_path = function(original_path, start_position, end_posit
         add_unique(end_position, current_pos)
     end
 
-    return path
+    return path, start_position, end_position
 end
 
 -- Helper function to check if two positions are adjacent

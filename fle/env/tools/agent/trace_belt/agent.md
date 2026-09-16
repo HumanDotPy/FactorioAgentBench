@@ -1,8 +1,8 @@
 # trace_belt
 
-Follow a transport-belt line from any belt tile and report lane contents plus
-the first place the line starts or stops. Use it whenever a belt "should" be
-carrying items but nothing arrives.
+Follow a belt line (basic, fast, express, or an underground pair) from any belt
+tile and report lane contents plus the first place the line starts or stops.
+Use it whenever a belt "should" be carrying items but nothing arrives.
 
 ## Usage
 
@@ -23,7 +23,13 @@ print("source side:", source["blocker"])
 - `end_of_line`: the next tile has no belt (missing segment or a wrong turn).
 - `blocked_by_entity`: a non-belt entity (pole, rock, chest, machine) occupies
   the next tile; `blocker.entity` names it.
+- `blocked_by_reversed_belt`: the next tile holds a belt facing back into the
+  line, so items cannot continue; `blocker.entity` names it.
 - `max_tiles_reached`: the line kept going past `max_tiles`.
+
+Underground belts are followed only as a matched input/output pair of the same
+tier and direction; an unmatched underground input is reported as
+`blocked_by_entity`.
 
 With `upstream=True` the walk starts at the queried belt and moves against the
 flow, so the first tile is the queried belt and later tiles are its feed chain.

@@ -1,4 +1,8 @@
 -- utils.lua
+storage.utils.round = function(value)
+    return value >= 0 and math.floor(value + 0.5) or math.ceil(value - 0.5)
+end
+
 storage.utils.remove_enemies = function ()
     game.forces["enemy"].kill_all_units()  -- Removes all biters
     game.map_settings.enemy_expansion.enabled = false  -- Stops biters from expanding
@@ -9,7 +13,12 @@ storage.utils.remove_enemies = function ()
     end
 end
 
-local directions = {'north', 'northeast', 'east', 'southeast', 'south', 'southwest', 'west', 'northwest'}
+local directions = {
+    'north', 'northnortheast', 'northeast', 'eastnortheast',
+    'east', 'eastsoutheast', 'southeast', 'southsoutheast',
+    'south', 'southsouthwest', 'southwest', 'westsouthwest',
+    'west', 'westnorthwest', 'northwest', 'northnorthwest'
+}
 
 storage.utils.get_direction = function(from_position, to_position)
     local dx = to_position.x - from_position.x
@@ -59,13 +68,13 @@ storage.utils.get_direction_with_diagonals = function(from_pos, to_pos)
 end
 
 
-storage.utils.get_closest_entity = function(player, position)
+storage.utils.get_closest_entity = function(player, position, radius)
     local closest_distance = math.huge
     local closest_entity = nil
     local entities = player.surface.find_entities_filtered{
         position = position,
-        force = "player",
-        radius = 5  -- Increased from 3 to 5 to better handle large entities like 3x3 drills
+        force = player.force,
+        radius = radius or 5
     }
 
     for _, entity in ipairs(entities) do
@@ -116,14 +125,16 @@ storage.utils.avoid_entity = function(player_index, entity, position, direction)
     local player = storage.agent_characters[player_index]
     return player.surface.can_place_entity{
         name = entity,
-        force = "player",
+        force = player.force,
         position = position,
         direction = storage.utils.get_entity_direction(entity, direction),
         build_check_type = defines.build_check_type.manual
     }
 end
 
-storage.crafting_queue = {}
+if not storage.crafting_queue then
+    storage.crafting_queue = {}
+end
 
 script.on_event(defines.events.on_tick, function(event)
   local queue = storage.crafting_queue
@@ -294,7 +305,7 @@ function storage.utils.inspect(player, radius, position)
         right_bottom = {x = position.x + radius, y = position.y + radius}
     }
 
-    local entities = surface.find_entities_filtered({bounding_box, force = "player"})
+    local entities = surface.find_entities_filtered({bounding_box, force = player.force})
     local entity_data = {}
 
     for _, entity in ipairs(entities) do
@@ -338,7 +349,7 @@ function storage.utils.inspect(player, radius, position)
             local data = {
                 name = "player_character",
                 position = entity.position,
-                direction = directions[(entity.direction/2)+1],  -- Factorio 2.0 direction values are 0,2,4,6,8,10,12,14
+                direction = directions[(math.floor(entity.direction or 0) % 16) + 1],
             }
             table.insert(entity_data, data)
         end
@@ -655,12 +666,20 @@ storage.utils.escape_character_to_free_tile = function(player, avoid_box, prefer
     end
     local surface = player.surface
     local origin = player.position
+    local offsets = {
+        {1, 0}, {-1, 0}, {0, 1}, {0, -1},
+        {1, 1}, {1, -1}, {-1, 1}, {-1, -1},
+    }
+    local max_radius = 2
     local candidates = {}
-    for _, radius in ipairs({1, 2}) do
-        candidates[#candidates + 1] = {x = origin.x + radius, y = origin.y}
-        candidates[#candidates + 1] = {x = origin.x - radius, y = origin.y}
-        candidates[#candidates + 1] = {x = origin.x, y = origin.y + radius}
-        candidates[#candidates + 1] = {x = origin.x, y = origin.y - radius}
+    for radius = 1, max_radius do
+        for _, offset in ipairs(offsets) do
+            candidates[#candidates + 1] = {
+                x = origin.x + offset[1] * radius,
+                y = origin.y + offset[2] * radius,
+                order = #candidates + 1,
+            }
+        end
     end
 
     local function inside_avoid_box(candidate)
@@ -712,7 +731,12 @@ storage.utils.escape_character_to_free_tile = function(player, avoid_box, prefer
     end
 
     table.sort(candidates, function(a, b)
-        return preference(a) > preference(b)
+        local preference_a = preference(a)
+        local preference_b = preference(b)
+        if preference_a ~= preference_b then
+            return preference_a > preference_b
+        end
+        return a.order < b.order
     end)
 
     for _, candidate in ipairs(candidates) do

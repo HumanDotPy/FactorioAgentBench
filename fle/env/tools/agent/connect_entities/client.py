@@ -191,6 +191,8 @@ class ConnectEntities(Tool):
                 )
                 # sleep(real_world_sleep)
 
+        self.refresh_player_location()
+
         if dry_run:
             return {
                 "number_of_entities_required": total_required_entities,

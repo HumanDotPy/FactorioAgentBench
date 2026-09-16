@@ -142,7 +142,7 @@ end
 
 function util.oppositedirection(direction)
   if not tonumber(direction) then error(direction .. " is not a valid direction") end
-  return (direction + 4) % 8
+  return (direction + 8) % 16
 end
 
 function util.multiplystripes(count, stripes)

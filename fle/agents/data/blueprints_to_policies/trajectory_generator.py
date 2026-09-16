@@ -6,6 +6,9 @@ from jinja2 import Template
 from fle.env import Position, BoundingBox, EntityGroup
 from fle.env import FactorioInstance, Direction
 from fle.env.game_types import Resource, prototype_by_name
+from fle.agents.data.blueprints_to_policies.direction_semantics import (
+    agent_direction,
+)
 
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, NamedTuple
@@ -41,23 +44,27 @@ class EntityPriority(Enum):
     BELT = 7
 
 
-instance = FactorioInstance(
-    address="localhost",
-    bounding_box=200,
-    tcp_port=27000,
-    fast=True,
-    cache_scripts=False,
-    inventory={
-        "coal": 50,
-        "copper-plate": 50,
-        "burner-mining-drill": 10,
-        "electric-mining-drill": 15,
-        "transport-belt": 50,
-        "stone-furnace": 10,
-        "small-electric-pole": 15,
-        "small-lamp": 10,
-    },
-)
+instance: Optional[FactorioInstance] = None
+
+
+def _connect() -> FactorioInstance:
+    return FactorioInstance(
+        address="localhost",
+        bounding_box=200,
+        tcp_port=27000,
+        fast=True,
+        cache_scripts=False,
+        inventory={
+            "coal": 50,
+            "copper-plate": 50,
+            "burner-mining-drill": 10,
+            "electric-mining-drill": 15,
+            "transport-belt": 50,
+            "stone-furnace": 10,
+            "small-electric-pole": 15,
+            "small-lamp": 10,
+        },
+    )
 
 
 def determine_resource_type(entities: List[BlueprintEntity]) -> Resource:
@@ -121,7 +128,11 @@ def find_valid_origin(
     )
 
     # Use nearest_buildable to find valid position
-    return game.nearest_buildable(prototype_by_name[miners[0].name], bounding_box)
+    return game.namespace.nearest_buildable(
+        prototype_by_name[miners[0].name],
+        bounding_box,
+        center_position=Position(x=(min_x + max_x) / 2, y=(min_y + max_y) / 2),
+    )
 
 
 def create_origin_finding_code_trace(entities, resource):
@@ -156,20 +167,31 @@ def create_origin_finding_code_trace(entities, resource):
         "    x=(left_top.x + right_bottom.x) / 2,",
         "    y=(left_top.y + right_bottom.y) / 2",
         ")",
+        "left_bottom = Position(",
+        "    x=left_top.x,",
+        "    y=right_bottom.y",
+        ")",
+        "right_top = Position(",
+        "    x=right_bottom.x,",
+        "    y=left_top.y",
+        ")",
         "",
         "miner_box = BoundingBox(",
         "    left_top=left_top,",
         "    right_bottom=right_bottom,",
-        "    center=center",
+        "    left_bottom=left_bottom,",
+        "    right_top=right_top",
         ")",
         "",
         "# Find valid position for miners using nearest_buildable",
         "origin = game.nearest_buildable(",
         f"    Prototype.{prototype_by_name[base_miner.name].name},",
-        "    bounding_box=miner_box",
+        "    center_position=center,",
+        "    building_box=miner_box",
         ")",
         "",
         "assert origin, 'Could not find valid position for miners'",
+        "origin = origin.center",
         "",
         "# Move to origin position",
         "game.move_to(origin)",
@@ -286,9 +308,10 @@ def is_transport_belt(entity_name: str) -> bool:
     )  # or "splitter" in entity_name or "underground-belt" in entity_name
 
 
-def direction_to_enum(direction: int) -> str:
+def direction_to_enum(direction: int, name: str = None) -> str:
     """Convert numeric direction to Direction enum name."""
-    direction_map = {0: "UP", 2: "RIGHT", 4: "DOWN", 6: "LEFT"}
+    direction = agent_direction(name, direction)
+    direction_map = {0: "UP", 4: "RIGHT", 8: "DOWN", 12: "LEFT"}
     return direction_map.get(direction, "UP")
 
 
@@ -476,14 +499,14 @@ def convert_blueprint_to_trace(blueprint_json: str) -> List[str]:
                 trace.append(
                     f"{entity_var} = game.place_entity("
                     f"Prototype.{prototype_by_name[entity.name].name}, "
-                    f"direction=Direction.{direction_to_enum(entity.direction)}, "
+                    f"direction=Direction.{direction_to_enum(entity.direction, entity.name)}, "
                     f"position=origin+Position(x={entity.position['x']},y={entity.position['y']}))"
                 )
             else:
                 trace.append(
                     f"{entity_var} = game.place_entity("
                     f"Prototype.{prototype_by_name[entity.name].name}, "
-                    f"direction=Direction.{direction_to_enum(entity.direction)}, "
+                    f"direction=Direction.{direction_to_enum(entity.direction, entity.name)}, "
                     f"position=origin+Position(x={entity.position['x']},y={entity.position['y']}))"
                 )
         else:
@@ -547,7 +570,7 @@ def convert_blueprint_to_trace(blueprint_json: str) -> List[str]:
 
             # Rotate entity if necessary
             trace.append(
-                f"{entity_var} = game.rotate_entity({entity_var}, Direction.{direction_to_enum(entity.direction)})"
+                f"{entity_var} = game.rotate_entity({entity_var}, Direction.{direction_to_enum(entity.direction, entity.name)})"
             )
 
         trace.append(f"assert {entity_var}, 'Failed to place {entity.name}'")
@@ -568,13 +591,13 @@ def convert_blueprint_to_trace(blueprint_json: str) -> List[str]:
         connection_type = "Prototype." + prototype_by_name[start.name].name
 
         if start.position["x"] > end.position["x"]:
-            direction = 6
+            direction = 12
         elif start.position["x"] < end.position["x"]:
-            direction = 2
+            direction = 4
         elif start.position["y"] > end.position["y"]:
             direction = 0
         else:
-            direction = 4
+            direction = 8
         # If the start needs to connect to a non-belt entity, reference that
         trace.append(f"# Place transport belt segment {segment_idx + 1}")
 
@@ -648,13 +671,13 @@ def convert_blueprint_to_trace(blueprint_json: str) -> List[str]:
         if (
             start.position["y"] < end.position["y"]
             and start.position["x"] == end.position["x"]
-            and direction == 4
+            and direction == 8
         ):
             start_ref, end_ref = end_ref, start_ref
         elif (
             start.position["x"] < end.position["x"]
             and start.position["y"] == end.position["y"]
-            and direction == 6
+            and direction == 12
         ):
             start_ref, end_ref = end_ref, start_ref
         elif (
@@ -666,7 +689,7 @@ def convert_blueprint_to_trace(blueprint_json: str) -> List[str]:
         elif (
             start.position["x"] > end.position["x"]
             and start.position["y"] == end.position["y"]
-            and direction == 2
+            and direction == 4
         ):
             start_ref, end_ref = end_ref, start_ref
 
@@ -794,63 +817,76 @@ def verify_placement(game_entities, blueprint_json):
     )
 
 
-# get execution dir dynamically
-execution_dir = os.path.dirname(os.path.realpath(__file__)) + "/blueprints/electricity/"
-output_dir = os.path.dirname(os.path.realpath(__file__)) + "/full/electricity/"
-# filename = "miner_cycle"
+def generate_full_traces() -> None:
+    global instance
+    instance = _connect()
+    # get execution dir dynamically
+    execution_dir = (
+        os.path.dirname(os.path.realpath(__file__)) + "/blueprints/electricity/"
+    )
+    output_dir = os.path.dirname(os.path.realpath(__file__)) + "/full/electricity/"
+    # filename = "miner_cycle"
 
-files = os.listdir(execution_dir)
-# generate if python file doesn't exist
-for file in files:
-    filename = file.replace(".json", "").replace(".py", "")
-    if not os.path.exists(output_dir + filename + ".py") and os.path.exists(
-        execution_dir + filename + ".json"
-    ):
-        with open(execution_dir + filename + ".json", "r") as f:
-            blueprint_json = f.read()
-            inventory = get_inventory(blueprint_json)
-            instance.set_inventory(inventory)
-            # instance.add_command(_create_more_ore(Position(x=0, y=0), 30))
-            instance.execute_transaction()
-            instance.move_to(Position(x=0, y=0))
-            trace = None
-            try:
-                trace = generate_trace(blueprint_json)
+    files = os.listdir(execution_dir)
+    # generate if python file doesn't exist
+    for file in files:
+        filename = file.replace(".json", "").replace(".py", "")
+        if not os.path.exists(output_dir + filename + ".py") and os.path.exists(
+            execution_dir + filename + ".json"
+        ):
+            with open(execution_dir + filename + ".json", "r") as f:
+                blueprint_json = f.read()
+                inventory = get_inventory(blueprint_json)
+                instance.set_inventory(inventory)
+                # instance.add_command(_create_more_ore(Position(x=0, y=0), 30))
+                instance.execute_transaction()
+                instance.move_to(Position(x=0, y=0))
+                trace = None
+                try:
+                    trace = generate_trace(blueprint_json)
 
-                score, goal, result = instance.eval_with_error(
-                    trace.replace("game.", ""), timeout=60
-                )
-                if "error" in result:
-                    raise Exception(result["error"])
-
-                game_entities = instance.get_entities()
-                verify_placement(game_entities, blueprint_json)
-
-                # Write the code to a python file of the same name
-                with open(output_dir + filename.split(".json")[0] + ".py", "w") as f1:
-                    f1.write(trace)
-
-            except Exception as e:
-                print(e)
-                print("Error in blueprint")
-
-                # Load template string from file
-                with open(
-                    os.path.dirname(os.path.realpath(__file__))
-                    + "/test_template.jinja2",
-                    "r",
-                ) as f:
-                    template_str = f.read()
-                    # Create template object
-                    template = Template(template_str)
-
-                    # Render the template
-                    rendered = template.render(
-                        inventory=inventory,
-                        test_name=filename.replace(" ", "_"),
-                        test_content=trace,
+                    score, goal, result = instance.eval_with_error(
+                        trace.replace("game.", ""), timeout=60
                     )
+                    if "error" in result:
+                        raise Exception(result["error"])
 
-                    # Write to file
-                    with open(output_dir + "test_" + filename + "_error.py", "w") as f:
-                        f.write(rendered)
+                    game_entities = instance.get_entities()
+                    verify_placement(game_entities, blueprint_json)
+
+                    # Write the code to a python file of the same name
+                    with open(
+                        output_dir + filename.split(".json")[0] + ".py", "w"
+                    ) as f1:
+                        f1.write(trace)
+
+                except Exception as e:
+                    print(e)
+                    print("Error in blueprint")
+
+                    # Load template string from file
+                    with open(
+                        os.path.dirname(os.path.realpath(__file__))
+                        + "/test_template.jinja2",
+                        "r",
+                    ) as f:
+                        template_str = f.read()
+                        # Create template object
+                        template = Template(template_str)
+
+                        # Render the template
+                        rendered = template.render(
+                            inventory=inventory,
+                            test_name=filename.replace(" ", "_"),
+                            test_content=trace,
+                        )
+
+                        # Write to file
+                        with open(
+                            output_dir + "test_" + filename + "_error.py", "w"
+                        ) as f:
+                            f.write(rendered)
+
+
+if __name__ == "__main__":
+    generate_full_traces()

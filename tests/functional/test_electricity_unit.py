@@ -41,21 +41,20 @@ def test_create_offshore_pump_to_steam_engine(game):
     water_location = game.nearest(Resource.Water)
     game.move_to(water_location)
 
-    offshore_pump = game.place_entity(Prototype.OffshorePump, position=water_location)
-    # Get offshore pump direction
-    direction = offshore_pump.direction
+    offshore_pump = game.place_offshore_pump(water_location)
+    output_direction = Direction.opposite(offshore_pump.direction)
 
-    # place the boiler next to the offshore pump
+    # place the boiler next to the offshore pump output
     boiler = game.place_entity_next_to(
         Prototype.Boiler,
         reference_position=offshore_pump.position,
-        direction=direction,
+        direction=output_direction,
         spacing=2,
     )
-    assert boiler.direction.value == direction.value
+    assert boiler.direction.value == output_direction.value
 
     # rotate the boiler to face the offshore pump
-    boiler = game.rotate_entity(boiler, Direction.next_clockwise(direction))
+    boiler = game.rotate_entity(boiler, Direction.next_clockwise(output_direction))
 
     # insert coal into the boiler
     game.insert_item(Prototype.Coal, boiler, quantity=5)
@@ -246,11 +245,7 @@ def test_build_iron_gear_factory_from_scratch(game):
 
     # place the offshore pump at nearest water source
     game.move_to(game.nearest(Resource.Water))
-    offshore_pump = game.place_entity(
-        Prototype.OffshorePump,
-        position=game.nearest(Resource.Water),
-        direction=Direction.LEFT,
-    )
+    offshore_pump = game.place_offshore_pump(game.nearest(Resource.Water))
 
     # craft a boiler
     recipe = game.get_prototype_recipe(Prototype.Boiler)
