@@ -82,10 +82,7 @@ class EntitySpritesheetExtractor:
         """Load a basis file, transcoding if necessary"""
         # Check cache first
         cache_key = (
-            str(basis_path)
-            .replace("/", "_")
-            .replace("\\", "_")
-            .removesuffix(".basis")
+            str(basis_path).replace("/", "_").replace("\\", "_").removesuffix(".basis")
         )
         cached_png = self.cache_dir / f"{cache_key}.png"
 

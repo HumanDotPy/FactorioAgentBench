@@ -67,10 +67,7 @@ def test_elo_orders_models_by_shared_task_performance():
 
     rows = {row["model_key"]: row for row in ladder["ladder"]}
     assert ladder["game_count"] == 3
-    assert (
-        rows["openrouter/strong-model"]["elo"]
-        > rows["openrouter/weak-model"]["elo"]
-    )
+    assert rows["openrouter/strong-model"]["elo"] > rows["openrouter/weak-model"]["elo"]
     assert rows["openrouter/strong-model"]["success_rate"] == pytest.approx(
         2 / 3, abs=1e-3
     )

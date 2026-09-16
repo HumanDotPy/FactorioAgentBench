@@ -267,9 +267,7 @@ def _resolve_api_key(provider: str) -> str:
             or "local-no-key"
         )
     return (
-        os.getenv("DEEPSEEK_API_KEY")
-        or os.getenv("OPENAI_API_KEY")
-        or "local-no-key"
+        os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY") or "local-no-key"
     )
 
 

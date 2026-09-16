@@ -257,9 +257,10 @@ async def test_task_lifecycle_persists_verification_and_releases(monkeypatch):
     assert trace.info["factorio_privileged_teacher"]["task_id"] == (
         "iron_plate_throughput"
     )
-    assert trace.info["factorio_privileged_transitions"][0]["comparison"][
-        "verdict"
-    ] == "dominates"
+    assert (
+        trace.info["factorio_privileged_transitions"][0]["comparison"]["verdict"]
+        == "dominates"
+    )
     assert await task.factorio_reward(trace) == 1.25
     metrics = await task.factorio_metrics(trace)
     assert metrics["factorio_success"] == 1.0

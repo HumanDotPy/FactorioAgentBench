@@ -88,21 +88,16 @@ for i in range(12):
             self.assertIn("perturbation_applied", kinds)
 
             applied = [
-                event
-                for event in result.events
-                if event.kind == "perturbation_applied"
+                event for event in result.events if event.kind == "perturbation_applied"
             ]
             by_id = {
-                event.payload["perturbation_id"]: event.payload
-                for event in applied
+                event.payload["perturbation_id"]: event.payload for event in applied
             }
             self.assertIn("dis-001-belt", by_id)
             belt_payload = by_id["dis-001-belt"]
             self.assertEqual(belt_payload["status"], "applied")
             belt_destroyed = (
-                belt_payload["result"].get("destroyed", {}).get(
-                    "transport-belt", 0
-                )
+                belt_payload["result"].get("destroyed", {}).get("transport-belt", 0)
             )
             self.assertGreaterEqual(belt_destroyed, 1)
             # The destruction shock knows which product network it hit.

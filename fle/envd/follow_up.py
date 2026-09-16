@@ -22,10 +22,16 @@ from fle.envd.models import (
 
 
 def _accepted(pool: Iterable[ContractCandidate]) -> list[ContractCandidate]:
-    return [candidate for candidate in pool if candidate.accepted and candidate.features is not None]
+    return [
+        candidate
+        for candidate in pool
+        if candidate.accepted and candidate.features is not None
+    ]
 
 
-def _same_product(candidates: Iterable[ContractCandidate], product: str) -> list[ContractCandidate]:
+def _same_product(
+    candidates: Iterable[ContractCandidate], product: str
+) -> list[ContractCandidate]:
     return [candidate for candidate in candidates if candidate.item_name == product]
 
 
@@ -52,7 +58,9 @@ def _path_products(product: str, catalog: ProductCatalog) -> set[str]:
     return result
 
 
-def _closest(candidates: Iterable[ContractCandidate], target_quantity: float) -> ContractCandidate | None:
+def _closest(
+    candidates: Iterable[ContractCandidate], target_quantity: float
+) -> ContractCandidate | None:
     values = list(candidates)
     if not values:
         return None
@@ -89,13 +97,17 @@ def choose_follow_up_candidate(
     status = previous_outcome.status
     previous_quantity = previous_spec.quantity
     rng = random.Random(selection_seed)
-    is_frontier = previous_spec.mixture_class == "frontier" or "frontier" in previous_spec.template_id
+    is_frontier = (
+        previous_spec.mixture_class == "frontier"
+        or "frontier" in previous_spec.template_id
+    )
 
     if status == "fulfilled":
         pressure = [
             candidate
             for candidate in _same_product(candidates, previous_product)
-            if candidate.quantity > previous_quantity or candidate.deadline_ticks < previous_spec.deadline_ticks
+            if candidate.quantity > previous_quantity
+            or candidate.deadline_ticks < previous_spec.deadline_ticks
         ]
         selected = max(
             pressure,
@@ -104,7 +116,11 @@ def choose_follow_up_candidate(
         )
         reason = "fulfilled_pressure"
         if selected is None:
-            frontier = [candidate for candidate in candidates if candidate.mixture_class == "frontier"]
+            frontier = [
+                candidate
+                for candidate in candidates
+                if candidate.mixture_class == "frontier"
+            ]
             frontier = frontier or candidates
             nearest_distance = min(
                 (
@@ -128,7 +144,10 @@ def choose_follow_up_candidate(
                 key=lambda candidate: candidate.effective_difficulty or 0.0,
             )
             reason = "fulfilled_frontier"
-        stretch = bool(selected.features and selected.features.recipe_depth > previous_spec.features.recipe_depth + 1)
+        stretch = bool(
+            selected.features
+            and selected.features.recipe_depth > previous_spec.features.recipe_depth + 1
+        )
         if stretch and rng.random() >= max(min(stretch_probability, 1.0), 0.0):
             # Keep deterministic pressure when a remote stretch draw is not
             # selected; this is still a harder order on the same direction.
@@ -143,12 +162,17 @@ def choose_follow_up_candidate(
             selected_template_id=selected.template_id,
             target_path=tuple(sorted(_path_products(selected.item_name, catalog))),
             stretch=stretch,
-            evidence={"previous_status": status, "previous_quantity": previous_quantity},
+            evidence={
+                "previous_status": status,
+                "previous_quantity": previous_quantity,
+            },
         )
 
     if status == "partial" and previous_outcome.delivered_quantity > 0:
         delivered = previous_outcome.delivered_quantity
-        selected = _closest(_same_product(candidates, previous_product), delivered * 1.25)
+        selected = _closest(
+            _same_product(candidates, previous_product), delivered * 1.25
+        )
         if selected is None:
             path_products = _path_products(previous_product, catalog)
             selected = _closest(
@@ -175,14 +199,26 @@ def choose_follow_up_candidate(
             },
         )
 
-    if is_frontier and capability_delta is not None and capability_delta.meaningful_progress:
+    if (
+        is_frontier
+        and capability_delta is not None
+        and capability_delta.meaningful_progress
+    ):
         same = _same_product(candidates, previous_product)
-        selected = _closest(same, max(previous_outcome.delivered_quantity, previous_quantity * 0.75))
+        selected = _closest(
+            same, max(previous_outcome.delivered_quantity, previous_quantity * 0.75)
+        )
         reason = "frontier_progress_repeat"
         if selected is None:
             path_products = _path_products(previous_product, catalog)
-            nearby = [candidate for candidate in candidates if candidate.item_name in path_products]
-            selected = _closest(nearby, max(previous_outcome.delivered_quantity, 1) * 1.25)
+            nearby = [
+                candidate
+                for candidate in candidates
+                if candidate.item_name in path_products
+            ]
+            selected = _closest(
+                nearby, max(previous_outcome.delivered_quantity, 1) * 1.25
+            )
             reason = "frontier_progress_nearby"
         if selected is not None:
             return selected, CustomerFollowUp(
@@ -204,15 +240,22 @@ def choose_follow_up_candidate(
     # prerequisite.  If the sampled pool does not contain one, a smaller retry
     # is less dangerous than selecting a new unrelated frontier.
     prerequisites = _prerequisite_products(previous_product, catalog)
-    nearby = [candidate for candidate in candidates if candidate.item_name in prerequisites]
+    nearby = [
+        candidate for candidate in candidates if candidate.item_name in prerequisites
+    ]
     selected = _closest(nearby, max(previous_outcome.delivered_quantity, 1) * 1.25)
     if selected is None:
         same = [
             candidate
             for candidate in _same_product(candidates, previous_product)
-            if candidate.quantity < previous_quantity or candidate.deadline_ticks > previous_spec.deadline_ticks
+            if candidate.quantity < previous_quantity
+            or candidate.deadline_ticks > previous_spec.deadline_ticks
         ]
-        selected = min(same, key=lambda candidate: (candidate.quantity, -candidate.deadline_ticks), default=None)
+        selected = min(
+            same,
+            key=lambda candidate: (candidate.quantity, -candidate.deadline_ticks),
+            default=None,
+        )
     if selected is None:
         return None, None
     return selected, CustomerFollowUp(
@@ -224,7 +267,9 @@ def choose_follow_up_candidate(
         target_path=tuple(sorted(_path_products(selected.item_name, catalog))),
         evidence={
             "previous_status": status,
-            "capability_progress": bool(capability_delta and capability_delta.meaningful_progress),
+            "capability_progress": bool(
+                capability_delta and capability_delta.meaningful_progress
+            ),
             "prerequisites": sorted(prerequisites),
         },
     )

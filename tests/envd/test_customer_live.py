@@ -76,9 +76,7 @@ print('delivered')
 
             after = worker.observe("lease-live")
             self.assertEqual(len(after.contracts), 1)
-            self.assertEqual(
-                after.contracts[0].fulfilled.get("iron-plate"), 50.0
-            )
+            self.assertEqual(after.contracts[0].fulfilled.get("iron-plate"), 50.0)
 
             snapshot = worker.finalize("lease-live", task, [result.event])
             self.assertTrue(snapshot.success, msg=str(snapshot.metrics)[:2000])
