@@ -19,7 +19,7 @@ from fle.envd.models import FactorioTaskSpec, WireModel
 from fle.envd.task_builder import build_task_spec
 from fle.eval.tasks.task_definitions.task_registry import list_tasks_by_category
 
-BENCHMARK_VERSION = "0.2.0-dev"
+BENCHMARK_VERSION = "0.3.0-dev"
 
 BenchmarkStatus = Literal["ready", "calibration_required", "spec_only", "planned"]
 BenchmarkHorizon = Literal["short", "medium", "long", "persistent"]

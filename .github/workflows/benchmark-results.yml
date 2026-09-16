@@ -18,6 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@v5
@@ -31,15 +33,34 @@ jobs:
 
       - name: Validate submitted run records
         shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
         run: |
           shopt -s nullglob
-          results=(benchmark/results/*.json)
+          if [[ -n "$PR_BASE_SHA" ]]; then
+            changed_results="$(git diff --name-only --diff-filter=AMCR "$PR_BASE_SHA" "$GITHUB_SHA" -- 'benchmark/results/*.json')"
+            if [[ -n "$changed_results" ]]; then
+              mapfile -t results <<< "$changed_results"
+            else
+              results=()
+            fi
+          else
+            results=(benchmark/results/*.json)
+          fi
+          current_version="$(uv run python -c 'from fle.envd.benchmark import BENCHMARK_VERSION; print(BENCHMARK_VERSION)')"
           validated=0
           for result in "${results[@]}"; do
             if [[ "$result" == *.summary.json ]]; then
               continue
             fi
+            if [[ -z "$PR_BASE_SHA" ]]; then
+              result_version="$(uv run python -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("benchmark_version", ""))' "$result")"
+              if [[ "$result_version" != "$current_version" ]]; then
+                echo "Skipping historical result $result (benchmark version $result_version)."
+                continue
+              fi
+            fi
             uv run fle-benchmark-results validate "$result"
             validated=$((validated + 1))
           done
-          echo "Validated $validated benchmark run record(s)."
+          echo "Validated $validated submitted benchmark run record(s) for $current_version."

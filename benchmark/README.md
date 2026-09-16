@@ -20,8 +20,13 @@ number without the corresponding engine trace is not a complete submission.
 
 ```bash
 fle-benchmark-results manifest \
-  benchmark/manifests/benchmark-0.2.0-dev.json
+  benchmark/manifests/benchmark-0.3.0-dev.json
 ```
+
+The current development catalog targets Factorio 2.0.77. The v0.2.0-dev
+manifest and run records remain as historical Factorio 2.0.73 artifacts; no
+baseline has been published for v0.3.0-dev yet. See
+[`docs/benchmark-v0.3.md`](../docs/benchmark-v0.3.md).
 
 ## Run a baseline
 
