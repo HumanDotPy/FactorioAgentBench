@@ -33,7 +33,13 @@ def _side(origin, point, tolerance=1.0):
 
 def test_live_inserter_drop_side_and_rotation(configure_game):
     game = configure_game(
-        inventory={"burner-inserter": 40, "fast-inserter": 40, "inserter": 40, "long-handed-inserter": 40, "bulk-inserter": 40}
+        inventory={
+            "burner-inserter": 40,
+            "fast-inserter": 40,
+            "inserter": 40,
+            "long-handed-inserter": 40,
+            "bulk-inserter": 40,
+        }
     )
     origin = Position(x=200, y=200)
     game.move_to(origin)
@@ -42,7 +48,9 @@ def test_live_inserter_drop_side_and_rotation(configure_game):
         for direction in CARDINALS:
             position = Position(x=origin.x + index * 3, y=origin.y)
             game.move_to(position)
-            entity = game.place_entity(prototype, direction=direction, position=position)
+            entity = game.place_entity(
+                prototype, direction=direction, position=position
+            )
             assert _side(entity.position, entity.drop_position) == direction, (
                 prototype,
                 direction,
@@ -58,7 +66,11 @@ def test_live_inserter_drop_side_and_rotation(configure_game):
 
 def test_live_belt_flow_matches_direction(configure_game):
     game = configure_game(
-        inventory={"transport-belt": 40, "fast-transport-belt": 40, "express-transport-belt": 40}
+        inventory={
+            "transport-belt": 40,
+            "fast-transport-belt": 40,
+            "express-transport-belt": 40,
+        }
     )
     origin = Position(x=200, y=220)
     game.move_to(origin)

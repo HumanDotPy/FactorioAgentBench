@@ -17,7 +17,9 @@ class BeltLineReport(Tool):
     def load(self):
         self.lua_script_manager.load_tool_into_game(f"place_path{os.sep}{self.name}")
 
-    def __call__(self, position: Position, max_tiles: int = 128, gap_probe_tiles: int = 4):
+    def __call__(
+        self, position: Position, max_tiles: int = 128, gap_probe_tiles: int = 4
+    ):
         if not isinstance(position, Position):
             raise ValueError("position must be a Position")
         if isinstance(max_tiles, bool) or not 1 <= int(max_tiles) <= 256:
@@ -44,7 +46,10 @@ class BeltLineReport(Tool):
         if not tiles:
             return fallback
         position = tiles[-1].get("position") or {}
-        return Position(x=float(position.get("x", fallback.x)), y=float(position.get("y", fallback.y)))
+        return Position(
+            x=float(position.get("x", fallback.x)),
+            y=float(position.get("y", fallback.y)),
+        )
 
     def _analyze(self, downstream, probe_tiles):
         tiles = downstream.get("tiles") or []
@@ -99,7 +104,11 @@ class BeltLineReport(Tool):
                 }
             )
         gaps = []
-        if tiles and probe_tiles and reason in {"end_of_line", "blocked_by_reversed_belt"}:
+        if (
+            tiles
+            and probe_tiles
+            and reason in {"end_of_line", "blocked_by_reversed_belt"}
+        ):
             gaps = self._probe_gaps(tiles[-1], blocker, probe_tiles)
         status = "clean" if not gaps and not misdirected else "issues"
         return {

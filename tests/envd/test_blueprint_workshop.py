@@ -99,7 +99,9 @@ def test_book_planner_and_book_entries_are_selectable_by_path():
     with pytest.raises(BlueprintInvalid):
         select_blueprint(book)
     with pytest.raises(BlueprintInvalid):
-        select_blueprint({"blueprint_book": {"blueprints": [{"index": 1, "x": 1}]}}, [1])
+        select_blueprint(
+            {"blueprint_book": {"blueprints": [{"index": 1, "x": 1}]}}, [1]
+        )
 
 
 def test_ephemeral_library_checkpoint_is_exact_and_scope_isolated():
@@ -174,22 +176,33 @@ def test_failed_reference_cleanup_still_releases_runtime(task_spec):
 def test_mcp_reference_mutation_updates_resume_pointer(monkeypatch, tmp_path):
     import json
     from scripts import factorio_codex_mcp as mcp
+
     monkeypatch.setenv("LEASE_ID", "owner")
     monkeypatch.setenv("FACTORIO_RESUME_POINTER_FILE", str(tmp_path / "resume.json"))
     monkeypatch.setenv("FACTORIO_CHECKPOINT_EVERY", "1")
     monkeypatch.setattr(mcp, "_terminal_finalization_only", lambda: False)
     calls = []
+
     def request(method, path, payload=None):
         calls.append((method, path, payload))
         if path.endswith("/checkpoints"):
             return {"checkpoint_id": "lifecycle:workshop:ep1"}
         return {"world_id": "creative", "result": 42}
+
     monkeypatch.setattr(mcp, "_envd", request)
-    result, failed = mcp._call_tool_impl("factorio_reference_world",
-        {"action": "execute", "arguments": {"code": "return 42"}}, request_id="logical")
+    result, failed = mcp._call_tool_impl(
+        "factorio_reference_world",
+        {"action": "execute", "arguments": {"code": "return 42"}},
+        request_id="logical",
+    )
     assert not failed
     assert json.loads(result)["result"] == 42
     assert calls[0][1] == "/v1/leases/owner/reference-world"
     assert calls[0][2]["request_id"]
-    assert json.loads((tmp_path / "resume.json").read_text())["checkpoint"]["checkpoint_id"] == "lifecycle:workshop:ep1"
+    assert (
+        json.loads((tmp_path / "resume.json").read_text())["checkpoint"][
+            "checkpoint_id"
+        ]
+        == "lifecycle:workshop:ep1"
+    )
     assert mcp._tool_route("factorio_reference_world")["route"] == "exclusive_mutation"

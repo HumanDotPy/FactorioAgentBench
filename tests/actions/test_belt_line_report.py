@@ -91,7 +91,10 @@ def test_flow_reversal_is_reported_as_mis_directed():
             }
         return {
             "tiles": [belt(0, "east"), belt(1, "west")],
-            "blocker": {"position": {"x": 2, "y": 0}, "reason": "blocked_by_reversed_belt"},
+            "blocker": {
+                "position": {"x": 2, "y": 0},
+                "reason": "blocked_by_reversed_belt",
+            },
         }
 
     tool = make_tool(trace)

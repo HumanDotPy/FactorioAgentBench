@@ -89,5 +89,7 @@ def select_blueprint(document: dict, book_path: list[int] | None = None) -> dict
             "deconstruction planner"
         )
     if "blueprint_book" in value:
-        raise BlueprintInvalid("Select a nested entry using book_path before using a book")
+        raise BlueprintInvalid(
+            "Select a nested entry using book_path before using a book"
+        )
     return value

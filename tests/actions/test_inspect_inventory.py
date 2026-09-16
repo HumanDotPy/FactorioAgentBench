@@ -7,7 +7,10 @@ import pytest
 
 from fle.env.entities import Direction, Furnace, Position
 from fle.env.game_types import Prototype, RecipeName
-from fle.env.tools.agent.inspect_inventory.client import CrafterInventory, InspectInventory
+from fle.env.tools.agent.inspect_inventory.client import (
+    CrafterInventory,
+    InspectInventory,
+)
 
 
 @pytest.fixture()

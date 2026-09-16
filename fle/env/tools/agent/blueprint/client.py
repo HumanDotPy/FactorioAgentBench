@@ -178,7 +178,9 @@ class Blueprint(Tool):
     def import_blueprint(self, name: str, content: str | dict):
         """Create/replace a library item from an exchange string or native JSON."""
         try:
-            exchange = encode_exchange(content) if isinstance(content, dict) else content
+            exchange = (
+                encode_exchange(content) if isinstance(content, dict) else content
+            )
             document = decode_exchange(exchange)
             result, _ = self.execute(self.player_index, "validate", exchange)
             if not isinstance(result, dict) or result.get("error"):

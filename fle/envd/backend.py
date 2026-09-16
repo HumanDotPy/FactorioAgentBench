@@ -3032,10 +3032,14 @@ class FLEWorker(FactorioWorker):
             "detail": [],
         }
         stalls = response.get("stalls") if isinstance(response, dict) else None
-        ground_items = response.get("ground_items") if isinstance(response, dict) else None
+        ground_items = (
+            response.get("ground_items") if isinstance(response, dict) else None
+        )
         ground_item_positions: list[dict[str, Any]] = []
         raw_positions = (
-            response.get("ground_item_positions") if isinstance(response, dict) else None
+            response.get("ground_item_positions")
+            if isinstance(response, dict)
+            else None
         )
         if isinstance(raw_positions, (list, tuple)):
             for entry in raw_positions[:32]:
@@ -3782,9 +3786,7 @@ class FLEWorker(FactorioWorker):
                 "returned": len(result),
                 "total": len(values),
                 "truncated": len(values) > limit,
-                "effective_radius": (
-                    radius if area else ENTITY_DETAILS_QUERY_RADIUS
-                ),
+                "effective_radius": (radius if area else ENTITY_DETAILS_QUERY_RADIUS),
                 "ground_items": ground_items,
                 "ground_item_count": ground_item_count,
             }

@@ -27,9 +27,7 @@ class RotateEntities(Tool):
         )
         if not isinstance(response, dict) or response.get("error"):
             message = (
-                response.get("error")
-                if isinstance(response, dict)
-                else str(response)
+                response.get("error") if isinstance(response, dict) else str(response)
             )
             raise RuntimeError(f"Could not rotate entities: {message}")
         response["requested_direction"] = direction.name

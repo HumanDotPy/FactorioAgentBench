@@ -77,8 +77,8 @@ requires_openai_auth = false
 wire_api = "responses"
 
 [mcp_servers.factorio]
-command = "{PYTHON.replace(chr(92), '/')}"
-args = ["{MCP_SERVER.replace(chr(92), '/')}"]
+command = "{PYTHON.replace(chr(92), "/")}"
+args = ["{MCP_SERVER.replace(chr(92), "/")}"]
 env = {{ ENVD_URL = "{envd_url}", LEASE_ID = "{lease_id}" }}
 '''
     codex_home.mkdir(parents=True, exist_ok=True)
@@ -240,9 +240,7 @@ async def run_attempt(
         "contracts_fulfilled": float(
             snapshot.metrics.get("customer_orders_fulfilled", 0.0)
         ),
-        "contracts_total": float(
-            snapshot.metrics.get("customer_orders_total", 0.0)
-        ),
+        "contracts_total": float(snapshot.metrics.get("customer_orders_total", 0.0)),
         "final_inventory": dict(snapshot.privileged_diagnostics.inventory)
         if snapshot.privileged_diagnostics is not None
         else {},
@@ -276,9 +274,7 @@ async def main_async(args: argparse.Namespace) -> None:
         for task_id in task_ids:
             for attempt_index in range(args.attempts):
                 print(f"[codex-bench] {model} :: {task_id} :: attempt {attempt_index}")
-                attempt, detail = await run_attempt(
-                    model, task_id, attempt_index, args
-                )
+                attempt, detail = await run_attempt(model, task_id, attempt_index, args)
                 attempts.append(attempt)
                 details.append(detail)
                 print(
@@ -293,7 +289,8 @@ async def main_async(args: argparse.Namespace) -> None:
             suite="api_microtasks_v1",
             benchmark_split="development",
             started_at=started_at,
-            completed_at=started_at + timedelta(seconds=int(time.time()) - int(started_at.timestamp())),
+            completed_at=started_at
+            + timedelta(seconds=int(time.time()) - int(started_at.timestamp())),
             repository_commit="unknown",
             generation_config={
                 "harness": "codex-cli",
@@ -317,7 +314,9 @@ async def main_async(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--models", required=True, help="comma-separated OpenRouter slugs")
+    parser.add_argument(
+        "--models", required=True, help="comma-separated OpenRouter slugs"
+    )
     parser.add_argument("--task-id", action="append", default=[], dest="task_id")
     parser.add_argument("--attempts", type=int, default=1)
     parser.add_argument("--envd-url", default="http://127.0.0.1:8172")

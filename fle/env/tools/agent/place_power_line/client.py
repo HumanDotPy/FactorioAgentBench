@@ -53,9 +53,7 @@ def _choose_point(anchor: Position, ideal: Position, step: float, even: bool):
             point = _lattice_point(candidate_column, candidate_row, even)
             gap = math.hypot(point.x - anchor.x, point.y - anchor.y)
             candidates.append((gap, point))
-    feasible = [
-        entry for entry in candidates if 1e-9 < entry[0] <= step + 1e-9
-    ]
+    feasible = [entry for entry in candidates if 1e-9 < entry[0] <= step + 1e-9]
     if feasible:
         return max(
             feasible,
@@ -70,9 +68,7 @@ def _choose_point(anchor: Position, ideal: Position, step: float, even: bool):
         return None
     return min(
         forward,
-        key=lambda entry: math.hypot(
-            entry[1].x - ideal.x, entry[1].y - ideal.y
-        ),
+        key=lambda entry: math.hypot(entry[1].x - ideal.x, entry[1].y - ideal.y),
     )[1]
 
 
@@ -270,8 +266,7 @@ class PlacePowerLine(Tool):
         if execute is None:
             return None
         nodes = [
-            {"x": node["position"]["x"], "y": node["position"]["y"]}
-            for node in chain
+            {"x": node["position"]["x"], "y": node["position"]["y"]} for node in chain
         ]
         try:
             response, _ = execute(self.player_index, nodes)

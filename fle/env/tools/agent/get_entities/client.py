@@ -87,11 +87,7 @@ class EntityList(list):
 
     def __repr__(self) -> str:
         base = super().__repr__()
-        if not (
-            self.other_forces
-            or self.characters_skipped
-            or self.skipped
-        ):
+        if not (self.other_forces or self.characters_skipped or self.skipped):
             return base
         return (
             f"{base} [other_forces={self.other_forces}, "
@@ -243,10 +239,7 @@ class GetEntities(Tool):
 
                 if matching_prototype is None:
                     unmatched += 1
-                    if (
-                        "name" in entity_data
-                        and entity_data["name"] != "entity-ghost"
-                    ):
+                    if "name" in entity_data and entity_data["name"] != "entity-ghost":
                         print(
                             f"Warning: No matching Prototype found for {entity_data['name']}"
                         )

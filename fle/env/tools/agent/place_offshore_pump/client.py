@@ -57,6 +57,4 @@ class PlaceOffshorePump(Tool):
         if response.get("error"):
             raise RuntimeError(json.dumps(normalize_spatial(response), sort_keys=True))
         cleaned_response = self.clean_response(response)
-        return metaclass(
-            prototype=name, game=self.connection, **cleaned_response
-        )
+        return metaclass(prototype=name, game=self.connection, **cleaned_response)

@@ -33,12 +33,36 @@ def points(lua, function_name, direction, x=0, y=0):
 @pytest.mark.parametrize(
     "function_name,direction,expected",
     [
-        ("get_chemical_plant_connection_points", 0, [(-1, -2), (-1, 2), (1, -2), (1, 2)]),
-        ("get_chemical_plant_connection_points", 4, [(-2, -1), (-2, 1), (2, -1), (2, 1)]),
-        ("get_chemical_plant_connection_points", 12, [(-2, -1), (-2, 1), (2, -1), (2, 1)]),
-        ("get_refinery_connection_points", 0, [(-2, -3), (-1, 3), (0, -3), (1, 3), (2, -3)]),
-        ("get_refinery_connection_points", 4, [(-3, -1), (-3, 1), (3, -2), (3, 0), (3, 2)]),
-        ("get_refinery_connection_points", 8, [(-2, 3), (-1, -3), (0, 3), (1, -3), (2, 3)]),
+        (
+            "get_chemical_plant_connection_points",
+            0,
+            [(-1, -2), (-1, 2), (1, -2), (1, 2)],
+        ),
+        (
+            "get_chemical_plant_connection_points",
+            4,
+            [(-2, -1), (-2, 1), (2, -1), (2, 1)],
+        ),
+        (
+            "get_chemical_plant_connection_points",
+            12,
+            [(-2, -1), (-2, 1), (2, -1), (2, 1)],
+        ),
+        (
+            "get_refinery_connection_points",
+            0,
+            [(-2, -3), (-1, 3), (0, -3), (1, 3), (2, -3)],
+        ),
+        (
+            "get_refinery_connection_points",
+            4,
+            [(-3, -1), (-3, 1), (3, -2), (3, 0), (3, 2)],
+        ),
+        (
+            "get_refinery_connection_points",
+            8,
+            [(-2, 3), (-1, -3), (0, 3), (1, -3), (2, 3)],
+        ),
         ("get_pumpjack_connection_points", 0, [(1, -2)]),
         ("get_pumpjack_connection_points", 4, [(2, -1)]),
         ("get_pumpjack_connection_points", 8, [(-1, 2)]),

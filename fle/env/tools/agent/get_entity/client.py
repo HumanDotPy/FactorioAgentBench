@@ -105,7 +105,9 @@ class GetEntity(Tool):
         members = cls._group_members(group)
         if members:
             return min(
-                math.hypot(member.position.x - position.x, member.position.y - position.y)
+                math.hypot(
+                    member.position.x - position.x, member.position.y - position.y
+                )
                 for member in members
             )
         return math.hypot(group.position.x - position.x, group.position.y - position.y)

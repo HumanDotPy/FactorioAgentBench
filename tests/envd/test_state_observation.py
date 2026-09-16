@@ -193,9 +193,7 @@ def test_observation_surfaces_stalls_and_ground_items():
     namespace.stalls = {
         "by_status": {"waiting_for_space_in_destination": 2},
         "by_product": {"iron-ore": 2},
-        "by_name": {
-            "electric-mining-drill": {"waiting_for_space_in_destination": 2}
-        },
+        "by_name": {"electric-mining-drill": {"waiting_for_space_in_destination": 2}},
         "buffer_full": 2,
         "detail": [
             {

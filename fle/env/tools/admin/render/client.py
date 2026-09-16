@@ -86,7 +86,11 @@ class Render(Tool):
         if not blueprint:
             # Create renderer with decoded data
             renderer = self.get_renderer_from_map(
-                include_status, radius, compression_level, max_render_radius, position,
+                include_status,
+                radius,
+                compression_level,
+                max_render_radius,
+                position,
                 camera_entities,
             )
         else:
@@ -184,7 +188,8 @@ class Render(Tool):
         if not position:
             position = Position(character_position[0]["x"], character_position[0]["y"])
         ent = (
-            camera_entities if camera_entities is not None
+            camera_entities
+            if camera_entities is not None
             else self.get_entities(position=position, radius=radius)
         )
         if ent:
