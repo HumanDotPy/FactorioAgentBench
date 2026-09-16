@@ -209,5 +209,7 @@ def render_task_prompt(task: FactorioTaskSpec) -> str:
         f"\n\nConstraints:\n{constraint_lines or '- None'}\n\n"
         "Use factorio_observe_factory to inspect the simulation and "
         "factorio_execute_program for one short intervention at a time. "
+        "For this task, use no host/file/network access; interact only through "
+        "the provided Factorio tools. "
         f"{verification}\n\nAction profile reference:\n{ACTION_PROFILE_REFERENCE}"
     )
