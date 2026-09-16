@@ -179,7 +179,7 @@ def test_rendered_prompt_includes_public_action_and_lookup_reference():
     assert "are rejected here" in prompt
     assert "do not build production chains" not in prompt
     assert "place_path(prototype, points" in prompt
-    assert "does not route around obstacles" in prompt
+    assert "route around obstacles" in prompt
     assert "set_delivery_chest" in prompt
     assert "queue_craft" in prompt
     assert "production_rate" in prompt

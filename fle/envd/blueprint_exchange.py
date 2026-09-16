@@ -62,7 +62,11 @@ def encode_exchange(document: dict) -> str:
 
 
 def select_blueprint(document: dict, book_path: list[int] | None = None) -> dict:
-    """Select native (zero-based) book entry indices, including nested books."""
+    """Select native (zero-based) book entry indices, including nested books.
+
+    The selected entry may be a blueprint, a nested book, an upgrade planner or
+    a deconstruction planner; the caller decides which leaf kinds it accepts.
+    """
     value = _document(document)
     for index in book_path or []:
         if not isinstance(index, int) or isinstance(index, bool) or index < 0:
@@ -79,8 +83,11 @@ def select_blueprint(document: dict, book_path: list[int] | None = None) -> dict
         if len(matches) != 1:
             raise BlueprintInvalid(f"Book entry {index} does not exist or is ambiguous")
         value = {key: val for key, val in matches[0].items() if key != "index"}
-    if "blueprint" not in value:
+    if len(KINDS.intersection(value)) != 1:
         raise BlueprintInvalid(
-            "Select a blueprint using book_path before placing a book"
+            "Book entry is not a blueprint, book, upgrade planner, or "
+            "deconstruction planner"
         )
+    if "blueprint_book" in value:
+        raise BlueprintInvalid("Select a nested entry using book_path before using a book")
     return value

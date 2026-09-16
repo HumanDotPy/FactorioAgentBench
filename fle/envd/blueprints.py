@@ -391,7 +391,8 @@ class BlueprintStore:
         Ranking keeps the most-placed blueprints first, then the newest.
         ``keep_newest`` retains that many top-ranked entries regardless of
         usage; ``min_times_placed`` protects anything used at least that
-        many times.
+        many times; ``keep_unused`` protects blueprints that were never
+        placed.
         """
 
         def _rank(record: BlueprintRecord) -> tuple[int, str]:
@@ -438,6 +439,8 @@ class BlueprintStore:
             removed: list[str] = []
             for record in records:
                 if record.name in survivors:
+                    continue
+                if keep_unused and record.times_placed == 0:
                     continue
                 if min_times_placed is not None and (
                     record.times_placed >= min_times_placed

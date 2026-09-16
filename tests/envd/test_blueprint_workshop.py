@@ -79,6 +79,29 @@ def test_nested_book_selection_uses_native_indices():
     assert decode_exchange(encode_exchange(book)) == book
 
 
+def test_book_planner_and_book_entries_are_selectable_by_path():
+    planner = {
+        "deconstruction_planner": {
+            "item": "deconstruction-planner",
+            "version": 562949958467584,
+            "settings": {"trees_and_rocks_only": True},
+            "unknown_future_field": {"keep": True},
+        }
+    }
+    book = {
+        "blueprint_book": {
+            "item": "blueprint-book",
+            "blueprints": [{"index": 0, **DOCUMENT}, {"index": 2, **planner}],
+        }
+    }
+    assert select_blueprint(book, [2]) == planner
+    assert select_blueprint(book, [0]) == DOCUMENT
+    with pytest.raises(BlueprintInvalid):
+        select_blueprint(book)
+    with pytest.raises(BlueprintInvalid):
+        select_blueprint({"blueprint_book": {"blueprints": [{"index": 1, "x": 1}]}}, [1])
+
+
 def test_ephemeral_library_checkpoint_is_exact_and_scope_isolated():
     store = BlueprintStore(None)
     store.save("one", encode_exchange(DOCUMENT), entity_count=1)

@@ -103,9 +103,39 @@ def test_prune_keep_newest(store):
     assert store.count() == 2
 
 
+def test_prune_keep_unused_protects_never_placed(store):
+    store.save("stale-used", CONTENT_A)
+    store.save("fresh-unused", CONTENT_B)
+    store.record_use("stale-used", tick=10)
+    removed = store.prune(min_times_placed=2, keep_unused=True)
+    assert removed == ["stale-used"]
+    assert store.get("fresh-unused").name == "fresh-unused"
+
+
 def test_drop_scope(store):
     store.save("a", CONTENT_A)
     store.save("b", CONTENT_B)
     dropped = store.drop_scope()
     assert dropped == 2
     assert store.count() == 0
+
+
+def test_blueprint_store_construction_failure_is_logged(monkeypatch, caplog):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from fle.envd import backend as backend_module
+
+    namespace = SimpleNamespace()
+    facade = backend_module.FLEWorker.__new__(backend_module.FLEWorker)
+    facade.instance = SimpleNamespace(first_namespace=namespace)
+    monkeypatch.setattr(
+        backend_module,
+        "BlueprintStore",
+        Mock(side_effect=OSError("disk unavailable")),
+    )
+    task = SimpleNamespace(blueprint_scope="gen-1", lineage_id="gen-1")
+    with caplog.at_level("WARNING", logger="fle.envd.backend"):
+        facade._attach_blueprint_store(task)
+    assert namespace._blueprint_store is None
+    assert "Blueprint store unavailable" in caplog.text
