@@ -3,7 +3,7 @@ local patch_renderings = {}
 local function render_box(player_index, surface, box)
     for _, object in ipairs(patch_renderings[player_index] or {}) do
         if object.valid then
-            rendering.destroy(object)
+            object.destroy()
         end
     end
     local left_bottom = {x=box.left_top.x, y=box.right_bottom.y}

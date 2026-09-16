@@ -11,12 +11,15 @@ def server_runtime():
         storage={actions={},agent_characters={}}
         destroyed=0
         rendering={
-            destroy=function(object)
-                assert(object.valid)
-                object.valid=false
-                destroyed=destroyed+1
+            draw_circle=function()
+                local object={valid=true}
+                object.destroy=function()
+                    assert(object.valid)
+                    object.valid=false
+                    destroyed=destroyed+1
+                end
+                return object
             end,
-            draw_circle=function() return {valid=true} end,
         }
         water_tiles={
             {position={x=0,y=0}}, {position={x=1,y=0}},
